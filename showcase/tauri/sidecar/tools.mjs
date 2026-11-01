@@ -29,6 +29,21 @@ function pickTextMatch(matches, find) {
   const q = String(find).trim();
   return (matches ?? []).find((m) => m.match !== 'partial' && m.text.trim().length <= Math.max(40, q.length * 3)) ?? null;
 }
+// An app named in read_window or act_in_app that isn't open: open it (with the open tool's safety check) and wait
+// up to 6 s for its window. True when it's there. Only plain app names, never paths or links.
+async function launchApp(name, hands) {
+  const n = String(name).trim();
+  if (process.platform !== 'darwin' || !n || /[/\\:]/.test(n) || checkOpen(n, HOME).level === BLOCK) return false;
+  // Opened only to act in it: in background mode (the default) it opens behind the user's app, not in front.
+  const r = await run('open', [...(process.env.ROAMIES_BG !== '0' ? ['-g'] : []), '-a', n]);
+  if (r.err && /Unable to find application/i.test(r.stderr)) throw new Error(`There's no app called "${n}" on this Mac (not installed, or it has another name). Don't look for it another way; say so and carry on with the rest.`);
+  if (r.err) return false;
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    if (await hands('locate', `app:${n}`).then((r) => r?.ok !== false && r?.window, () => false)) { await new Promise((r) => setTimeout(r, 300)); return true; }
+  }
+  return false;
+}
 // read_window and act_in_app output: visible controls first, then up to 15 scrolled out of view.
 function controlList(controls, texts = []) {
   const vis = controls.filter((c) => !c.offscreen), off = controls.filter((c) => c.offscreen).slice(0, 15);
@@ -74,7 +89,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
   }
   // The control that read_window listed at this id, wherever it is now.
   async function liveControls(spec) {
-    const fresh = await hands('ui', spec);
+    // Only the controls: the page's text isn't needed to re-find ids.
+    const fresh = await hands('ui', spec, 'controls');
     const problem = readProblem(lastRead, fresh.window.id, turn);
     if (problem) throw new Error(problem);
     return (id) => {
@@ -111,17 +127,20 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     if (process.platform === 'darwin') {
       const t = String(target || 'screen').trim();
       const spec = t === 'screen' || t === 'front' || t.startsWith('window:') ? t : `app:${t}`;
-      // Find the window first so the camera animation can frame the real thing (screen points), then shoot.
+      // Find the window first so the camera animation can frame the real thing (screen points), then shoot while it
+      // flies there (the shot is of that window alone, so the animation isn't in it); the result waits for the animation.
+      let shown = Promise.resolve();
       if (spec !== 'screen' && ctx?.toolCallId) {
         const at = await hands('locate', spec).catch(() => null);
         if (at?.window) {
           ui({ kind: 'agent', e: { type: 'tool_target', id: ctx.toolCallId, window: at.window } });
-          await new Promise((r) => setTimeout(r, 250));
+          shown = new Promise((r) => setTimeout(r, 250));
         }
       }
-      const res = await hands('capture', file, spec);
-      // 1568 px is Claude's own cap; a bigger image gets shrunk again and its coordinates drift.
-      const size = await fitImage(file);
+      // 1568 px is Claude's own cap; a bigger image gets shrunk again and its coordinates drift. The helper shrinks it
+      // itself and says the final size; an older helper doesn't, so sips does it here.
+      const [res] = await Promise.all([hands('capture', file, spec, '1568'), shown]);
+      const size = Array.isArray(res.pixels) && res.pixels.length === 2 ? res.pixels : await fitImage(file);
       const bounds = res.window?.bounds ?? res.bounds;
       lastShot = size && bounds ? { ...shotMap(bounds, ...size), bounds, win: res.window?.id ?? null, turn } : null;
       const what = res.window ? `the ${res.window.app} window${res.window.title ? ` "${res.window.title}"` : ''}` : 'the whole screen';
@@ -176,7 +195,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         parameters: z.object({ target: z.string().optional() }),
         execute: async ({ target = 'front' }) => {
           const t = String(target || 'front');
-          const [res, all] = await Promise.all([hands('ui', t === 'front' ? 'front' : `app:${t}`), hands('windows').catch(() => null)]);
+          const read = () => Promise.all([hands('ui', t === 'front' ? 'front' : `app:${t}`), hands('windows').catch(() => null)]);
+          const [res, all] = await read().catch(async (err) => {
+            if (t === 'front' || !/No matching window/.test(String(err?.message ?? err)) || !(await launchApp(t, hands))) throw err;
+            return read();
+          });
           lastRead = { win: res.window.id, app: res.window.app, controls: res.controls, turn };
           const others = (all?.windows ?? []).filter((w) => w.app === res.window.app && w.id !== res.window.id).length;
           const head = `${res.window.app}${res.window.title ? ` — ${res.window.title}` : ''}${others ? ` (front window; ${res.window.app} has ${others} more, which point_at with text also searches)` : ''}`;
@@ -238,16 +261,20 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         parameters: z.object({
           target: z.string().optional(),
           steps: z.array(z.object({
-            do: z.enum(['click_text', 'fill', 'choose', 'scroll', 'set', 'focus', 'click', 'type', 'key', 'click_at', 'wait']),
+            // read_window and take_screenshot aren't steps (the result already shows the window), but models put them
+            // in anyway; they're dropped instead of failing the whole call.
+            do: z.enum(['click_text', 'fill', 'choose', 'scroll', 'set', 'focus', 'click', 'type', 'key', 'click_at', 'wait', 'read_window', 'take_screenshot', 'screenshot']),
             id: z.number().int().optional(), field: z.string().optional(), text: z.string().optional(), option: z.string().optional(), near: z.string().optional(),
             key: z.string().optional(), direction: z.enum(['down', 'up', 'left', 'right']).optional(), amount: z.number().int().optional(), to_end: z.boolean().optional(),
             x: z.number().optional(), y: z.number().optional(), seconds: z.number().optional(),
           })).min(1).max(40),
         }),
         executionMode: 'sequential',
-        execute: async ({ target = 'front', steps }, ctx) => {
+        execute: async ({ target = 'front', steps: given }, ctx) => {
           if (!allowActions()) throw new Error(actionsOff);
           const asked = String(target || 'front');
+          const steps = given.filter((s) => !['read_window', 'take_screenshot', 'screenshot'].includes(s.do));
+          if (!steps.length) throw new Error('Those steps only read the window. Use read_window or take_screenshot for that.');
           // Stay on the exact window read for this request: an app can have several, and keystrokes must land in this one.
           const sameApp = lastRead?.turn === turn && (asked === 'front' || (lastRead.app ?? '').toLowerCase().includes(asked.toLowerCase()) || (asked.toLowerCase() === 'browser'));
           const t = sameApp ? `window:${lastRead.win}` : asked;
@@ -278,6 +305,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
           try {
             try { res = await hands('act', JSON.stringify(plan)); }
             catch (err) {
+              // The app isn't open yet: open it (the same check as the open tool) and go on, instead of a round trip.
+              if (plan.app && /No matching window/.test(String(err?.message ?? err)) && await launchApp(plan.app, hands)) { res = await hands('act', JSON.stringify(plan)); return finish(res); }
               // The window read earlier closed (a date picker or popup): use the app's front window instead.
               if (!plan.window || !/No matching window/.test(String(err?.message ?? err))) throw err;
               delete plan.window;
@@ -285,9 +314,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
               res = await hands('act', JSON.stringify(plan));
             }
           } finally { if (lastShot && mapped.some((s) => s.do !== 'wait')) lastShot.used = true; }
-          if (!res.controls) return `In ${res.window.app}: ${res.done.join(', ')}.`;
-          lastRead = { win: res.window.id, app: res.window.app, controls: res.controls, turn };
-          return `In ${res.window.app}: ${res.done.join(', ')}.\nNow showing: ${res.window.title || res.window.app}\n${controlList(res.controls, res.texts)}`;
+          return finish(res);
+          function finish(res) {
+            if (!res.controls) return `In ${res.window.app}: ${res.done.join(', ')}.`;
+            lastRead = { win: res.window.id, app: res.window.app, controls: res.controls, turn };
+            return `In ${res.window.app}: ${res.done.join(', ')}.\nNow showing: ${res.window.title || res.window.app}\n${controlList(res.controls, res.texts)}`;
+          }
         },
       },
     ] : []),
@@ -316,7 +348,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       },
     },
     {
-      name: 'write_file', description: 'Create or overwrite a text file with the given content (missing folders are made). Use this, not run_command, to create or change files: a new file needs no yes from the user; overwriting asks them.',
+      name: 'write_file', description: 'Create or overwrite a text file with the given content (missing folders are made). Use this, not run_command, to create or change files: a new file needs no yes from the user; overwriting asks them. Several new files: one write_file call each, all in the same turn (a shell loop that makes files has to ask).',
       parameters: z.object({ path: z.string(), content: z.string() }), executionMode: 'sequential',
       execute: async ({ path: p, content }, ctx) => {
         if (!allowActions()) throw new Error(actionsOff);
@@ -330,7 +362,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       },
     },
     {
-      name: 'run_command', description: "Run a shell command in the user's home folder and return its output. Use it for what the other tools can't do (counting, sorting, wc, mdfind, git, moving or copying); to open a file, folder, app or link use the open tool, which needs no yes. Prefer write_file for creating or editing files; never edit with sed -i or tee. A > redirect into a new file is fine; overwriting an existing file, and commands that change things, make the user confirm first, which is slow.",
+      name: 'run_command', description: "Run a shell command in the user's home folder and return its output. Use it for what the other tools can't do (counting, sorting, wc, mdfind, git, moving or copying); to open a file, folder, app or link use the open tool, which needs no yes. Prefer write_file for creating or editing files (several files: one write_file call each, in the same turn); never edit with sed -i or tee, and never make files in a shell loop (for/while), which always needs a yes. A > redirect into a new file is fine; overwriting an existing file, and commands that change things, make the user confirm first, which is slow.",
       parameters: z.object({ command: z.string() }), executionMode: 'sequential', timeoutMs: 190_000, // up to 2 min to answer, then the 60 s run
       execute: async ({ command }, ctx) => {
         if (!allowActions()) throw new Error(actionsOff);
@@ -370,15 +402,21 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       name: 'open', description: 'Open a website, a file or folder, or a Mac app by name (e.g. "Safari", "https://skool.com", "~/Documents"). Links open in the default browser; set app to open one in a particular browser or app (e.g. app "Safari" when the user says "in Safari").',
       parameters: z.object({ target: z.string(), app: z.string().optional() }),
       execute: async ({ target, app }) => {
-        const t = String(target).trim();
+        let t = String(target).trim();
+        // A bare web address ("example.com", "www.bbc.co.uk/news") is a link, not an app name: it used to fail as
+        // "Unable to find application named example.com" and cost a retry. App bundles ("Notes.app") stay apps.
+        if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#]\S*)?$/i.test(t) && !/\.app$/i.test(t)) t = `https://${t}`;
         const isFile = /^[~/.]/.test(t) && await fs.stat(expand(t)).then((s) => s.isFile() && (s.mode & 0o111) !== 0, () => false);
         allowed(checkOpen(t, HOME, { executable: isFile }));
-        const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(t), isPath = /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t);
+        // mailto: has no //, but it's a link too (it used to be taken for an app name and fail).
+        const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^mailto:/i.test(t), isPath = /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t);
         let r;
         const inApp = app && process.platform === 'darwin' && (isUrl || isPath) ? ['-a', String(app)] : [];
         if (process.platform === 'darwin') r = await run('open', isUrl || isPath ? [...inApp, isPath ? expand(t) : t] : ['-a', t]);
         else if (process.platform === 'win32') r = await winOpen(isPath ? expand(t) : t);
         else r = await run('xdg-open', [isPath ? expand(t) : t]);
+        // Not installed: say so plainly, so the model doesn't go hunting for it with scripts (which need a yes each).
+        if (r.err && /Unable to find application/i.test(r.stderr)) throw new Error(`There's no app called "${inApp.length ? app : t}" on this Mac (not installed, or it has another name). Don't look for it another way; tell ${userName} and carry on with the rest.`);
         if (r.err) throw new Error(r.stderr.trim() || `Couldn't open ${t}.`);
         if (lastShot) lastShot.used = true;
         return `Opened ${t}${inApp.length ? ` in ${app}` : ''}.`;

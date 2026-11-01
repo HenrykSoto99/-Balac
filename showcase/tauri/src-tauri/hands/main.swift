@@ -14,6 +14,8 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 setvbuf(stdout, nil, _IOLBF, 0)
 func out(_ o: [String: Any]) -> Never {
@@ -58,6 +60,11 @@ func appMatches(_ app: String, _ want: String) -> Bool {
 
 /// Resolves a target to a window. "front" = the frontmost app that isn't Roamies.
 func resolve(_ target: String) -> Win? {
+    let w = resolveWin(target)
+    if BG, let w { bgPid = w.pid }
+    return w
+}
+func resolveWin(_ target: String) -> Win? {
     let all = windows()
     if target == "front" {
         if let f = NSWorkspace.shared.frontmostApplication, !isRoamies(f.processIdentifier), let w = all.first(where: { $0.pid == f.processIdentifier }) { return w }
@@ -100,6 +107,31 @@ func str(_ el: AXUIElement, _ name: String) -> String? {
     if let n = v as? NSNumber { return n.stringValue }
     return nil
 }
+/// Several attributes in one round trip to the app: each attr() call is its own message to the app, and walking a
+/// web page makes thousands of them. Missing attributes come back nil. Falls back to one call each if the app refuses.
+func attrs(_ el: AXUIElement, _ names: [String]) -> [AnyObject?] {
+    var v: CFArray?
+    guard AXUIElementCopyMultipleAttributeValues(el, names as CFArray, AXCopyMultipleAttributeOptions(rawValue: 0), &v) == .success,
+          let arr = v as [AnyObject]?, arr.count == names.count else { return names.map { attr(el, $0) } }
+    return arr.map { x in
+        if x is NSNull { return nil }
+        if CFGetTypeID(x) == AXValueGetTypeID(), AXValueGetType(x as! AXValue) == .axError { return nil }
+        return x
+    }
+}
+/// str() for a value already fetched.
+func strOf(_ v: AnyObject?) -> String? {
+    if let s = v as? String { return s.isEmpty ? nil : s }
+    if let n = v as? NSNumber { return n.stringValue }
+    return nil
+}
+/// frame() from already-fetched position and size.
+func frameOf(_ p: AnyObject?, _ s: AnyObject?) -> CGRect? {
+    guard let p, let s, CFGetTypeID(p) == AXValueGetTypeID(), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
+    var pt = CGPoint.zero, sz = CGSize.zero
+    guard AXValueGetValue(p as! AXValue, .cgPoint, &pt), AXValueGetValue(s as! AXValue, .cgSize, &sz) else { return nil }
+    return CGRect(origin: pt, size: sz)
+}
 func frame(_ el: AXUIElement) -> CGRect? {
     guard let p = attr(el, kAXPositionAttribute), let s = attr(el, kAXSizeAttribute) else { return nil }
     var pt = CGPoint.zero, sz = CGSize.zero
@@ -136,6 +168,7 @@ func frontPid() -> pid_t? { NSWorkspace.shared.frontmostApplication?.processIden
 
 /// Brings the window's app forward and waits until macOS reports it frontmost (up to ~1.2 s).
 func bringToFront(_ w: Win, _ app: AXUIElement) -> Bool {
+    if BG, !fgActive { return true }
     if frontPid() == w.pid { return true }
     let run = NSRunningApplication(processIdentifier: w.pid)
     for attempt in 0..<3 {
@@ -191,25 +224,30 @@ func walk(_ app: AXUIElement, _ w: Win? = nil, limit: Int = 260) -> [(AXUIElemen
     var visited = 0
     while let (el, depth) = stack.popLast(), found.count < limit, visited < 8000 {
         visited += 1
-        let role = str(el, kAXRoleAttribute) ?? ""
-        if INTERACTIVE.contains(role), let f = frame(el), f.width > 1, f.height > 1 {
-            if (attr(el, kAXEnabledAttribute) as? Bool) != false {
-                var label = str(el, kAXTitleAttribute) ?? str(el, kAXDescriptionAttribute) ?? str(el, "AXPlaceholderValue") ?? str(el, kAXHelpAttribute) ?? ""
-                if label.isEmpty, let t = attr(el, kAXTitleUIElementAttribute) { label = str(t as! AXUIElement, kAXValueAttribute) ?? "" }
+        let rc = attrs(el, [kAXRoleAttribute, kAXChildrenAttribute])
+        let role = strOf(rc[0]) ?? ""
+        // Everything a control's line needs, in one round trip.
+        let c = INTERACTIVE.contains(role) ? attrs(el, [kAXPositionAttribute, kAXSizeAttribute, kAXEnabledAttribute, kAXTitleAttribute, kAXDescriptionAttribute,
+                                                        "AXPlaceholderValue", kAXHelpAttribute, kAXTitleUIElementAttribute, kAXValueAttribute, kAXFocusedAttribute]) : []
+        if !c.isEmpty, let f = frameOf(c[0], c[1]), f.width > 1, f.height > 1 {
+            if (c[2] as? Bool) != false {
+                let title = strOf(c[3]), placeholder = strOf(c[5])
+                var label = title ?? strOf(c[4]) ?? placeholder ?? strOf(c[6]) ?? ""
+                if label.isEmpty, let t = c[7], CFGetTypeID(t) == AXUIElementGetTypeID() { label = str(t as! AXUIElement, kAXValueAttribute) ?? "" }
                 if label.isEmpty, FIELD_ROLES.contains(role) { label = nearbyLabel(el) ?? "" }
                 // A placeholder alone hides the real label ("e.g. Jane Doe" is the Full Name field): add the label too.
-                if FIELD_ROLES.contains(role), str(el, kAXTitleAttribute) == nil, let ph = str(el, "AXPlaceholderValue"), label == ph, let near = nearbyLabel(el), near != ph { label = "\(near) (\(ph))" }
+                if FIELD_ROLES.contains(role), title == nil, let ph = placeholder, label == ph, let near = nearbyLabel(el), near != ph { label = "\(near) (\(ph))" }
                 var item: [String: Any] = ["role": ROLE_NAME[role] ?? role, "label": String(label.prefix(80)),
                                            "bounds": [Int(f.minX), Int(f.minY), Int(f.width), Int(f.height)]]
-                if role != "AXSecureTextField", let v = str(el, kAXValueAttribute), !v.isEmpty { item["value"] = String(v.prefix(80)) }
-                if (attr(el, kAXFocusedAttribute) as? Bool) == true { item["focused"] = true }
+                if role != "AXSecureTextField", let v = strOf(c[8]), !v.isEmpty { item["value"] = String(v.prefix(80)) }
+                if (c[9] as? Bool) == true { item["focused"] = true }
                 // Mostly on screen counts as visible; a sliver at the edge doesn't.
                 let seen = view.intersection(f)
                 if !seen.isNull, seen.width * seen.height >= f.width * f.height * 0.5 { found.append((el, item)) }
                 else if hidden.count < 40 { item["offscreen"] = true; hidden.append((el, item)) }
             }
         }
-        if depth < 40, let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] {
+        if depth < 40, let kids = rc[1] as? [AXUIElement] {
             for k in kids.reversed() { stack.append((k, depth + 1)) }
         }
     }
@@ -232,15 +270,17 @@ func findTextEls(_ app: AXUIElement, _ w: Win, _ query: String, hidden: Bool = f
     var visited = 0
     while let (el, depth) = stack.popLast(), visited < 12000 {
         visited += 1
-        let texts = [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute, "AXPlaceholderValue"].compactMap { str(el, $0) }
-        if let t = texts.first(where: { $0.lowercased().contains(q) }), let f = frame(el), f.width > 1, f.height > 1, hidden || win.intersects(f) {
+        let a = attrs(el, [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute, "AXPlaceholderValue", kAXChildrenAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXRoleAttribute])
+        let texts = a[0..<4].compactMap { strOf($0) }
+        if let t = texts.first(where: { $0.lowercased().contains(q) }), let f = frameOf(a[5], a[6]), f.width > 1, f.height > 1, hidden || win.intersects(f) {
             let low = t.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let score = low == q ? 0 : low.range(of: "\\b\(NSRegularExpression.escapedPattern(for: q))\\b", options: .regularExpression) != nil ? 1 : 2
-            let role = str(el, kAXRoleAttribute) ?? ""
+            // A whole word: no letter or digit right before or after. (\\b fails when the text starts or ends with a symbol, like "$1,250".)
+            let score = low == q ? 0 : low.range(of: "(?<![\\p{L}\\p{N}])\(NSRegularExpression.escapedPattern(for: q))(?![\\p{L}\\p{N}])", options: .regularExpression) != nil ? 1 : 2
+            let role = strOf(a[7]) ?? ""
             hits.append((score, inWebPage(el), f.width * f.height, el, ["text": String(t.prefix(80)), "match": ["exact", "word", "partial"][score], "role": ROLE_NAME[role] ?? role.replacingOccurrences(of: "AX", with: "").lowercased(),
                                                      "bounds": [Int(f.minX), Int(f.minY), Int(f.width), Int(f.height)]]))
         }
-        if depth < 60, let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] {
+        if depth < 60, let kids = a[4] as? [AXUIElement] {
             for k in kids.reversed() { stack.append((k, depth + 1)) }
         }
     }
@@ -251,6 +291,17 @@ func findTextEls(_ app: AXUIElement, _ w: Win, _ query: String, hidden: Bool = f
 /// Activates what a piece of text belongs to: focuses a text field, else presses the element or the nearest
 /// ancestor that can be pressed (a link around its text, a button around its label). Returns false if nothing could.
 func pressText(_ e: AXUIElement) -> Bool {
+    // Words inside a button or link (a web "Sign in" button holds a text "Sign in"): press the button itself. Safari
+    // reports pressing the inner text as done but never submits the form, so the login silently didn't happen.
+    if ["AXStaticText", "AXImage", "AXHeading", "AXGroup"].contains(str(e, kAXRoleAttribute) ?? "") {
+        var up = attr(e, kAXParentAttribute).map { $0 as! AXUIElement }
+        for _ in 0..<3 {
+            guard let c = up else { break }
+            if ["AXButton", "AXLink", "AXMenuItem", "AXMenuButton", "AXPopUpButton", "AXTab", "AXCheckBox", "AXRadioButton"].contains(str(c, kAXRoleAttribute) ?? ""),
+               AXUIElementPerformAction(c, kAXPressAction as CFString) == .success { return true }
+            up = attr(c, kAXParentAttribute).map { $0 as! AXUIElement }
+        }
+    }
     var cur: AXUIElement? = e
     for _ in 0..<6 {
         guard let c = cur else { break }
@@ -385,7 +436,7 @@ func typeInto(_ app: AXUIElement, _ e: AXUIElement, _ text: String) -> (ok: Bool
                 guard let k = digitKey[ch] else { continue }
                 let d = CGEvent(keyboardEventSource: src, virtualKey: k, keyDown: true)!, u = CGEvent(keyboardEventSource: src, virtualKey: k, keyDown: false)!
                 d.flags = []; u.flags = []
-                d.post(tap: .cghidEventTap); u.post(tap: .cghidEventTap)
+                send(d); send(u)
                 Thread.sleep(forTimeInterval: 0.03)
             }
         }
@@ -413,17 +464,18 @@ func findOption(_ app: AXUIElement, _ w: Win, _ option: String, excluding: AXUIE
     var stack: [(AXUIElement, Int)] = roots.reversed().map { ($0, 0) }
     while let (el, depth) = stack.popLast(), visited < 20000, exact == nil {
         visited += 1
-        let role = axRole(el)
+        let a = attrs(el, [kAXRoleAttribute, kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute, kAXChildrenAttribute])
+        let role = strOf(a[0]) ?? ""
         if role == "AXMenuBar" { continue }
         // The dropdown's own text (a search box shows what was typed) isn't an option.
         if let x = excluding, CFEqual(el, x) { continue }
         if ["AXMenuItem", "AXStaticText", "AXCell", "AXRow", "AXButton", "AXRadioButton", "AXLink", "AXGroup", "AXListItem", "AXOption"].contains(role) {
-            for t in [str(el, kAXTitleAttribute), str(el, kAXValueAttribute), str(el, kAXDescriptionAttribute)].compactMap({ $0 }).map(fold) where !t.isEmpty {
+            for t in [strOf(a[1]), strOf(a[2]), strOf(a[3])].compactMap({ $0 }).map(fold) where !t.isEmpty {
                 if t == q { exact = el; break }
                 if prefix == nil, t.hasPrefix(q), t.count <= q.count + 25 { prefix = el }
             }
         }
-        if depth < 60, let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] { for k in kids.reversed() { stack.append((k, depth + 1)) } }
+        if depth < 60, let kids = a[4] as? [AXUIElement] { for k in kids.reversed() { stack.append((k, depth + 1)) } }
     }
     return exact ?? prefix
 }
@@ -457,11 +509,12 @@ func openList(_ app: AXUIElement, _ w: Win, near: CGRect) -> AXUIElement? {
     var best: (CGFloat, AXUIElement)?, stack: [(AXUIElement, Int)] = [(root, 0)], visited = 0
     while let (el, depth) = stack.popLast(), visited < 8000 {
         visited += 1
-        if ["AXList", "AXMenu", "AXTable", "AXOutline", "AXListBox"].contains(axRole(el)), let f = frame(el), f.intersects(win), f.height > 20 {
+        let a = attrs(el, [kAXRoleAttribute, kAXChildrenAttribute])
+        if ["AXList", "AXMenu", "AXTable", "AXOutline", "AXListBox"].contains(strOf(a[0]) ?? ""), let f = frame(el), f.intersects(win), f.height > 20 {
             let d = abs(f.minY - near.maxY) + abs(f.minX - near.minX) * 0.5
             if best == nil || d < best!.0 { best = (d, el) }
         }
-        if depth < 60, let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] { for k in kids.reversed() { stack.append((k, depth + 1)) } }
+        if depth < 60, let kids = a[1] as? [AXUIElement] { for k in kids.reversed() { stack.append((k, depth + 1)) } }
     }
     return best?.1
 }
@@ -474,16 +527,20 @@ func optionIn(_ list: AXUIElement, _ q: String) -> AXUIElement? {
     var stack: [(AXUIElement, Int)] = [(list, 0)], prefix: AXUIElement?, visited = 0
     while let (el, d) = stack.popLast(), visited < 3000 {
         visited += 1
-        let t = optionText(el)
+        let a = attrs(el, [kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute, kAXChildrenAttribute])
+        let t = [strOf(a[0]), strOf(a[1]), strOf(a[2])].compactMap { $0 }.map(fold)
         if t.contains(q) { return el }
         if prefix == nil, t.contains(where: { $0.hasPrefix(q) && $0.count <= q.count + 25 }) { prefix = el }
-        if d < 8, let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] { for k in kids.reversed() { stack.append((k, d + 1)) } }
+        if d < 8, let kids = a[3] as? [AXUIElement] { for k in kids.reversed() { stack.append((k, d + 1)) } }
     }
     return prefix
 }
 /// Scrolls an open list a screenful at a time, down to its end and then back up, until the option shows up.
 /// Works for long lists and virtualized ones, where rows out of view don't exist until scrolled to.
 func scrollListFor(_ app: AXUIElement, _ w: Win, _ list: AXUIElement, _ option: String) -> AXUIElement? {
+    // In the background: an option already in view needs no scrolling; finding one further down needs the wheel,
+    // which only the real cursor can turn.
+    if inBackground { if let o = optionIn(list, fold(option)) { return o }; return withRealCursor { scrollListFor(app, w, list, option) } }
     let q = fold(option), win = CGRect(x: w.x, y: w.y, width: w.w, height: w.h)
     let deadline = Date().addingTimeInterval(20)
     for dir: Int32 in [-1, 1] {
@@ -498,8 +555,8 @@ func scrollListFor(_ app: AXUIElement, _ w: Win, _ list: AXUIElement, _ option: 
             last = sig
             // Most of a screenful, so a virtualized list never skips rows between looks.
             let px = Int32(max(40, box.height * 0.7))
-            CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: CGPoint(x: box.midX, y: box.midY), mouseButton: .left)?.post(tap: .cghidEventTap)
-            if let e = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 1, wheel1: dir * px, wheel2: 0, wheel3: 0) { e.flags = []; e.post(tap: .cghidEventTap) }
+            moveTo(CGPoint(x: box.midX, y: box.midY))
+            if let e = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 1, wheel1: dir * px, wheel2: 0, wheel3: 0) { e.flags = []; sendScroll(e) }
             Thread.sleep(forTimeInterval: 0.07)
         }
     }
@@ -518,9 +575,9 @@ func activate(_ e: AXUIElement) {
 }
 
 func scrollAt(_ p: CGPoint, dy: Int32, dx: Int32) {
-    CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+    moveTo(p)
     Thread.sleep(forTimeInterval: 0.03)
-    if let e = CGEvent(scrollWheelEvent2Source: src, units: .line, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) { e.flags = []; e.post(tap: .cghidEventTap) }
+    if let e = CGEvent(scrollWheelEvent2Source: src, units: .line, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) { e.flags = []; sendScroll(e) }
 }
 
 /// A whole label or heading, not the same words buried in a paragraph.
@@ -546,20 +603,40 @@ func scrollToText(_ app: AXUIElement, _ w: Win, _ q: String) -> Bool {
 /// a screenshot. Visible text only, capped so a long page can't flood the reply.
 /// Text on the page that's scrolled out of view, top to bottom. When it's long, the start and the end are
 /// kept (headings up top, contact details and footers at the bottom), with a note for what's in between.
-func offscreenText(_ app: AXUIElement, _ w: Win, cap: Int) -> [String] {
-    guard let root = axWindow(app, w) else { return [] }
+/// Every text and heading in the window, in one pass (role, text, place and children in one round trip each):
+/// on-screen texts as (y, x, text) for pageText, and scrolled-out-of-view ones for offscreenText.
+struct TextScan { var on: [(CGFloat, CGFloat, String)] = []; var off: [(CGFloat, String)] = [] }
+func scanText(_ app: AXUIElement, _ w: Win, wantOn: Bool = true, wantOff: Bool = true) -> TextScan {
+    var scan = TextScan()
+    guard let root = axWindow(app, w) else { return scan }
     let win = CGRect(x: w.x, y: w.y, width: w.w, height: w.h)
-    var found: [(CGFloat, String)] = [], seen = Set<String>(), visited = 0
+    var seenOn = Set<String>(), seenOff = Set<String>(), visited = 0
     var stack: [(AXUIElement, Int)] = [(root, 0)]
-    while let (el, depth) = stack.popLast(), visited < 12000 {
+    // The in-view pass stopped at 8000 elements and the out-of-view one at 12000; keep both limits.
+    let maxVisit = wantOff ? 12000 : 8000
+    while let (el, depth) = stack.popLast(), visited < maxVisit {
         visited += 1
-        let role = str(el, kAXRoleAttribute) ?? ""
-        if role == "AXStaticText" || role == "AXHeading", let t = str(el, kAXValueAttribute) ?? str(el, kAXTitleAttribute), let f = frame(el), f.height > 1, !win.intersects(f) {
-            let line = t.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
-            if line.count >= 2, seen.insert(line).inserted { found.append((f.minY, String(line.prefix(160)))) }
+        let a = attrs(el, [kAXRoleAttribute, kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXPositionAttribute, kAXSizeAttribute, kAXChildrenAttribute])
+        let role = strOf(a[0]) ?? ""
+        if role == "AXStaticText" || role == "AXHeading", let f = frameOf(a[4], a[5]) {
+            let norm = { (t: String) in t.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces) }
+            if win.intersects(f) {
+                if wantOn, visited <= 8000, let t = strOf(a[1]) ?? strOf(a[2]) ?? strOf(a[3]) {
+                    let line = norm(t)
+                    if line.count >= 2, seenOn.insert(line).inserted { scan.on.append((f.minY, f.minX, String(line.prefix(160)))) }
+                }
+            } else if wantOff, f.height > 1, let t = strOf(a[1]) ?? strOf(a[2]) {
+                let line = norm(t)
+                if line.count >= 2, seenOff.insert(line).inserted { scan.off.append((f.minY, String(line.prefix(160)))) }
+            }
         }
-        if depth < 60, let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] { for k in kids.reversed() { stack.append((k, depth + 1)) } }
+        if depth < 60, let kids = a[6] as? [AXUIElement] { for k in kids.reversed() { stack.append((k, depth + 1)) } }
     }
+    return scan
+}
+
+func offscreenText(_ app: AXUIElement, _ w: Win, cap: Int, scan: TextScan? = nil) -> [String] {
+    let found = (scan ?? scanText(app, w, wantOn: false)).off
     let lines = found.sorted { $0.0 < $1.0 }.map { $0.1 }
     if lines.reduce(0, { $0 + $1.count + 1 }) <= cap { return lines }
     var head: [String] = [], tail: [String] = [], h = 0, t = 0
@@ -568,21 +645,8 @@ func offscreenText(_ app: AXUIElement, _ w: Win, cap: Int) -> [String] {
     return head + ["…(\(lines.count - head.count - tail.count) more lines in between; point_at or click_text with their words scrolls there)"] + tail
 }
 
-func pageText(_ app: AXUIElement, _ w: Win, cap: Int = 1800) -> [String] {
-    guard let root = axWindow(app, w) else { return [] }
-    let win = CGRect(x: w.x, y: w.y, width: w.w, height: w.h)
-    var found: [(CGFloat, CGFloat, String)] = [], seen = Set<String>(), visited = 0
-    var stack: [(AXUIElement, Int)] = [(root, 0)]
-    while let (el, depth) = stack.popLast(), visited < 8000 {
-        visited += 1
-        let role = str(el, kAXRoleAttribute) ?? ""
-        if role == "AXStaticText" || role == "AXHeading", let t = str(el, kAXValueAttribute) ?? str(el, kAXTitleAttribute) ?? str(el, kAXDescriptionAttribute),
-           let f = frame(el), win.intersects(f) {
-            let line = t.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
-            if line.count >= 2, seen.insert(line).inserted { found.append((f.minY, f.minX, String(line.prefix(160)))) }
-        }
-        if depth < 60, let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] { for k in kids.reversed() { stack.append((k, depth + 1)) } }
-    }
+func pageText(_ app: AXUIElement, _ w: Win, cap: Int = 1800, scan: TextScan? = nil) -> [String] {
+    let found = (scan ?? scanText(app, w, wantOff: false)).on
     var out: [String] = [], total = 0
     let sorted = found.sorted(by: { abs($0.0 - $1.0) > 4 ? $0.0 < $1.0 : $0.1 < $1.1 })
     for (k, (_, _, t)) in sorted.enumerated() {
@@ -617,6 +681,101 @@ func axApp(_ w: Win) -> AXUIElement {
 // A private source: events don't pick up modifier keys still held (or just "pressed" by a cmd+a step),
 // which turned typed digits into Cmd+1… and switched browser tabs.
 let src = CGEventSource(stateID: .privateState)
+
+// Background mode (the default; ROAMIES_BG=0 turns it off). Roamies acts in an app without the user's cursor or
+// keyboard focus, so they can keep working: keys and typing go straight to that app, shortcuts like Cmd+S press the
+// app's own menu item, clicks are accessibility presses on what's at the spot, scrolls are sent to the app.
+// A step that only works with the real cursor (date pickers, a field that didn't take the typing, a spot with nothing
+// pressable) borrows it: the app comes forward, the step runs, then the cursor goes back where it was and the user's
+// app comes back to the front.
+let BG = ProcessInfo.processInfo.environment["ROAMIES_BG"] != "0"
+var bgPid: pid_t? = nil
+var bgPoint = CGPoint.zero
+var fgActive = false
+var bgWin: Win? = nil
+var bgApp: AXUIElement? = nil
+var usedRealCursor = false
+var inBackground: Bool { BG && !fgActive && bgPid != nil }
+func send(_ e: CGEvent) { if inBackground { e.postToPid(bgPid!) } else { e.post(tap: .cghidEventTap) } }
+func moveTo(_ p: CGPoint) {
+    if inBackground { bgPoint = p; return }
+    CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
+}
+func sendScroll(_ e: CGEvent) { if inBackground { e.location = bgPoint; e.postToPid(bgPid!) } else { e.post(tap: .cghidEventTap) } }
+/// A click without the cursor: focuses the text field at that spot, or presses the nearest pressable thing there.
+/// False when nothing there can be focused or pressed (then the real cursor is needed).
+func bgClick(_ pid: pid_t, _ p: CGPoint) -> Bool {
+    var el: AXUIElement?
+    guard AXUIElementCopyElementAtPosition(AXUIElementCreateApplication(pid), Float(p.x), Float(p.y), &el) == .success, var cur = el else { return false }
+    for _ in 0..<6 {
+        let role = str(cur, kAXRoleAttribute) ?? ""
+        if ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSecureTextField"].contains(role) {
+            return AXUIElementSetAttributeValue(cur, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+        }
+        if ["AXWebArea", "AXWindow", "AXScrollArea", "AXApplication"].contains(role) { return false }
+        var names: CFArray?
+        if AXUIElementCopyActionNames(cur, &names) == .success, let n = names as? [String], n.contains(kAXPressAction as String),
+           AXUIElementPerformAction(cur, kAXPressAction as CFString) == .success { return true }
+        guard let up = attr(cur, kAXParentAttribute) else { return false }
+        cur = up as! AXUIElement
+    }
+    return false
+}
+/// Runs body with the real cursor and keyboard, then gives them back to the user.
+func withRealCursor<T>(_ body: () -> T) -> T {
+    guard BG, !fgActive, let w = bgWin, let app = bgApp else { return body() }
+    usedRealCursor = true
+    let cursor = CGEvent(source: nil)?.location
+    let prev = NSWorkspace.shared.frontmostApplication
+    fgActive = true
+    defer {
+        fgActive = false
+        if let c = cursor { CGWarpMouseCursorPosition(c); CGAssociateMouseAndMouseCursorPosition(1) }
+        if let prev, prev.processIdentifier != w.pid, !isRoamies(prev.processIdentifier) { prev.activate(options: []) }
+    }
+    _ = bringToFront(w, app)
+    return body()
+}
+/// Saves the document in that window without bringing its app forward: AppleScript's save, which document-based
+/// apps (TextEdit, Pages, Numbers, Preview…) support. Only documents that already have a file (no Save dialog).
+func saveInBackground(_ w: Win) -> Bool {
+    guard let bundle = NSRunningApplication(processIdentifier: w.pid)?.bundleIdentifier else { return false }
+    let title = w.title.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    let script = """
+    with timeout of 8 seconds
+    tell application id "\(bundle)"
+    set d to missing value
+    repeat with x in documents
+    if name of x is "\(title)" or "\(title)" starts with (name of x) then set d to x
+    end repeat
+    if d is missing value then set d to document 1
+    if path of d is missing value then error "no file"
+    save d
+    end tell
+    end timeout
+    """
+    return run("/usr/bin/osascript", ["-e", script]) == 0
+}
+/// Cmd shortcuts in the background: press the app's menu item that has that shortcut (keys sent to a background
+/// app don't reach its menus, so Cmd+S typed the line but never saved). False if no menu item has it.
+func pressMenuShortcut(_ app: AXUIElement, _ combo: String) -> Bool {
+    let parts = combo.lowercased().replacingOccurrences(of: " ", with: "").split(separator: "+").map(String.init)
+    guard let key = parts.last, key.count == 1, parts.contains(where: { ["cmd", "command", "meta", "super"].contains($0) }) else { return false }
+    let shift = parts.contains("shift"), opt = parts.contains { ["opt", "option", "alt"].contains($0) }, ctrl = parts.contains { ["ctrl", "control"].contains($0) }
+    let want = (shift ? 1 : 0) | (opt ? 2 : 0) | (ctrl ? 4 : 0)
+    guard let bar = attr(app, kAXMenuBarAttribute) else { return false }
+    var stack: [(AXUIElement, Int)] = [(bar as! AXUIElement, 0)]
+    var visited = 0
+    while let (el, d) = stack.popLast(), visited < 3000 {
+        visited += 1
+        let a = attrs(el, ["AXMenuItemCmdChar", "AXMenuItemCmdModifiers", kAXEnabledAttribute, kAXChildrenAttribute])
+        if let ch = a[0] as? String, ch.lowercased() == key, let mods = (a[1] as? NSNumber)?.intValue, mods & 8 == 0, mods & 7 == want, (a[2] as? Bool) != false {
+            return AXUIElementPerformAction(el, kAXPressAction as CFString) == .success
+        }
+        if d < 4, let kids = a[3] as? [AXUIElement] { for k in kids { stack.append((k, d + 1)) } }
+    }
+    return false
+}
 func typeText(_ s: String) {
     for chunk in Array(s.utf16).chunked(16) {
         var u = chunk
@@ -624,7 +783,7 @@ func typeText(_ s: String) {
         d.keyboardSetUnicodeString(stringLength: u.count, unicodeString: &u)
         up.keyboardSetUnicodeString(stringLength: u.count, unicodeString: &u)
         d.flags = []; up.flags = []
-        d.post(tap: .cghidEventTap); up.post(tap: .cghidEventTap)
+        send(d); send(up)
         Thread.sleep(forTimeInterval: 0.012)
     }
 }
@@ -634,12 +793,29 @@ let KEYS: [String: CGKeyCode] = ["return": 36, "enter": 36, "tab": 48, "space": 
     "left": 123, "right": 124, "down": 125, "up": 126, "home": 115, "end": 119, "pageup": 116, "pagedown": 121, "forwarddelete": 117,
     "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17,
     "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23, "9": 25, "7": 26, "8": 28, "0": 29, "o": 31, "u": 32, "i": 34, "p": 35, "l": 37,
-    "j": 38, "k": 40, "n": 45, "m": 46, "f5": 96]
-/// "cmd+a", "shift+tab", "return".
+    "j": 38, "k": 40, "n": 45, "m": 46, "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98, "f8": 100, "f9": 101,
+    "f10": 109, "f11": 103, "f12": 111, "=": 24, "-": 27, "/": 44, ".": 47, ",": 43, ";": 41, "'": 39, "[": 33, "]": 30, "\\": 42, "`": 50]
+/// Keys people (and models) name by symbol or word: Calculator's "*" or "multiply" is shift+8. Unknown names
+/// used to fail the whole step list.
+let KEY_ALIASES: [String: String] = ["*": "shift+8", "multiply": "shift+8", "times": "shift+8", "+": "shift+=", "plus": "shift+=", "add": "shift+=",
+    "minus": "-", "subtract": "-", "divide": "/", "slash": "/", "equals": "=", "equal": "=", "period": ".", "dot": ".", "decimal": ".", "comma": ",",
+    "%": "shift+5", "percent": "shift+5", "(": "shift+9", ")": "shift+0", "!": "shift+1", "@": "shift+2", "#": "shift+3", "$": "shift+4",
+    "^": "shift+6", "&": "shift+7", "_": "shift+-", "?": "shift+/", ":": "shift+;", "\"": "shift+'", "<": "shift+,", ">": "shift+.",
+    "{": "shift+[", "}": "shift+]", "|": "shift+\\", "~": "shift+`", "page_up": "pageup", "page_down": "pagedown", "pgup": "pageup", "pgdn": "pagedown",
+    "del": "forwarddelete", "arrowleft": "left", "arrowright": "right", "arrowup": "up", "arrowdown": "down", "spacebar": "space", "back": "backspace",
+    // Mac text has no Cmd/Ctrl+End: the end and start of a document are Cmd+Down and Cmd+Up.
+    "cmd+end": "cmd+down", "cmd+home": "cmd+up", "ctrl+end": "cmd+down", "ctrl+home": "cmd+up", "command+end": "cmd+down", "command+home": "cmd+up"]
+/// "cmd+a", "shift+tab", "return", "*", "cmd+end".
 func pressKey(_ combo: String) -> Bool {
     var flags: CGEventFlags = []
     var key: CGKeyCode?
-    for part in combo.lowercased().split(separator: "+").map(String.init) {
+    var c = combo.lowercased().trimmingCharacters(in: .whitespaces).replacingOccurrences(of: " ", with: "")
+    if let a = KEY_ALIASES[c] { c = a }
+    // "+" alone, or "cmd++": the last + is the key itself.
+    var parts = c.split(separator: "+", omittingEmptySubsequences: true).map(String.init)
+    if c.hasSuffix("++") || c == "+" { parts += ["shift", "="] }
+    parts = parts.flatMap { KEY_ALIASES[$0].map { $0.split(separator: "+").map(String.init) } ?? [$0] }
+    for part in parts {
         switch part {
         case "cmd", "command": flags.insert(.maskCommand)
         case "ctrl", "control": flags.insert(.maskControl)
@@ -651,11 +827,16 @@ func pressKey(_ combo: String) -> Bool {
     guard let k = key else { return false }
     let d = CGEvent(keyboardEventSource: src, virtualKey: k, keyDown: true)!, u = CGEvent(keyboardEventSource: src, virtualKey: k, keyDown: false)!
     d.flags = flags; u.flags = flags
-    d.post(tap: .cghidEventTap); u.post(tap: .cghidEventTap)
+    send(d); send(u)
     Thread.sleep(forTimeInterval: 0.05)
     return true
 }
 func click(_ p: CGPoint) {
+    if inBackground {
+        if bgClick(bgPid!, p) { return }
+        withRealCursor { click(p) }
+        return
+    }
     for t in [CGEventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
         let e = CGEvent(mouseEventSource: src, mouseType: t, mouseCursorPosition: p, mouseButton: .left)!
         e.flags = []
@@ -703,17 +884,34 @@ case "locate":
     out(["ok": true, "window": winInfo(w)])
 
 case "capture":
-    guard args.count >= 3 else { fail("usage: capture <out> <target>") }
-    let file = args[1], target = args[2]
+    // capture <out> <target> [max]: with max, the image is shrunk here to at most max px on its long side
+    // (in-process, no extra sips runs) and its final pixel size is returned as "pixels".
+    guard args.count >= 3 else { fail("usage: capture <out> <target> [max]") }
+    let file = args[1], target = args[2], maxPx = args.count >= 4 ? Int(args[3]) : nil
+    func shrink() -> [Int]? {
+        guard let maxPx, let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: file) as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let pw = props[kCGImagePropertyPixelWidth] as? Int, let ph = props[kCGImagePropertyPixelHeight] as? Int else { return nil }
+        if max(pw, ph) <= maxPx { return [pw, ph] }
+        let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: maxPx, kCGImageSourceCreateThumbnailWithTransform: true]
+        guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary),
+              let dst = CGImageDestinationCreateWithURL(URL(fileURLWithPath: file) as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dst, img, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        return CGImageDestinationFinalize(dst) ? [img.width, img.height] : nil
+    }
     if target == "screen" {
         guard run("/usr/sbin/screencapture", ["-x", "-t", "jpg", file]) == 0 else { fail("Screen capture failed. Roamies may need Screen Recording permission.") }
         // screencapture with one file shoots the main display; its bounds (points) let the caller map pixels back.
         let d = CGDisplayBounds(CGMainDisplayID())
-        out(["ok": true, "file": file, "what": "screen", "bounds": [Int(d.minX), Int(d.minY), Int(d.width), Int(d.height)]])
+        var o: [String: Any] = ["ok": true, "file": file, "what": "screen", "bounds": [Int(d.minX), Int(d.minY), Int(d.width), Int(d.height)]]
+        if let px = shrink() { o["pixels"] = px }
+        out(o)
     }
     guard let w = resolve(target) else { fail("No matching window is open\(target.hasPrefix("app:") ? " for \(target.dropFirst(4))" : "").") }
     guard run("/usr/sbin/screencapture", ["-x", "-o", "-t", "jpg", "-l", String(w.id), file]) == 0 else { fail("Window capture failed. Roamies may need Screen Recording permission.") }
-    out(["ok": true, "file": file, "window": winInfo(w)])
+    var o: [String: Any] = ["ok": true, "file": file, "window": winInfo(w)]
+    if let px = shrink() { o["pixels"] = px }
+    out(o)
 
 case "select":
     guard args.count >= 2 else { fail("usage: select <out>") }
@@ -727,7 +925,10 @@ case "ui":
     guard args.count >= 2, let w = resolve(args[1]) else { fail("No matching window is open.") }
     let uiApp = axApp(w)
     let items = walk(uiApp, w).map { $0.1 }
-    out(["ok": true, "window": winInfo(w), "controls": items, "texts": pageText(uiApp, w, cap: 5000), "elsewhere": offscreenText(uiApp, w, cap: 4000), "note": items.isEmpty ? "This app shares no controls. Use a screenshot plus click at coordinates instead." : ""])
+    // ui <target> controls: just the controls (to re-find ids before acting), without the page's text.
+    if args.count >= 3, args[2] == "controls" { out(["ok": true, "window": winInfo(w), "controls": items]) }
+    let scan = scanText(uiApp, w)
+    out(["ok": true, "window": winInfo(w), "controls": items, "texts": pageText(uiApp, w, cap: 5000, scan: scan), "elsewhere": offscreenText(uiApp, w, cap: 4000, scan: scan), "note": items.isEmpty ? "This app shares no controls. Use a screenshot plus click at coordinates instead." : ""])
 
 case "locate-control":
     guard AXIsProcessTrusted() else { fail("Roamies needs Accessibility permission to read other apps.") }
@@ -776,8 +977,9 @@ case "act":
     if let name = handsOff(w.pid) {
         fail("Blocked for safety: I can point at things in \(name), but I never type or click in it. Show the user where to click instead.")
     }
-    // Bring the target app forward so keystrokes land there, not in Roamies.
+    // Bring the target app forward so keystrokes land there, not in Roamies (in background mode it stays behind).
     let app = axApp(w)
+    bgWin = w; bgApp = app; bgPid = w.pid
     // Keys and clicks go to whichever app is in front, so the target must really be there first.
     // activate() alone is only a request since macOS 14 and is often ignored for a background helper.
     if !bringToFront(w, app) {
@@ -785,7 +987,7 @@ case "act":
     }
     // With several windows of one app, keystrokes go to its main window: make that the one we read.
     if let axw = axWindow(app, w), (attr(axw, kAXMainAttribute) as? Bool) != true {
-        AXUIElementPerformAction(axw, kAXRaiseAction as CFString)
+        if !BG { AXUIElementPerformAction(axw, kAXRaiseAction as CFString) }
         AXUIElementSetAttributeValue(axw, kAXMainAttribute as CFString, kCFBooleanTrue)
         Thread.sleep(forTimeInterval: 0.15)
     }
@@ -795,8 +997,21 @@ case "act":
         guard let id = s["id"] as? Int, id >= 1, id <= controls.count else { return nil }
         return controls[id - 1]
     }
+    // A wait at the very end, after a click or key ("click Sign in, wait 2"), is there for the page to react. It ends
+    // as soon as the page has changed from how it was before that action and has held still; if nothing changes it
+    // waits the full time, as before.
+    func pageSig() -> String {
+        let cur = resolve(target) ?? w
+        return "\(cur.id)|\(cur.title)#" + walk(cur.pid == w.pid ? app : axApp(cur), cur).map { "\($0.1["role"] ?? "")|\($0.1["label"] ?? "")" }.joined(separator: ";")
+    }
+    let reacts: Set<String> = ["click", "click_text", "press_button", "key", "click_at", "choose"]
+    let tailWait = steps.count >= 2 && (steps.last?["do"] as? String) == "wait" && reacts.contains(steps[steps.count - 2]["do"] as? String ?? "")
+    var sigBefore: String?
     for (i, s) in steps.enumerated() {
         let what = s["do"] as? String ?? ""
+        usedRealCursor = false
+        defer { if usedRealCursor, !done.isEmpty { done[done.count - 1] += " (needed the real cursor)" } }
+        if tailWait, i == steps.count - 2 { sigBefore = pageSig() }
         // An earlier step may have switched apps (a click, cmd+tab, Spotlight); check before every action.
         if what != "wait", let front = NSWorkspace.shared.frontmostApplication, let name = handsOff(front.processIdentifier) {
             out(["ok": false, "error": "Blocked for safety: \(name) came to the front, and I never type or click in it.", "done": done])
@@ -845,7 +1060,10 @@ case "act":
             let q = s["text"] as? String ?? ""
             var hit: (AXUIElement, [String: Any])?
             // A checkbox or radio by its label: press the control itself; clicking the words doesn't always tick it.
-            if let box = controls.first(where: { ["AXCheckBox", "AXRadioButton"].contains(axRole($0.0)) && fold(($0.1["label"] as? String) ?? "") == fold(q) && ($0.1["offscreen"] as? Bool) != true }) {
+            // Browser tabs are radio buttons too (a tab titled "Sign in"), so a box inside the web page comes first, and
+            // one outside it only when the words aren't found in the page.
+            let boxes = controls.filter { ["AXCheckBox", "AXRadioButton"].contains(axRole($0.0)) && fold(($0.1["label"] as? String) ?? "") == fold(q) && ($0.1["offscreen"] as? Bool) != true }
+            if let box = boxes.first(where: { inWebPage($0.0) }) {
                 hit = (box.0, ["text": box.1["label"] ?? q])
             } else if let near = s["near"] as? String, !near.isEmpty {
                 // Many matches (a "Reply" under every post): the one that goes with the near text.
@@ -860,6 +1078,7 @@ case "act":
                 }
             } else {
                 hit = findTextEls(app, w, q).first(where: { wholeMatch($0.1, q) })
+                if let box = boxes.first, hit == nil || !inWebPage(hit!.0) { hit = (box.0, ["text": box.1["label"] ?? q]) }
                 if hit == nil, !q.isEmpty, scrollToText(app, w, q) { hit = findTextEls(app, w, q).first(where: { wholeMatch($0.1, q) }) }
             }
             guard !q.isEmpty, let (e, info) = hit else {
@@ -906,7 +1125,16 @@ case "act":
                 out(["ok": false, "error": "Step \(i + 1): no text field called \"\(name)\" here. Check its label with read_window.", "done": done])
             }
             let label = (info["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? name
-            let r = typeInto(app, e, text)
+            let isDate = ["AXDateField", "AXTimeField", "AXDateTimeArea"].contains(axRole(e))
+            func took(_ r: (ok: Bool, shows: String)) -> Bool {
+                guard r.ok else { return false }
+                let sh = r.shows.trimmingCharacters(in: .whitespacesAndNewlines)
+                if axRole(e) == "AXSecureTextField" || str(e, kAXSubroleAttribute) == "AXSecureTextField" { return sh.isEmpty || sh.count == text.count }
+                if ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"].contains(axRole(e)) { return (sh.isEmpty && text.isEmpty) || fold(sh).contains(fold(text).prefix(40)) }
+                return true
+            }
+            var r = inBackground && isDate ? withRealCursor { typeInto(app, e, text) } : typeInto(app, e, text)
+            if inBackground, !took(r) { r = withRealCursor { typeInto(app, e, text) } }
             if !r.ok { out(["ok": false, "error": "Step \(i + 1): couldn't put the cursor in \"\(label)\", so nothing was typed.", "done": done]) }
             let shows = r.shows.trimmingCharacters(in: .whitespacesAndNewlines)
             // Password fields show dots: the right number of them is a match. (They're secure fields, so the check
@@ -984,10 +1212,29 @@ case "act":
                 // To the very end (or top): keep scrolling, giving a feed time to load more, until nothing changes.
                 let sign: Int32 = dir == "up" ? 1 : -1, deadline = Date().addingTimeInterval(25)
                 var last = "", same = 0, rounds = 0
+                // In the background, one quiet try first; if the page didn't move, the rest uses the real cursor.
+                if inBackground {
+                    let before = pageText(app, w, cap: 4000).joined(separator: "|")
+                    for _ in 0..<4 { moveTo(p); if let e = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 1, wheel1: sign * 1500, wheel2: 0, wheel3: 0) { e.flags = []; sendScroll(e) }; Thread.sleep(forTimeInterval: 0.05) }
+                    Thread.sleep(forTimeInterval: 0.5)
+                    last = pageText(app, w, cap: 4000).joined(separator: "|")
+                    if last == before { usedRealCursor = true; fgActive = false }
+                }
+                let borrow = BG && usedRealCursor && !fgActive
+                let cursorBack = borrow ? CGEvent(source: nil)?.location : nil
+                let appBack = borrow ? NSWorkspace.shared.frontmostApplication : nil
+                if borrow { fgActive = true; _ = bringToFront(w, app) }
+                defer {
+                    if borrow {
+                        fgActive = false
+                        if let c = cursorBack { CGWarpMouseCursorPosition(c); CGAssociateMouseAndMouseCursorPosition(1) }
+                        if let a = appBack, a.processIdentifier != w.pid, !isRoamies(a.processIdentifier) { a.activate(options: []) }
+                    }
+                }
                 while Date() < deadline, same < 2 {
                     for _ in 0..<4 {
-                        CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)?.post(tap: .cghidEventTap)
-                        if let e = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 1, wheel1: sign * 1500, wheel2: 0, wheel3: 0) { e.flags = []; e.post(tap: .cghidEventTap) }
+                        moveTo(p)
+                        if let e = CGEvent(scrollWheelEvent2Source: src, units: .pixel, wheelCount: 1, wheel1: sign * 1500, wheel2: 0, wheel3: 0) { e.flags = []; sendScroll(e) }
                         Thread.sleep(forTimeInterval: 0.05)
                     }
                     Thread.sleep(forTimeInterval: 0.9)
@@ -999,11 +1246,22 @@ case "act":
                 controls = walk(app, w)
                 continue
             }
+            let before = inBackground ? pageText(app, w, cap: 4000).joined(separator: "|") : ""
             for _ in 0..<n { scrollAt(p, dy: dy, dx: dx); Thread.sleep(forTimeInterval: 0.04) }
             Thread.sleep(forTimeInterval: 0.25)
+            // Nothing moved in the background: scroll again with the real cursor.
+            if inBackground, pageText(app, w, cap: 4000).joined(separator: "|") == before {
+                withRealCursor { for _ in 0..<n { scrollAt(p, dy: dy, dx: dx); Thread.sleep(forTimeInterval: 0.04) }; Thread.sleep(forTimeInterval: 0.25) }
+            }
             done.append("scrolled \(dir)")
             controls = walk(app, w)
         case "key":
+            let combo = (s["key"] as? String ?? "").lowercased().replacingOccurrences(of: " ", with: "")
+            // Cmd+S in the background: its menu item is greyed out while the app is behind, so ask the app to save
+            // its front document directly (no dialog for one that already has a file; a new one still needs the cursor).
+            if inBackground, ["cmd+s", "command+s"].contains(combo), saveInBackground(w) { done.append("pressed \(s["key"]!) (saved)"); break }
+            if inBackground, ["cmd+s", "command+s"].contains(combo) { _ = withRealCursor { pressKey(combo) }; done.append("pressed \(s["key"]!)"); break }
+            if inBackground, pressMenuShortcut(app, s["key"] as? String ?? "") { done.append("pressed \(s["key"]!)"); break }
             guard pressKey(s["key"] as? String ?? "") else { out(["ok": false, "error": "Step \(i + 1): unknown key \(s["key"] ?? "")", "done": done]) }
             done.append("pressed \(s["key"]!)")
         case "click_at":
@@ -1012,7 +1270,20 @@ case "act":
             let global = s["global"] as? Bool ?? false
             click(global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y)); done.append("clicked at \(Int(x)),\(Int(y))")
         case "wait":
-            Thread.sleep(forTimeInterval: min(5, (s["seconds"] as? Double) ?? 0.5)); done.append("waited")
+            let secs = min(5, (s["seconds"] as? Double) ?? 0.5)
+            if let before = sigBefore, i == steps.count - 1 {
+                let end = Date().addingTimeInterval(secs)
+                var last = "", same = 0
+                while Date() < end {
+                    let now = pageSig()
+                    if now != before { same = now == last ? same + 1 : 0; if same >= 2 { break } }
+                    last = now
+                    Thread.sleep(forTimeInterval: 0.15)
+                }
+            } else {
+                Thread.sleep(forTimeInterval: secs)
+            }
+            done.append("waited")
         default:
             out(["ok": false, "error": "Step \(i + 1): unknown action \(what)", "done": done])
         }

@@ -229,6 +229,12 @@ function checkSimple(text, pipeIn, home, cwd = home) {
     }
     return verdict(SAFE);
   }
+  // sed -n '120,140p' file (or /word/p) only prints lines: read-only. Any other sed script (s///, w, e, -i) still asks.
+  if (name === 'sed') {
+    const flags = args.filter((a) => a.startsWith('-')), rest = args.filter((a) => !a.startsWith('-'));
+    if (flags.length && flags.every((f) => f === '-n') && rest.length >= 1 && /^((\d+|\$)(,(\d+|\$))?|\/[^/;{}]*\/)p$/.test(rest[0])) return verdict(SAFE);
+    return verdict(ASK);
+  }
   if (READ_ONLY.has(name)) {
     const sub = READ_ONLY_SUB[name];
     if (sub && !sub.test(joined.trim())) return verdict(ASK);
@@ -243,9 +249,22 @@ const redirectTargets = (text) => [...text.matchAll(/(?:^|[^>])>{1,2}(?!&)\s*("[
 
 /** run_command. SAFE runs, ASK needs the user's yes, BLOCK never runs. `exists(path)`, if given, lets a redirect
  *  that makes a new file run like write_file making one; without it every redirect asks. */
+// "for i in 1 2 3; do echo $i > n$i.txt; done" (also with seq 1 N): a plain loop that only writes new files.
+// It's run like the same commands written out one by one (so each file is checked like write_file making a new
+// one); anything else in a loop still asks.
+function unrollLoop(s) {
+  const m = s.match(/^((?:(?:cd|mkdir(?:\s+-p)?)\s+[^;&|`$()]+?\s*&&\s*)*)for\s+([a-z_]\w*)\s+in\s+((?:[\w.-]+\s*)+|\$\(\s*seq\s+(\d+)\s+(\d+)\s*\))\s*;\s*do\s+([^;`$()]*?(?:\$\{?\2\}?[^;`$()]*?)*)\s*;?\s*done((?:\s*&&\s*[^;`$()|]+)?)$/);
+  if (!m) return null;
+  const [, pre, v, list, a, b, body, post] = m;
+  const vals = a != null ? (Number(b) - Number(a) >= 0 && Number(b) - Number(a) < 100 ? Array.from({ length: Number(b) - Number(a) + 1 }, (_, i) => String(Number(a) + i)) : null) : list.trim().split(/\s+/);
+  if (!vals || vals.length > 100 || !/^(echo|printf)\b/.test(body.trim()) || !/>/.test(body)) return null;
+  return pre + vals.map((x) => body.replace(new RegExp(`\\$\\{?${v}\\}?(?!\\w)`, 'g'), x)).join(' && ') + post;
+}
+
 export function classifyCommand(cmd, home, { exists } = {}) {
   home = slash(home);
-  const s = String(cmd ?? '').trim();
+  const s0 = String(cmd ?? '').trim();
+  const s = unrollLoop(s0) ?? s0;
   if (!s) return verdict(BLOCK, 'That command is empty.');
   if (/:\s*\(\s*\)\s*\{.*:\s*\|\s*:.*\}/.test(s)) return verdict(BLOCK, 'That is a fork bomb.');
   if (/\b(curl|wget|fetch)\b[^|;&]*\|\s*(sudo\s+)?(ba|z|da|k|fi)?sh\b/.test(s) || /\bbase64\s+(-d|--decode|-D)\b[^|]*\|\s*(ba|z)?sh\b/.test(s)) return verdict(BLOCK, 'Downloading a script and running it straight away skips every check.');

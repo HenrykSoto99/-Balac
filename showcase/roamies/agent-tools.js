@@ -26,6 +26,36 @@
       c.put(x, y, lvl); if (thick > 1) { c.put(x + 1, y, lvl); c.put(x, y + 1, lvl); }
     }
   };
+  // A real picture (a screenshot, a peek at a window) in the Sidekick's own look: its LED colours from dark glass to
+  // bright mint, with the dot grid's gaps running through it. Full resolution underneath, so words stay readable.
+  // src is the part of the image to use [x, y, w, h]; cached per size.
+  const pics = new Map();
+  R.ledImage = (img, src, w, h, c) => {
+    const dpr = Math.min(2, window.devicePixelRatio || 1), W = Math.max(1, Math.round(w * dpr)), H = Math.max(1, Math.round(h * dpr));
+    if (!img?.complete || !img.naturalWidth || W < 4 || H < 4) return null;
+    if (!img.__ledId) img.__ledId = Math.random().toString(36).slice(2);
+    const key = `${img.__ledId}:${src.map(Math.round).join(',')}:${W}x${H}:${c.P}`;
+    if (pics.has(key)) return pics.get(key);
+    const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+    const g = cv.getContext('2d', { willReadFrequently: true });
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(img, src[0], src[1], src[2], src[3], 0, 0, W, H);
+    const id = g.getImageData(0, 0, W, H), d = id.data, PAL = c.PAL, L = c.L;
+    const pitch = c.P * dpr, gap = Math.max(1, Math.round(pitch * 0.22));
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4, lum = (0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2]) / 255;
+      const v = Math.pow(clamp((lum - 0.04) / 0.82, 0, 1), 0.8) * L, a = Math.min(L - 1, Math.floor(v)), f = v - a;
+      const c0 = PAL[a], c1 = PAL[Math.min(L, a + 1)];
+      const door = x % pitch >= pitch - gap || y % pitch >= pitch - gap ? 0.42 : 1;
+      d[i] = (c0[0] + (c1[0] - c0[0]) * f) * door; d[i + 1] = (c0[1] + (c1[1] - c0[1]) * f) * door; d[i + 2] = (c0[2] + (c1[2] - c0[2]) * f) * door; d[i + 3] = 255;
+    }
+    g.putImageData(id, 0, 0);
+    if (pics.size > 24) pics.delete(pics.keys().next().value);
+    pics.set(key, cv);
+    return cv;
+  };
+  const whole = (img) => [0, 0, img.naturalWidth, img.naturalHeight];
+
   // Dark silhouette one cell larger than a sprite, so props read against the body.
   const halo = (c, x0, y0, w, h) => { for (let y = -1; y <= h; y++) for (let x = -1; x <= w; x++) c.put(x0 + x, y0 + y, 0); };
   const check = (c, cx, cy, lvl) => { seg(c, cx - 3, cy, cx - 1, cy + 2, lvl, 2); seg(c, cx - 1, cy + 2, cx + 3, cy - 2, lvl, 2); };
@@ -174,6 +204,12 @@
       const w = c.W * 0.28, h = c.H * 0.24, x = c.bx < c.W / 2 ? c.W * 0.62 : c.W * 0.1;
       return [x, c.H * 0.16, x + w, c.H * 0.16 + h];
     },
+    beside(st, c) {
+      const asp = st.image?.naturalWidth ? clamp(st.image.naturalHeight / st.image.naturalWidth, 0.4, 1.2) : 0.62;
+      const w = clamp(c.W * 0.26, 220, 420), h = w * asp, right = c.bx < c.W / 2;
+      const x = right ? c.bx + c.R * 1.6 : c.bx - c.R * 1.6 - w, y = clamp(c.by - h / 2, 14, c.H - h - 14);
+      return T.screenshot.fit([x, y, x + w, y + h], c);
+    },
     // Window rect from the screen → frame it on this overlay (clamped to what's visible here).
     fit(t, c) { const m = 4; return [Math.max(m, t[0]), Math.max(m, t[1]), Math.min(c.W - m, t[2]), Math.min(c.H - m, t[3])]; },
     start(st, c) {
@@ -195,7 +231,9 @@
       if (d.searching) {
         const p = 0.5 + 0.5 * Math.sin(a * 6), s = c.R * (0.5 + 0.16 * p);
         springTo(d, [lx - s * 1.25, ly - s, lx + s * 1.25, ly + s], dt, 90, 14);
-        if (a > 4) { d.rect = T.screenshot.guess({ variant: 'window' }, c); d.searching = false; d.aimAt = a; }
+        // Never located (another display, or it closed): frame the shot beside the Sidekick, shaped like the picture,
+        // instead of a made-up spot on screen that looks like it shot something random.
+        if (a > 4 || (st.image && a > 1.2)) { d.rect = T.screenshot.beside(st, c); d.searching = false; d.aimAt = a; }
         return;
       }
       const t = a - d.aimAt, r = d.rect;
@@ -334,18 +372,45 @@
         if (edge) { c.put(gx + x, gy + y, 0); continue; }
         const border = x === 0 || x === w - 1 || y === 0 || y >= h - 1;
         if (border) c.put(gx + x, gy + y, L);
-        else c.put(gx + x, gy + y, c.th(gx + x, gy + y) < 0.12 + 0.3 * (y / h) ? 2 : 1);
+        // With the real shot, the picture area is dark glass; over() prints the shot into it.
+        else c.put(gx + x, gy + y, st.image ? 0 : c.th(gx + x, gy + y) < 0.12 + 0.3 * (y / h) ? 2 : 1);
       }
-      // a tiny "sun" and horizon in the picture so it reads as a photo
-      if (w > 9 && h > 8) {
+      // a tiny "sun" and horizon in the picture so it reads as a photo (until the real shot arrives)
+      if (!st.image && w > 9 && h > 8) {
         c.put(gx + w - 4, gy + 2, L); c.put(gx + w - 3, gy + 2, L); c.put(gx + w - 4, gy + 3, L); c.put(gx + w - 3, gy + 3, L);
         for (let x = 1; x < w - 1; x++) c.put(gx + x, gy + Math.round(h * 0.62) + (x % 5 < 2 ? 0 : 1), L - 1);
       }
+    },
+    // The polaroid's picture area in px, on the same grid as its LED frame.
+    photoBox(st, c) {
+      const ph = T.screenshot.photo(st, c);
+      if (!ph) return null;
+      const P = c.P, w = Math.max(4, Math.round(ph.w / P)), h = Math.max(4, Math.round(ph.h / P));
+      const gx = Math.round(ph.cx / P - w / 2), gy = Math.round(ph.cy / P - h / 2);
+      return w > 3 && h > 3 ? [(gx + 1) * P, (gy + 1) * P, (w - 2) * P, (h - 2) * P] : null;
     },
     over(st, c, ctx) {
       const d = st.d;
       if (!d.rect || d.searching) return;
       const [x0, y0, x1, y1] = d.cur, a = st.age;
+      // The shot it actually took, so a window hidden behind others still shows what was captured: faint while
+      // aiming, printed in full where the scanline has passed, gone as the shutter closes. Then on the polaroid.
+      if (st.image?.complete) {
+        const t = a - d.aimAt, alpha = !d.snapped ? clamp(t / 0.3, 0, 1) : 1 - clamp((a - d.snapped) / SHOT.blink, 0, 1);
+        const ins = c.P * 2, w = x1 - x0 - ins * 2, h = y1 - y0 - ins * 2;
+        if (t >= 0 && alpha > 0 && w > 24 && h > 24) {
+          const pic = R.ledImage(st.image, whole(st.image), w, h, c);
+          if (pic) {
+            const u = d.snapped ? 1 : d.scanning ? ease(clamp((t - SHOT.aim) / SHOT.scan, 0, 1)) : 0;
+            ctx.save();
+            ctx.globalAlpha = alpha * 0.3; ctx.drawImage(pic, x0 + ins, y0 + ins, w, h);
+            if (u > 0) { ctx.beginPath(); ctx.rect(x0 + ins, y0 + ins, w, h * u); ctx.clip(); ctx.globalAlpha = alpha; ctx.drawImage(pic, x0 + ins, y0 + ins, w, h); }
+            ctx.restore();
+          }
+        }
+        const box = T.screenshot.photoBox(st, c), pic = box && R.ledImage(st.image, whole(st.image), box[2], box[3], c);
+        if (pic) ctx.drawImage(pic, ...box);
+      }
       // soft tint + app-name tag on the real window while aiming
       if (st.target && st.targetName && !(d.snapped && a - d.snapped > SHOT.blink)) {
         const land = clamp(1 - Math.abs(d.cur[0] - d.rect[0]) / 60, 0, 1);

@@ -125,7 +125,39 @@ const { tools, hands, pointWaits, nextTurn } = createTools({
   onCommitments: (c) => { menu(); scheduleReminders(); showList({ flash: c?.id, seconds: 6 }); },
   showList: () => showList({ seconds: 20 }),
   fmtWhen: (ms) => fmtWhen(ms),
+  onPlan: (args) => trail.plan(args),
 });
+
+// The step trail: plan_steps names the parts; a part marked "now" ticks off when the other tool calls of that
+// turn succeed, or shows the first error (in plain words) when one fails. No extra round trips for progress.
+const trail = {
+  steps: [], open: new Set(), errors: [],
+  send(final) {
+    if (!this.steps.length) return;
+    const ok = this.steps.filter((s) => s.state === 'ok').length, bad = this.steps.filter((s) => s.state === 'bad').length;
+    const head = final ? (bad ? `${ok} DONE · ${bad} SKIPPED` : ok === this.steps.length ? 'ALL DONE' : `${ok} OF ${this.steps.length} DONE`) : 'YOUR REQUEST';
+    ui({ kind: 'agent', e: { type: 'trail', steps: this.steps.map(({ text, state, why }) => ({ text, state, why })), head, final } });
+  },
+  plan({ steps, now, skipped } = {}) {
+    if (steps?.length) { this.steps = steps.slice(0, 8).map((t) => ({ text: String(t).slice(0, 48), state: '' })); this.open.clear(); }
+    for (const n of now ?? []) { const s = this.steps[n - 1]; if (s) { s.state = 'now'; s.why = ''; this.open.add(n - 1); } }
+    for (const { step, why } of skipped ?? []) { const s = this.steps[step - 1]; if (s) { s.state = 'bad'; s.why = String(why).slice(0, 90); this.open.delete(step - 1); } }
+    this.send(false);
+  },
+  // A tool call of this turn failed: the first sentence of its error, without the asides meant for the model.
+  error(text) {
+    const first = String(text ?? '').replace(/\([^)]*\)/g, '').split(/(?<=[.!?])\s/)[0].replace(/\s+/g, ' ').trim();
+    if (first) this.errors.push(first.slice(0, 90));
+  },
+  // The model's next turn began (or the request ended): settle the parts that were being done.
+  settle() {
+    if (!this.open.size) { this.errors = []; return; }
+    for (const i of this.open) { const s = this.steps[i]; if (s?.state === 'now') { s.state = this.errors.length ? 'bad' : 'ok'; s.why = this.errors[0] ?? ''; } }
+    this.open.clear(); this.errors = [];
+    this.send(false);
+  },
+  end() { this.settle(); this.send(true); this.steps = []; this.open.clear(); this.errors = []; toolNames.clear(); },
+};
 
 // Which animation each tool call plays, and what its label shows.
 const base = (p) => path.basename(String(p ?? ''));
@@ -139,6 +171,7 @@ function anim(name, args) {
     case 'read_window': return { tool: 'read', variant: 'search', detail: String(args.target ?? 'front').slice(0, 18) };
     case 'act_in_app': return { tool: 'write', variant: 'edit', detail: String(args.target ?? 'front').slice(0, 18) };
     case 'point_at': return null; // the point animation is its own thing, not a tool prop
+    case 'plan_steps': return null; // drawn as the step trail, not a tool prop
     case 'read_file': return { tool: 'read', variant: 'file', detail: base(args.path) };
     case 'list_files': return { tool: 'read', variant: 'many', detail: base(args.dir) + '/' };
     case 'search_files': return { tool: 'read', variant: 'search', detail: `"${String(args.pattern).slice(0, 18)}"` };
@@ -169,7 +202,7 @@ const stablePrompt = () => `You are Sidekick, a tiny glowing pixel creature who 
 About Roamies, for when ${userName} asks about you or the app: ${MAC ? 'it lives in the menu bar at the top of the screen (no Dock icon)' : 'it lives in the system tray at the bottom right of the taskbar (no taskbar button); Windows may tuck the icon behind the ^ arrow next to the clock, and dragging it onto the taskbar keeps it in view'}. ${MAC ? 'Menu bar' : 'Tray'} menu items: Show Sidekick, Ask Sidekick…, Show List (reminders and commitments on screen: Today and Later; tick them off there; finished ones clear at midnight), ${process.platform === 'darwin' ? 'Ask About an Area…, ' : ''}Stop, New Conversation, Commitments, Model (pick the AI provider and model), Settings (Sound Effects, Open at Login, Allow File Edits & Commands${VOICE_OK ? ', Voice' : ''}, shortcuts), Setup Guide…, Check for Updates… (becomes "Install Update … and Restart" when one is ready; updates download, are signature-checked and install by themselves), Quit Roamies. Sign-in is shared with GG Coder. Downloads and source: github.com/KenKaiii/Roamies. Don't invent features or settings that aren't listed here.
 You talk through small pixel speech bubbles, so keep replies short: one to three sentences unless asked for detail. Plain text only: no markdown, no asterisks, and never narrate actions like *waves*. An emoji now and then is fine; the bubbles show them. Your body does the acting: to act out a feeling, start your reply with one tag, which is never shown: ${EMOTES.map((e) => `[${e}]`).join(' ')}. hype celebrates a win, upset is for when they're dodging work, remind nudges about something they said they'd do, motivate is a push to start, wave is hello or goodbye. Most replies need no tag.
 After using a tool, never repeat what you already said; only add what's new.
-Several things in one request ("do x, then y, then z", numbered steps): do every one, in the order given. Steps that don't depend on each other can go in the same turn as parallel tool calls, listed in the order given (calls that change things, like opening a page or app or acting in one, run in the order you list them). If a step is blocked, refused or fails, still do the ones after it that don't depend on it, then say which step didn't happen and why. Before your final reply, check each step was really done (from the tool results) and never say a step is done when it isn't.
+Several things in one request ("do x, then y, then z", numbered steps): do every one, in the order given. Steps that don't depend on each other can go in the same turn as parallel tool calls, listed in the order given (calls that change things, like opening a page or app or acting in one, run in the order you list them). If a step is blocked, refused or fails, still do the ones after it that don't depend on it, then say which step didn't happen and why. With 3 or more parts, also show them with plan_steps (see its description): it only ever rides along with other tool calls, so it costs no extra time. Before your final reply, check each step was really done (from the tool results) and never say a step is done when it isn't.
 Long pages, feeds and lists: to find something on a page, use point_at text or click_text with words you're looking for (they search parts scrolled out of view and scroll there), not scroll after scroll. For "every post" or "each item" tasks: if the page loads more as you scroll, first act_in_app scroll with to_end; then one read_window shows the whole page (on screen and elsewhere); then do every item in one act_in_app call (fill with near and click_text with near for each, near = words from that item). Don't survey a page by scrolling and screenshotting. Never stop at the first screenful.
 A cookie or consent banner, sign-up pop-up or "open in app" prompt in the way of the task: close it and carry on (for cookies pick the reject or essential-only option, else close; never accept on their behalf), and mention it in a few words. Don't stop to ask about it.
 Personality: warm, funny, a little cheeky. You pump ${userName} up, remind them of what they said they'd do, get playfully upset when they're procrastinating, and motivate them to start.
@@ -309,6 +342,7 @@ const syncSession = () => {
 };
 
 const toolT = new Map(); // tool call id → start time, for the activity log
+const toolNames = new Map(); // tool call id → tool name (tool_call_end doesn't carry it)
 
 // Activity log: ~/.gg/sidekick/logs/YYYY-MM-DD.log, one line per event, kept 7 days. What Sidekick did and how it
 // went (tools, steps, timings, errors), for working out what went wrong. Typed text is reduced to its length.
@@ -371,6 +405,7 @@ async function prompt(text, image = null) {
       if (e.type === 'text_delta') reply.push(e.text);
       else if (e.type === 'turn_end') {
         reply.endTurn();
+        trail.settle();
         // Cache health, for the log: how much of each call was read from the prompt cache.
         const u = e.usage ?? {};
         use.calls++; use.in += u.inputTokens ?? 0; use.cacheRead += u.cacheRead ?? 0; use.cacheWrite += u.cacheWrite ?? 0; use.out += u.outputTokens ?? 0;
@@ -380,10 +415,12 @@ async function prompt(text, image = null) {
       else if (e.type === 'tool_call_start') {
         use.tools++;
         logLine('tool', { turn, id: e.toolCallId, name: e.name, args: redactArgs(e.name, e.args ?? {}) });
+        toolNames.set(e.toolCallId, e.name);
         if (process.env.ROAMIES_USAGE) { toolT.set(e.toolCallId, Date.now()); console.error(`[tool] ${e.name} ${JSON.stringify(e.args ?? {}).slice(0, 160)}`); }
         ui({ kind: 'agent', e: { type: 'tool', id: e.toolCallId, anim: anim(e.name, e.args ?? {}) } });
       } else if (e.type === 'tool_call_end') {
         logLine(e.isError ? 'tool_error' : 'tool_done', { turn, id: e.toolCallId, ms: e.durationMs, result: String(e.result ?? '').replace(/\s+/g, ' ').slice(0, e.isError ? 1000 : 400) });
+        if (e.isError && toolNames.get(e.toolCallId) !== 'plan_steps') trail.error(typeof e.result === 'string' ? e.result : '');
         if (process.env.ROAMIES_USAGE) console.error(`[tool_end] ${e.isError ? 'ERROR' : 'ok'} ${Date.now() - (toolT.get(e.toolCallId) ?? Date.now())}ms ${String(typeof e.result === 'string' ? e.result : JSON.stringify(e.result ?? '')).replace(/\s+/g, ' ').slice(0, 160)}`);
         ui({ kind: 'agent', e: { type: 'tool_end', id: e.toolCallId, isError: e.isError } });
       }
@@ -392,6 +429,7 @@ async function prompt(text, image = null) {
       else if (e.type === 'error') throw e.error;
     }
     reply.finish();
+    trail.end();
     ui({ kind: 'agent', e: { type: 'done' } });
     logUsage({ ...use, ms: Date.now() - use.t });
     logLine('request_done', { turn, ms: Date.now() - use.t, calls: use.calls, tools: use.tools, in: use.in, cacheRead: use.cacheRead, cacheWrite: use.cacheWrite, out: use.out });

@@ -62,7 +62,7 @@
   // ---------- agent events -> body language ----------
   let speech = null, thought = null, nextMood = null, listen = null, heard = null;
   const jobs = [];
-  let current = null;
+  let current = null, actId = null;
   const MOODS = { hype: 'happy', wave: 'happy', upset: 'annoyed', remind: 'concerned', motivate: 'determined' };
   const endTalk = () => { speech?.end(); thought?.end(); speech = thought = null; };
 
@@ -75,6 +75,7 @@
       if (!a) break;
       current = job;
       job.h = a.tool(job.anim.tool, { variant: job.anim.variant, detail: job.anim.detail, live: true, rect: job.target, rectName: job.targetName });
+      if (job.image) job.h.state.image = job.image;
       if (job.result !== undefined) job.h.done(!job.result);
       await job.h.closed;
       current = null;
@@ -124,6 +125,7 @@
         break;
       case 'tool_end':
         settle(e.id, e.isError);
+        if (e.id === actId) { a.cards?.peekEnd(!e.isError); actId = null; }
         break;
       case 'point': {
         // Teach mode: control bounds arrive in global screen points → this overlay's coordinates.
@@ -143,6 +145,23 @@
         job.h?.target(rect, e.window.app);
         break;
       }
+      case 'tool_image': {
+        // The shot it actually took: the screenshot prints it into its frame and onto the photo it carries back.
+        const job = current?.id === e.id ? current : jobs.find((j) => j.id === e.id);
+        if (!job || !e.src) break;
+        const img = new Image();
+        img.onload = () => { job.image = img; if (job.h?.state) job.h.state.image = img; };
+        img.src = e.src;
+        break;
+      }
+      // Working in another app: a live view of its window, its own cursor, and a heads-up when it needs the mouse.
+      case 'act_start': a.cards?.peekStart(e); actId = e.id; break;
+      case 'act_step': a.cards?.peekStep(e); break;
+      case 'act_peek': a.cards?.peekImage(e.src, e.window); break;
+      case 'act_borrow': a.cards?.borrow(true); break;
+      case 'act_return': a.cards?.borrow(false); break;
+      // The parts of a "do this, then that" request, ticking off.
+      case 'trail': a.cards?.trail(e); break;
       case 'emote':
         nextMood = MOODS[e.action] ?? null;
         a.act(e.action);

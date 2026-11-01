@@ -1,6 +1,6 @@
 // The agent's tools: screen capture, reading and working other apps (macOS "hands" helper), files, commands,
 // web pages and memory. Every file, command, URL and open goes through safety.mjs first.
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -28,6 +28,25 @@ const STALE_ID = 'The page changed since read_window, so that id is out of date.
 function pickTextMatch(matches, find) {
   const q = String(find).trim();
   return (matches ?? []).find((m) => m.match !== 'partial' && m.text.trim().length <= Math.max(40, q.length * 3)) ?? null;
+}
+// Like run(), but hands each "@{json}" line the helper writes to stderr to onLine as it arrives.
+function runLive(cmd, args, onLine) {
+  return new Promise((res) => {
+    const p = spawn(cmd, args, { windowsHide: true });
+    let stdout = '', stderr = '', buf = '';
+    const timer = setTimeout(() => p.kill(), 120_000);
+    p.stdout.on('data', (d) => { stdout += d; });
+    p.stderr.on('data', (d) => {
+      buf += d;
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 1);
+        if (line.startsWith('@')) { try { onLine(JSON.parse(line.slice(1))); } catch {} } else stderr += line + '\n';
+      }
+    });
+    p.on('error', (err) => { clearTimeout(timer); res({ err, stdout, stderr }); });
+    p.on('close', (code) => { clearTimeout(timer); res({ err: code ? new Error(`exit ${code}`) : null, stdout, stderr: stderr + buf }); });
+  });
 }
 // An app named in read_window or act_in_app that isn't open: open it (with the open tool's safety check) and wait
 // up to 6 s for its window. True when it's there. Only plain app names, never paths or links.
@@ -71,7 +90,21 @@ export const imageBlock = async (file, mediaType) => {
 };
 
 // deps: what the tools need from the app (settings, overlay, input bubble, menu). State lives per instance.
-export function createTools({ allowActions, ui, ask, openUrl, onCommitments, showList, fmtWhen, commitmentsText, userName }) {
+const BROWSERS = /^(browser|safari|google chrome|chrome|arc|firefox|microsoft edge|edge|brave browser|brave|opera|vivaldi)$/i;
+const ADDRESS = /^(?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#]\S*)?$/i;
+/** The web address an act_in_app call only types into a browser's address bar (then Return, then maybe a wait), or null. */
+export function typedAddress(target, steps) {
+  if (!BROWSERS.test(String(target).trim())) return null;
+  const i = steps.findIndex((s) => s.do === 'type');
+  if (i < 0 || !ADDRESS.test(String(steps[i].text ?? '').trim()) || /\.app$/i.test(steps[i].text)) return null;
+  const bar = /address|search field|smart search|url|location|new tab|omnibox/i;
+  const before = steps.slice(0, i).every((s) => (s.do === 'key' && /^(cmd|command)\+(l|t)$/i.test(String(s.key).replace(/\s/g, ''))) || (s.do === 'click_text' && bar.test(s.text ?? '')));
+  const ret = steps[i + 1]?.do === 'key' && /^(return|enter)$/i.test(String(steps[i + 1].key).trim());
+  const after = steps.slice(i + 2).every((s) => s.do === 'wait');
+  return before && ret && after ? String(steps[i].text).trim() : null;
+}
+
+export function createTools({ allowActions, ui, ask, openUrl, onCommitments, showList, fmtWhen, commitmentsText, userName, onPlan = () => {} }) {
   let axNudged = 0;
   const pointWaits = new Map(); // point_at call id → resolve, settled when the overlay has shown the step
   let lastShot = null; // how the latest screenshot's pixels map to screen points (see pointing.mjs)
@@ -99,9 +132,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       return c;
     };
   }
+  // onProgress: the helper's live "@{...}" lines on stderr while it acts (steps, borrowing the cursor), as objects.
   async function hands(...args) {
     if (!HANDS) throw new Error('This needs the Roamies app on macOS.');
-    const r = await run(HANDS, args, { timeout: 120_000 });
+    const onProgress = typeof args.at(-1) === 'function' ? args.pop() : null;
+    const r = onProgress ? await runLive(HANDS, args, onProgress) : await run(HANDS, args, { timeout: 120_000 });
     let res;
     try { res = JSON.parse(r.stdout.trim().split('\n').pop() || '{}'); } catch { throw new Error(`hands helper failed: ${r.stderr.trim().slice(0, 200) || 'no output'}`); }
     if (res.ok === false && !res.cancelled) {
@@ -139,7 +174,14 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       }
       // 1568 px is Claude's own cap; a bigger image gets shrunk again and its coordinates drift. The helper shrinks it
       // itself and says the final size; an older helper doesn't, so sips does it here.
-      const [res] = await Promise.all([hands('capture', file, spec, '1568'), shown]);
+      const thumb = ctx?.toolCallId ? `${file.slice(0, -4)}-peek.jpg` : null;
+      const [res] = await Promise.all([hands('capture', file, spec, '1568', ...(thumb ? [thumb, '900'] : [])), shown]);
+      // The Sidekick shows what it actually took: in its frame and on the photo it carries back.
+      if (thumb && existsSync(thumb)) {
+        const b64 = (await fs.readFile(thumb)).toString('base64');
+        ui({ kind: 'agent', e: { type: 'tool_image', id: ctx.toolCallId, src: `data:image/jpeg;base64,${b64}` } });
+        fs.unlink(thumb).catch(() => {});
+      }
       const size = Array.isArray(res.pixels) && res.pixels.length === 2 ? res.pixels : await fitImage(file);
       const bounds = res.window?.bounds ?? res.bounds;
       lastShot = size && bounds ? { ...shotMap(bounds, ...size), bounds, win: res.window?.id ?? null, turn } : null;
@@ -257,7 +299,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       },
       {
         name: 'act_in_app',
-        description: "Do things in another app for the user: click, fill in forms, pick from dropdowns and date pickers, scroll, press keys. Steps run in order; put a whole task in one call. {do:'click_text', text} clicks a link, button or tab by its visible words (no read_window needed). {do:'fill', field, text} fills one text field: field is its label or placeholder as shown (or id), it replaces the text and checks it took; use one fill per field, never click a label and type. {do:'choose', field, option} picks an option in a dropdown, select menu, type-to-search box or picker: it opens it, types or scrolls through the list (hundreds of options, even lists that only load rows as they scroll) and picks; field is its label or id. Never scroll a dropdown list yourself. Many identical buttons or fields (a Reply under every post): add near, words from that item (author or first words of the post), to click_text or fill and it uses the one belonging to that item, scrolling to it. {do:'scroll', direction:'down'|'up'|'left'|'right', amount, text or id} scrolls the page, or the list or panel under that text or control; needed only for content that loads as you scroll: {do:'scroll', direction:'down', to_end:true} keeps going until the feed stops loading more, in one step; then read_window lists everything that loaded. Things already on the page don't need scrolling: click_text, fill and point_at find them anywhere on it and scroll there themselves. {do:'click', id}; {do:'key', key} e.g. 'return', 'tab', 'escape', 'cmd+l'; {do:'type', text} only when the cursor is already in a text field; {do:'click_at', x, y} pixels in your latest screenshot, last resort; {do:'wait', seconds}. Dates: fill the date field with the date as the page shows dates (e.g. 10/30/2026); if a calendar opens instead, choose the month and year, then click_text the day (its label often reads like 'Choose Friday, October 30th, 2026'). After the steps the result lists the window's controls and text as they are now (after scrolls too), with fresh ids and field values, so check them there instead of calling read_window again. Never submit payments, send messages or delete things unless the user clearly asked for exactly that; showing or pointing at a button is not a request to click it. Clicks on delete, pay, send or sign-out buttons always ask the user first, so when they asked you to click one, call act_in_app right away instead of asking in your reply; the app asks them.",
+        description: "Do things in another app for the user: click, fill in forms, pick from dropdowns and date pickers, scroll, press keys. Steps run in order; put a whole task in one call. {do:'click_text', text} clicks a link, button or tab by its visible words (no read_window needed). {do:'fill', field, text} fills one text field: field is its label or placeholder as shown (or id), it replaces the text and checks it took; use one fill per field, never click a label and type. {do:'choose', field, option} picks an option in a dropdown, select menu, type-to-search box or picker: it opens it, types or scrolls through the list (hundreds of options, even lists that only load rows as they scroll) and picks; field is its label or id. Never scroll a dropdown list yourself. To go to a web address, use the open tool (instant), not the address bar. Many identical buttons or fields (a Reply under every post): add near, words from that item (author or first words of the post), to click_text or fill and it uses the one belonging to that item, scrolling to it. {do:'scroll', direction:'down'|'up'|'left'|'right', amount, text or id} scrolls the page, or the list or panel under that text or control; needed only for content that loads as you scroll: {do:'scroll', direction:'down', to_end:true} keeps going until the feed stops loading more, in one step; then read_window lists everything that loaded. Things already on the page don't need scrolling: click_text, fill and point_at find them anywhere on it and scroll there themselves. {do:'click', id}; {do:'key', key} e.g. 'return', 'tab', 'escape'; {do:'type', text} only when the cursor is already in a text field; {do:'click_at', x, y} pixels in your latest screenshot, last resort; {do:'wait', seconds}. Dates: fill the date field with the date as the page shows dates (e.g. 10/30/2026); if a calendar opens instead, choose the month and year, then click_text the day (its label often reads like 'Choose Friday, October 30th, 2026'). After the steps the result lists the window's controls and text as they are now (after scrolls too), with fresh ids and field values, so check them there instead of calling read_window again. Never submit payments, send messages or delete things unless the user clearly asked for exactly that; showing or pointing at a button is not a request to click it. Clicks on delete, pay, send or sign-out buttons always ask the user first, so when they asked you to click one, call act_in_app right away instead of asking in your reply; the app asks them.",
         parameters: z.object({
           target: z.string().optional(),
           steps: z.array(z.object({
@@ -275,6 +317,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
           const asked = String(target || 'front');
           const steps = given.filter((s) => !['read_window', 'take_screenshot', 'screenshot'].includes(s.do));
           if (!steps.length) throw new Error('Those steps only read the window. Use read_window or take_screenshot for that.');
+          // "Type a web address into the browser's bar and press Return" is just opening a link: do that directly
+          // (instant, and nothing can land in the wrong field) instead of clicking the bar and typing.
+          const url = typedAddress(asked, steps);
+          if (url) {
+            const r = await tools.find((x) => x.name === 'open').execute({ target: url, app: /^(front|browser)$/i.test(asked) ? undefined : asked });
+            return `${r} (went straight to the address instead of typing it)`;
+          }
           // Stay on the exact window read for this request: an app can have several, and keystrokes must land in this one.
           const sameApp = lastRead?.turn === turn && (asked === 'front' || (lastRead.app ?? '').toLowerCase().includes(asked.toLowerCase()) || (asked.toLowerCase() === 'browser'));
           const t = sameApp ? `window:${lastRead.win}` : asked;
@@ -301,19 +350,46 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
             delete s.label;
           }
           const plan = { steps: mapped, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
+          // Show it working: steps (where it clicks, what it types) and borrowing the cursor go to the Sidekick live;
+          // a small picture of the window follows each step, so a window behind others can still be watched.
+          const id = ctx?.toolCallId;
+          let peekWin = null, peekBusy = false, peekAgain = false, peekN = 0;
+          const peek = async () => {
+            if (!id || !peekWin) return;
+            if (peekBusy) { peekAgain = true; return; }
+            peekBusy = true;
+            try {
+              const f = path.join(os.tmpdir(), `sidekick-peek-${process.pid}-${++peekN}.jpg`);
+              const r = await hands('capture', f, `window:${peekWin}`, '640').catch(() => null);
+              if (r?.ok !== false && existsSync(f)) {
+                ui({ kind: 'agent', e: { type: 'act_peek', id, src: `data:image/jpeg;base64,${(await fs.readFile(f)).toString('base64')}`, window: r?.window } });
+                fs.unlink(f).catch(() => {});
+              }
+            } finally { peekBusy = false; if (peekAgain) { peekAgain = false; peek(); } }
+          };
+          const onProgress = (ev) => {
+            if (!id) return;
+            if (ev.ev === 'start') { peekWin = ev.window?.id ?? null; ui({ kind: 'agent', e: { type: 'act_start', id, window: ev.window, steps: ev.steps } }); peek(); }
+            else if (ev.ev === 'step') { ui({ kind: 'agent', e: { type: 'act_step', id, ...ev } }); setTimeout(peek, 350); }
+            else if (ev.ev === 'borrow' || ev.ev === 'return') ui({ kind: 'agent', e: { type: `act_${ev.ev}`, id } });
+          };
+          const act = () => hands('act', JSON.stringify(plan), onProgress);
           let res;
           try {
-            try { res = await hands('act', JSON.stringify(plan)); }
+            try { res = await act(); }
             catch (err) {
               // The app isn't open yet: open it (the same check as the open tool) and go on, instead of a round trip.
-              if (plan.app && /No matching window/.test(String(err?.message ?? err)) && await launchApp(plan.app, hands)) { res = await hands('act', JSON.stringify(plan)); return finish(res); }
+              if (plan.app && /No matching window/.test(String(err?.message ?? err)) && await launchApp(plan.app, hands)) { res = await act(); return finish(res); }
               // The window read earlier closed (a date picker or popup): use the app's front window instead.
               if (!plan.window || !/No matching window/.test(String(err?.message ?? err))) throw err;
               delete plan.window;
               if (asked !== 'front' && lastRead?.app) plan.app = lastRead.app;
-              res = await hands('act', JSON.stringify(plan));
+              res = await act();
             }
-          } finally { if (lastShot && mapped.some((s) => s.do !== 'wait')) lastShot.used = true; }
+          } finally {
+            if (lastShot && mapped.some((s) => s.do !== 'wait')) lastShot.used = true;
+            if (id) { await peek(); ui({ kind: 'agent', e: { type: 'act_end', id } }); }
+          }
           return finish(res);
           function finish(res) {
             if (!res.controls) return `In ${res.window.app}: ${res.done.join(', ')}.`;
@@ -458,6 +534,17 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       name: 'forget_fact', description: 'Delete a saved fact that is wrong or that the user asks you to forget. Ids are in the memory list in your instructions.',
       parameters: z.object({ id: z.string() }),
       execute: async ({ id }) => { const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text}`; },
+    },
+    {
+      // The step trail on screen. Free to call: always alongside other tool calls, never in a turn of its own.
+      name: 'plan_steps',
+      description: 'Shows the user a checklist of the parts of a request with 3 or more separate parts (do x, then y, then z). First call: steps, a few words each, in order, in the same turn as your first action. After that, in the same turn as the tool calls that do a part, call it with now: [that part\'s number(s), from 1]; it ticks off by itself when those calls succeed. A part you skip or can\'t do: skipped: [{step, why}], why in a few plain words, in the same turn as your next tool call. Never call it in a turn on its own, and never for one- or two-part requests.',
+      parameters: z.object({
+        steps: z.array(z.string()).min(2).max(8).optional(),
+        now: z.array(z.number().int()).optional(),
+        skipped: z.array(z.object({ step: z.number().int(), why: z.string() })).optional(),
+      }),
+      execute: async (args) => { onPlan(args); return 'ok'; },
     },
     {
       name: 'show_list', description: "Show the user their list on screen (reminders and commitments, Today and Later). Use when they ask to see their list, to-dos or reminders; then answer in a few words, don't read it all out.",

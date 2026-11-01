@@ -540,7 +540,7 @@ func optionIn(_ list: AXUIElement, _ q: String) -> AXUIElement? {
 func scrollListFor(_ app: AXUIElement, _ w: Win, _ list: AXUIElement, _ option: String) -> AXUIElement? {
     // In the background: an option already in view needs no scrolling; finding one further down needs the wheel,
     // which only the real cursor can turn.
-    if inBackground { if let o = optionIn(list, fold(option)) { return o }; return withRealCursor { scrollListFor(app, w, list, option) } }
+    if inBackground { if let o = optionIn(list, fold(option)) { return o }; return withRealCursor { scrollListFor(app, w, list, option) } ?? nil }
     let q = fold(option), win = CGRect(x: w.x, y: w.y, width: w.w, height: w.h)
     let deadline = Date().addingTimeInterval(20)
     for dir: Int32 in [-1, 1] {
@@ -721,18 +721,43 @@ func bgClick(_ pid: pid_t, _ p: CGPoint) -> Bool {
     }
     return false
 }
+/// Live progress for the overlay while acting: one JSON line per event on stderr, prefixed with "@" (stdout keeps
+/// the single result line). The sidecar turns these into the Sidekick's cursor, window peek and heads-up.
+func progress(_ d: [String: Any]) {
+    guard let data = try? JSONSerialization.data(withJSONObject: d), let line = String(data: data, encoding: .utf8) else { return }
+    FileHandle.standardError.write(("@" + line + "\n").data(using: .utf8)!)
+}
+/// Before taking the real cursor: tell the user (the Sidekick says so), and if they're using the mouse or keyboard
+/// right now give them a moment to let go. Returns what to restore afterwards.
+func borrowBegin() -> (CGPoint?, NSRunningApplication?)? {
+    progress(["ev": "borrow"])
+    // A moment for the heads-up to show, then wait until they've stopped typing and moving the mouse for a second:
+    // taking over mid-sentence sends their keystrokes into the target app. If they keep going, don't take over.
+    Thread.sleep(forTimeInterval: 0.9)
+    let anyInput = CGEventType(rawValue: ~0)!
+    let until = Date().addingTimeInterval(8)
+    while CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput) < 1.0 {
+        if Date() > until { progress(["ev": "return"]); return nil }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    return (CGEvent(source: nil)?.location, NSWorkspace.shared.frontmostApplication)
+}
+/// Set when a step needed the real cursor but the user was busy, so it was skipped instead.
+var userBusy = false
+/// Gives the cursor and the front app back.
+func borrowEnd(_ saved: (CGPoint?, NSRunningApplication?), _ w: Win) {
+    if let c = saved.0 { CGWarpMouseCursorPosition(c); CGAssociateMouseAndMouseCursorPosition(1) }
+    if let prev = saved.1, prev.processIdentifier != w.pid, !isRoamies(prev.processIdentifier) { prev.activate(options: []) }
+    progress(["ev": "return"])
+}
 /// Runs body with the real cursor and keyboard, then gives them back to the user.
-func withRealCursor<T>(_ body: () -> T) -> T {
+@discardableResult
+func withRealCursor<T>(_ body: () -> T) -> T? {
     guard BG, !fgActive, let w = bgWin, let app = bgApp else { return body() }
     usedRealCursor = true
-    let cursor = CGEvent(source: nil)?.location
-    let prev = NSWorkspace.shared.frontmostApplication
+    guard let saved = borrowBegin() else { userBusy = true; return nil }
     fgActive = true
-    defer {
-        fgActive = false
-        if let c = cursor { CGWarpMouseCursorPosition(c); CGAssociateMouseAndMouseCursorPosition(1) }
-        if let prev, prev.processIdentifier != w.pid, !isRoamies(prev.processIdentifier) { prev.activate(options: []) }
-    }
+    defer { fgActive = false; borrowEnd(saved, w) }
     _ = bringToFront(w, app)
     return body()
 }
@@ -740,6 +765,40 @@ func withRealCursor<T>(_ body: () -> T) -> T {
 /// apps (TextEdit, Pages, Numbers, Preview…) support. Only documents that already have a file (no Save dialog).
 func saveInBackground(_ w: Win) -> Bool {
     guard let bundle = NSRunningApplication(processIdentifier: w.pid)?.bundleIdentifier else { return false }
+    // The window's own file, from its accessibility info: matches the right document even when several share a name.
+    // TextEdit saves but often never answers the save event, so don't wait for a reply: watch the file change instead.
+    if let axw = axWindow(axApp(w), w), let doc = str(axw, "AXDocument"), let url = URL(string: doc), url.isFileURL {
+        let path = url.path
+        let esc = path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let mtime = { (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date) ?? nil }
+        let before = mtime()
+        let script = """
+        with timeout of 3 seconds
+        tell application id "\(bundle)"
+        repeat with x in documents
+        set p to ""
+        try
+        set p to (path of x) as text
+        end try
+        if p is "\(esc)" or "/private" & p is "\(esc)" or p is "/private\(esc)" then
+        ignoring application responses
+        save x
+        end ignoring
+        return
+        end if
+        end repeat
+        end tell
+        end timeout
+        error "not found"
+        """
+        if run("/usr/bin/osascript", ["-e", script]) == 0 {
+            let until = Date().addingTimeInterval(3)
+            while Date() < until {
+                if let a = mtime(), a != before { return true }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+        }
+    }
     let title = w.title.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     let script = """
     with timeout of 8 seconds
@@ -886,8 +945,18 @@ case "locate":
 case "capture":
     // capture <out> <target> [max]: with max, the image is shrunk here to at most max px on its long side
     // (in-process, no extra sips runs) and its final pixel size is returned as "pixels".
-    guard args.count >= 3 else { fail("usage: capture <out> <target> [max]") }
+    // capture <out> <target> [max] [thumb thumbMax]: thumb is a second, smaller copy for the Sidekick to show.
+    guard args.count >= 3 else { fail("usage: capture <out> <target> [max] [thumb thumbMax]") }
     let file = args[1], target = args[2], maxPx = args.count >= 4 ? Int(args[3]) : nil
+    let thumb = args.count >= 5 ? args[4] : nil, thumbMax = args.count >= 6 ? Int(args[5]) ?? 900 : 900
+    func makeThumb() {
+        guard let thumb, let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: file) as CFURL, nil) else { return }
+        let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: thumbMax, kCGImageSourceCreateThumbnailWithTransform: true]
+        guard let img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary),
+              let dst = CGImageDestinationCreateWithURL(URL(fileURLWithPath: thumb) as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(dst, img, [kCGImageDestinationLossyCompressionQuality: 0.72] as CFDictionary)
+        _ = CGImageDestinationFinalize(dst)
+    }
     func shrink() -> [Int]? {
         guard let maxPx, let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: file) as CFURL, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
@@ -905,12 +974,14 @@ case "capture":
         let d = CGDisplayBounds(CGMainDisplayID())
         var o: [String: Any] = ["ok": true, "file": file, "what": "screen", "bounds": [Int(d.minX), Int(d.minY), Int(d.width), Int(d.height)]]
         if let px = shrink() { o["pixels"] = px }
+        makeThumb()
         out(o)
     }
     guard let w = resolve(target) else { fail("No matching window is open\(target.hasPrefix("app:") ? " for \(target.dropFirst(4))" : "").") }
     guard run("/usr/sbin/screencapture", ["-x", "-o", "-t", "jpg", "-l", String(w.id), file]) == 0 else { fail("Window capture failed. Roamies may need Screen Recording permission.") }
     var o: [String: Any] = ["ok": true, "file": file, "window": winInfo(w)]
     if let px = shrink() { o["pixels"] = px }
+    makeThumb()
     out(o)
 
 case "select":
@@ -993,6 +1064,19 @@ case "act":
     }
     var controls = walk(app, w)
     var done: [String] = []
+    progress(["ev": "start", "window": winInfo(w), "steps": steps.count])
+    // What a step is about to touch (global points) and what it types. Password fields only send dots.
+    func emitStep(_ i: Int, _ what: String, _ e: AXUIElement?, at: CGPoint? = nil, label: String = "", text: String? = nil) {
+        var d: [String: Any] = ["ev": "step", "i": i, "do": what, "label": String(label.prefix(60))]
+        if let e, let f = frame(e) { d["bounds"] = [Int(f.minX), Int(f.minY), Int(f.width), Int(f.height)] }
+        else if let p = at { d["bounds"] = [Int(p.x) - 6, Int(p.y) - 6, 12, 12] }
+        if let t = text {
+            let secure = e.map { axRole($0) == "AXSecureTextField" || str($0, kAXSubroleAttribute) == "AXSecureTextField" } ?? false
+            d["text"] = secure ? String(repeating: "•", count: min(t.count, 24)) : String(t.prefix(80))
+            if secure { d["secure"] = true }
+        }
+        progress(d)
+    }
     func el(_ s: [String: Any]) -> (AXUIElement, [String: Any])? {
         guard let id = s["id"] as? Int, id >= 1, id <= controls.count else { return nil }
         return controls[id - 1]
@@ -1010,7 +1094,13 @@ case "act":
     for (i, s) in steps.enumerated() {
         let what = s["do"] as? String ?? ""
         usedRealCursor = false
+        userBusy = false
         defer { if usedRealCursor, !done.isEmpty { done[done.count - 1] += " (needed the real cursor)" } }
+        defer {
+            if userBusy {
+                out(["ok": false, "error": "Step \(i + 1) needs the real mouse, but the user was typing or using the mouse, so I didn't take over (their keys would have gone into \(w.app)). Nothing after it ran. Tell them, and offer to finish when they're free.", "done": done])
+            }
+        }
         if tailWait, i == steps.count - 2 { sigBefore = pageSig() }
         // An earlier step may have switched apps (a click, cmd+tab, Spotlight); check before every action.
         if what != "wait", let front = NSWorkspace.shared.frontmostApplication, let name = handsOff(front.processIdentifier) {
@@ -1030,6 +1120,7 @@ case "act":
         switch what {
         case "focus", "click", "set", "press_button":
             guard let (e, info) = el(s) else { out(["ok": false, "error": "Step \(i + 1): no control with id \(s["id"] ?? "?"). Call read_window again.", "done": done]) }
+            emitStep(i, what, e, label: (info["label"] as? String) ?? "", text: what == "set" ? s["text"] as? String : nil)
             if (what == "click" || what == "press_button"), risky((info["label"] as? String) ?? ""), (s["confirmed"] as? Bool) != true {
                 out(["ok": false, "error": "Stopped before clicking \"\(info["label"] ?? "")\": it could delete, pay, send or sign out, and the user hasn't said yes to that. Tell them, and let them click it themselves.", "done": done])
             }
@@ -1087,6 +1178,7 @@ case "act":
             if risky((info["text"] as? String) ?? q), (s["confirmed"] as? Bool) != true {
                 out(["ok": false, "error": "Stopped before clicking \"\(info["text"] ?? q)\": it could delete, pay, send or sign out, and the user hasn't said yes to that. Tell them, and let them click it themselves.", "done": done])
             }
+            emitStep(i, "click_text", e, label: (info["text"] as? String) ?? q)
             if !pressText(e) {
                 guard let f = frame(e) else { out(["ok": false, "error": "Step \(i + 1): couldn't click \"\(q)\".", "done": done]) }
                 let p = CGPoint(x: f.midX, y: f.midY)
@@ -1103,6 +1195,7 @@ case "act":
             guard isEditable(focusedEl(app)) else {
                 out(["ok": false, "error": "Step \(i + 1): the cursor isn't in a text field, so typing would go nowhere. Use {do:'fill', field, text} to fill a field by its label.", "done": done])
             }
+            emitStep(i, "type", focusedEl(app), text: s["text"] as? String ?? "")
             typeText(s["text"] as? String ?? ""); done.append("typed text")
         case "fill":
             // A form field by its label, placeholder or id: put the cursor in it, replace its text, check it took.
@@ -1125,6 +1218,7 @@ case "act":
                 out(["ok": false, "error": "Step \(i + 1): no text field called \"\(name)\" here. Check its label with read_window.", "done": done])
             }
             let label = (info["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? name
+            emitStep(i, "fill", e, label: label, text: text)
             let isDate = ["AXDateField", "AXTimeField", "AXDateTimeArea"].contains(axRole(e))
             func took(_ r: (ok: Bool, shows: String)) -> Bool {
                 guard r.ok else { return false }
@@ -1133,8 +1227,10 @@ case "act":
                 if ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"].contains(axRole(e)) { return (sh.isEmpty && text.isEmpty) || fold(sh).contains(fold(text).prefix(40)) }
                 return true
             }
-            var r = inBackground && isDate ? withRealCursor { typeInto(app, e, text) } : typeInto(app, e, text)
-            if inBackground, !took(r) { r = withRealCursor { typeInto(app, e, text) } }
+            let busy = (ok: false, shows: "")
+            var r = inBackground && isDate ? withRealCursor { typeInto(app, e, text) } ?? busy : typeInto(app, e, text)
+            if inBackground, !userBusy, !took(r) { r = withRealCursor { typeInto(app, e, text) } ?? busy }
+            if userBusy { break }
             if !r.ok { out(["ok": false, "error": "Step \(i + 1): couldn't put the cursor in \"\(label)\", so nothing was typed.", "done": done]) }
             let shows = r.shows.trimmingCharacters(in: .whitespacesAndNewlines)
             // Password fields show dots: the right number of them is a match. (They're secure fields, so the check
@@ -1168,6 +1264,7 @@ case "act":
                 out(["ok": false, "error": "Step \(i + 1): no dropdown called \"\(name)\" here, or no option given. Check with read_window.", "done": done])
             }
             let label = (info["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? name
+            emitStep(i, "choose", e, label: label, text: option)
             if risky(option), (s["confirmed"] as? Bool) != true {
                 out(["ok": false, "error": "Stopped before choosing \"\(option)\": it could delete, pay, send or sign out, and the user hasn't said yes to that.", "done": done])
             }
@@ -1208,6 +1305,7 @@ case "act":
             if let (e, _) = el(s), let f = frame(e), let c = inWin(f) { p = c }
             else if let q = s["text"] as? String, let c = findTextEls(app, w, q).compactMap({ frame($0.0).flatMap(inWin) }).first { p = c }
             let (dy, dx): (Int32, Int32) = dir == "up" ? (3, 0) : dir == "left" ? (0, 3) : dir == "right" ? (0, -3) : (-3, 0)
+            emitStep(i, "scroll", nil, at: p, label: (s["to_end"] as? Bool) == true ? "\(dir) to the end" : dir)
             if (s["to_end"] as? Bool) == true, dir == "up" || dir == "down" {
                 // To the very end (or top): keep scrolling, giving a feed time to load more, until nothing changes.
                 let sign: Int32 = dir == "up" ? 1 : -1, deadline = Date().addingTimeInterval(25)
@@ -1220,17 +1318,10 @@ case "act":
                     last = pageText(app, w, cap: 4000).joined(separator: "|")
                     if last == before { usedRealCursor = true; fgActive = false }
                 }
-                let borrow = BG && usedRealCursor && !fgActive
-                let cursorBack = borrow ? CGEvent(source: nil)?.location : nil
-                let appBack = borrow ? NSWorkspace.shared.frontmostApplication : nil
-                if borrow { fgActive = true; _ = bringToFront(w, app) }
-                defer {
-                    if borrow {
-                        fgActive = false
-                        if let c = cursorBack { CGWarpMouseCursorPosition(c); CGAssociateMouseAndMouseCursorPosition(1) }
-                        if let a = appBack, a.processIdentifier != w.pid, !isRoamies(a.processIdentifier) { a.activate(options: []) }
-                    }
-                }
+                var borrow = BG && usedRealCursor && !fgActive
+                var saved: (CGPoint?, NSRunningApplication?) = (nil, nil)
+                if borrow { if let sv = borrowBegin() { saved = sv; fgActive = true; _ = bringToFront(w, app) } else { borrow = false; userBusy = true; usedRealCursor = false } }
+                defer { if borrow { fgActive = false; borrowEnd(saved, w) } }
                 while Date() < deadline, same < 2 {
                     for _ in 0..<4 {
                         moveTo(p)
@@ -1256,6 +1347,7 @@ case "act":
             done.append("scrolled \(dir)")
             controls = walk(app, w)
         case "key":
+            emitStep(i, "key", nil, label: s["key"] as? String ?? "")
             let combo = (s["key"] as? String ?? "").lowercased().replacingOccurrences(of: " ", with: "")
             // Cmd+S in the background: its menu item is greyed out while the app is behind, so ask the app to save
             // its front document directly (no dialog for one that already has a file; a new one still needs the cursor).
@@ -1268,6 +1360,7 @@ case "act":
             // Points relative to the window's top-left, or global screen points when "global" is set.
             guard let x = s["x"] as? Double, let y = s["y"] as? Double else { out(["ok": false, "error": "Step \(i + 1): click_at needs x and y", "done": done]) }
             let global = s["global"] as? Bool ?? false
+            emitStep(i, "click_at", nil, at: global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y))
             click(global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y)); done.append("clicked at \(Int(x)),\(Int(y))")
         case "wait":
             let secs = min(5, (s["seconds"] as? Double) ?? 0.5)

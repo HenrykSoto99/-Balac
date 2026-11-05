@@ -114,7 +114,9 @@
     const C = {
       k, PAL, L, th, put, disc: k.disc, sq: k.sq, face, spawn: k.spawn, S: k.S, css,
       get P() { return k.P; }, get R() { return k.R; }, get now() { return now; }, get W() { return W; }, get H() { return H; },
-      get bx() { return m.x + (lastPose?.ox ?? 0); }, get by() { return m.y + (lastPose?.oy ?? 0); },
+      // Props keep their size, so the small and cursor forms hold them out to the side instead of in front.
+      get bx() { return m.x + (lastPose?.ox ?? 0) + (k.form === 'default' ? 0 : (m.x > W - 170 ? -1 : 1) * (k.R + k.P * 8)); },
+      get by() { return m.y + (lastPose?.oy ?? 0); },
       look: (x, y) => { lookAt = [x, y]; },
       spawnGlyph: (g, x, y) => glyphParts.push({ g, x, y, vy: -60, life: 1 }),
     };

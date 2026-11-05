@@ -54,8 +54,9 @@ const DEFAULT_KEYS = process.platform === 'win32'
   : { talk: ['control', 'option'], summon: 'Control+Alt+KeyS', snap: 'Control+Alt+KeyA', list: 'Control+Alt+KeyL' };
 const DEFAULTS = {
   provider: null, model: null, sound: true, allowActions: false, voice: true,
-  onboarded: false, onboardStep: 0, filesAsked: false, keys: DEFAULT_KEYS, muteWhileTalking: true, setupVersion: 0,
+  onboarded: false, onboardStep: 0, filesAsked: false, keys: DEFAULT_KEYS, muteWhileTalking: true, setupVersion: 0, size: 'default',
 };
+const SIZES = [['default', 'Default'], ['small', 'Small'], ['cursor', 'Cursor']];
 const VOICE_OK = process.platform === 'darwin' || process.platform === 'win32';
 // Windows has no on-device speech API apps can use yet, so voice there runs Parakeet on the PC. Its model
 // is downloaded once: from the setup guide, or the first time voice is used.
@@ -199,7 +200,7 @@ function anim(name, args) {
 // (tools → system → messages), so putting LIVE in the system prompt would re-bill the whole conversation
 // every time memory changed; at the end, only the new message is fresh. The live block is never saved.
 const stablePrompt = () => `You are Sidekick, a tiny glowing pixel creature who lives on ${userName}'s screen as a desktop companion. You are the main creature of Roamies, a desktop app by Ken Kai (Mac and Windows) that puts little creatures on your screen; you are Roamies ${VERSION}.
-About Roamies, for when ${userName} asks about you or the app: ${MAC ? 'it lives in the menu bar at the top of the screen (no Dock icon)' : 'it lives in the system tray at the bottom right of the taskbar (no taskbar button); Windows may tuck the icon behind the ^ arrow next to the clock, and dragging it onto the taskbar keeps it in view'}. ${MAC ? 'Menu bar' : 'Tray'} menu items: Show Sidekick, Ask Sidekick…, Show List (reminders and commitments on screen: Today and Later; tick them off there; finished ones clear at midnight), ${process.platform === 'darwin' ? 'Ask About an Area…, ' : ''}Stop, New Conversation, Commitments, Model (pick the AI provider and model), Settings (Sound Effects, Open at Login, Allow File Edits & Commands${VOICE_OK ? ', Voice' : ''}, shortcuts), Setup Guide…, Check for Updates… (becomes "Install Update … and Restart" when one is ready; updates download, are signature-checked and install by themselves), Quit Roamies. Sign-in is shared with GG Coder. Downloads and source: github.com/KenKaiii/Roamies. Don't invent features or settings that aren't listed here.
+About Roamies, for when ${userName} asks about you or the app: ${MAC ? 'it lives in the menu bar at the top of the screen (no Dock icon)' : 'it lives in the system tray at the bottom right of the taskbar (no taskbar button); Windows may tuck the icon behind the ^ arrow next to the clock, and dragging it onto the taskbar keeps it in view'}. ${MAC ? 'Menu bar' : 'Tray'} menu items: Show Sidekick, Ask Sidekick…, Show List (reminders and commitments on screen: Today and Later; tick them off there; finished ones clear at midnight), ${process.platform === 'darwin' ? 'Ask About an Area…, ' : ''}Stop, New Conversation, Commitments, Model (pick the AI provider and model), Settings (Size: Default, Small or Cursor, a little arrow pointer; Sound Effects, Open at Login, Allow File Edits & Commands${VOICE_OK ? ', Voice' : ''}, shortcuts), Setup Guide…, Check for Updates… (becomes "Install Update … and Restart" when one is ready; updates download, are signature-checked and install by themselves), Quit Roamies. Sign-in is shared with GG Coder. Downloads and source: github.com/KenKaiii/Roamies. Don't invent features or settings that aren't listed here.
 You talk through small pixel speech bubbles, so keep replies short: one to three sentences unless asked for detail. Plain text only: no markdown, no asterisks, and never narrate actions like *waves*. An emoji now and then is fine; the bubbles show them. Your body does the acting: to act out a feeling, start your reply with one tag, which is never shown: ${EMOTES.map((e) => `[${e}]`).join(' ')}. hype celebrates a win, upset is for when they're dodging work, remind nudges about something they said they'd do, motivate is a push to start, wave is hello or goodbye. Most replies need no tag.
 After using a tool, never repeat what you already said; only add what's new.
 Several things in one request ("do x, then y, then z", numbered steps): do every one, in the order given. Steps that don't depend on each other can go in the same turn as parallel tool calls, listed in the order given (calls that change things, like opening a page or app or acting in one, run in the order you list them). If a step is blocked, refused or fails, still do the ones after it that don't depend on it, then say which step didn't happen and why. With 3 or more parts, also show them with plan_steps (see its description): it only ever rides along with other tool calls, so it costs no extra time. Before your final reply, check each step was really done (from the tool results) and never say a step is done when it isn't.
@@ -658,6 +659,7 @@ function menu() {
           : { id: 'voicedl', label: voiceModel.status === 'error' ? 'Retry Voice Download' : `Download Voice (${sizeLabel()})…` }] : []),
         ...(VOICE_OK && MAC ? [{ id: 'mutetalk', label: 'Mute Mac While Talking', checked: config.muteWhileTalking !== false }] : []),
         ...(usageToday.requests ? [{ id: 'usage', label: `Today: ${usageToday.requests} requests · ${usageToday.tokens >= 1000 ? `${(usageToday.tokens / 1000).toFixed(1)}k` : usageToday.tokens} new tokens`, enabled: false }, { sep: true }] : []),
+        { label: 'Size', items: SIZES.map(([id, label]) => ({ id: `size:${id}`, label, checked: config.size === id })) },
         { id: 'sound', label: 'Sound Effects', checked: config.sound },
         ...(login.supported ? [{ id: 'login', label: 'Open at Login', checked: login.on }] : []),
         { id: 'actions', label: 'Allow File Edits & Commands', checked: config.allowActions },
@@ -776,6 +778,7 @@ async function onMenu(id) {
     say(`Switched to ${getModel(config.model)?.name ?? config.model}.`, 'happy');
   } else if (id.startsWith('login:')) oauthLogin(id.slice(6));
   else if (id.startsWith('key:')) apiKeyLogin(id.slice(4));
+  else if (id.startsWith('size:') && SIZES.some(([s]) => s === id.slice(5))) { config.size = id.slice(5); saveConfig(); ui({ kind: 'size', size: config.size }); menu(); }
   else if (id === 'sound') { config.sound = !config.sound; saveConfig(); ui({ kind: 'sound', on: config.sound }); menu(); }
   else if (id === 'actions') {
     config.allowActions = !config.allowActions; saveConfig(); menu(); // live section picks this up
@@ -912,6 +915,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'answer') { pending.get(m.id)?.(m.text ?? null); pending.delete(m.id); }
   else if (m.type === 'ui_ready') {
     ui({ kind: 'sound', on: config.sound });
+    ui({ kind: 'size', size: config.size });
     if (config.onboarded) ui({ kind: 'greet' });
   } else if (m.type?.startsWith('ob_') || m.type === 'set_keys' || m.type === 'set_actions' || m.type === 'set_login' || m.type === 'keybind_error') onGuide(m).catch((e) => console.error('guide', e));
   else if (m.type?.startsWith('voice')) onVoice(m);

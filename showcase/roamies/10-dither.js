@@ -41,6 +41,8 @@
       // Sidekick acts: little performances with pop-out hands, a pixel speech icon and particles.
       const ACTS = ['wave', 'hype', 'remind', 'upset', 'motivate'];
       const forced = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('act') : null;
+      // Size: 'default', 'small' (half the body) or 'cursor' (a pixel arrow pointer). Text keeps its size either way.
+      let form = (typeof location !== 'undefined' && new URLSearchParams(location.search).get('form')) || 'default', lastEnv = null;
       const hands = [-1, 1].map((s) => ({ s, x: m.x, y: m.y, vx: 0, vy: 0 }));
       const parts = [];
       let act = null, pending = null, arms = 0, ox = 0, oy = 0, prevHop = 0;
@@ -91,7 +93,9 @@
       };
 
       const eyesPixel = (cx, cy) => {
-        const gap = Math.max(3, Math.round((R * 0.42) / P)), ew = Math.max(2, Math.round((R * 0.16) / P)), eh = Math.max(3, Math.round((R * 0.28) / P));
+        // Smaller minimums for the small form, so its face isn't all eyes.
+        const sm = form === 'small';
+        const gap = Math.max(3, Math.round((R * 0.42) / P)), ew = Math.max(sm ? 1 : 2, Math.round((R * 0.16) / P)), eh = Math.max(sm ? 2 : 3, Math.round((R * 0.28) / P));
         for (const s of [-1, 1]) {
           const ex = cx + s * gap;
           browAt.push({ x: ex, y: cy - eh - 2, w: ew + 1, s });
@@ -179,7 +183,7 @@
         flame: ['..#...', '..##..', '.###.#', '.#####', '######', '##.###', '#...##', '.####.'],
       };
       const bubble = (gx, gy, icon) => {
-        const rows = ICONS[icon], sc = P < 6 ? 2 : 1, h = rows.length * sc, w = rows[0].length * sc;
+        const rows = ICONS[icon], sc = P < 6 && form === 'default' ? 2 : 1, h = rows.length * sc, w = rows[0].length * sc;
         const x0 = gx - Math.ceil(w / 2) - 2, y0 = gy - h - 3, x1 = x0 + w + 3, y1 = gy;
         for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
           const corner = (x === x0 || x === x1) && (y === y0 || y === y1);
@@ -192,7 +196,7 @@
         rows.forEach((r, j) => { for (let i = 0; i < r.length; i++) if (r[i] === '#') for (let a = 0; a < sc; a++) for (let b = 0; b < sc; b++) put(x0 + 2 + i * sc + b, y0 + 2 + j * sc + a, ink); });
       };
       const drawHands = (bx, by) => {
-        if (arms < 0.12) return;
+        if (arms < 0.12 || form === 'cursor') return;
         // Floating mitts, no arms: they pop out of the body edge and stay readable over it.
         const hr = Math.max(2, Math.round(((R * 0.25) / P) * Math.min(1, arms * 1.25)));
         for (const h of hands) {
@@ -204,6 +208,56 @@
           put(gx - Math.ceil(hr / 2), gy - Math.ceil(hr / 2), L); put(gx - Math.ceil(hr / 2) + 1, gy - Math.ceil(hr / 2), L);
           put(gx + h.s * -1 * (hr - 1), gy - 1, 0);
         }
+      };
+
+      // Cursor form: a classic arrow pointer of LED dots (o = dark outline, # = lit) with a small face.
+      const ARROW = [
+        'o', 'oo', 'o#o', 'o##o', 'o###o', 'o####o', 'o#####o', 'o######o', 'o#######o',
+        'o#####ooo', 'o##o##o', 'o#oo##o', 'oo  o##o', '    o##o', '     oo',
+      ];
+      const AX = 4, AY = 7;
+      const cell = (c, r) => (r >= 0 && r < ARROW.length ? ARROW[r][c] : undefined);
+      const drawCursor = (bx, by, shX, shY, shK) => {
+        const gx0 = Math.round(bx / P) - AX, gy0 = Math.round(by / P) - AY;
+        // Dithered shadow on the floor, as under the blob.
+        const sy = shY + R * 1.45, sw = R * 0.9 * (0.4 + 0.6 * shK);
+        for (let gy = Math.floor((sy - R * 0.4) / P); gy <= Math.ceil((sy + R * 0.4) / P); gy++) {
+          for (let gx = Math.floor((shX - sw * 1.6) / P); gx <= Math.ceil((shX + sw * 1.6) / P); gx++) {
+            const x = (gx + 0.5) * P, y = (gy + 0.5) * P, k = cell(gx - gx0, gy - gy0);
+            if (k === '#' || k === 'o') continue;
+            const sh = shK * Math.exp(-((y - sy) ** 2) / (R * R * 0.05) - ((x - shX) ** 2) / (sw * sw));
+            if (sh * 0.85 > th(gx, gy)) setPx(gx, gy, PAL[0], 220);
+          }
+        }
+        // Trail: a few fading dots behind a fast move, like an old mouse trail.
+        if (m.speed > 160) tail.forEach((q, i) => put(Math.round(q.x / P) - AX, Math.round(q.y / P) - AY, Math.max(1, L - 1 - i)));
+        ARROW.forEach((row, r) => {
+          for (let c = 0; c < row.length; c++) {
+            if (row[c] === 'o') { put(gx0 + c, gy0 + r, 0); continue; }
+            if (row[c] !== '#') continue;
+            // Bright along the lit left and top edges, a touch of dither toward the bottom right.
+            const rim = row[c - 1] === 'o' || (r > 0 && cell(c, r - 1) === 'o');
+            const v = rim ? 1 : 0.78 - (r + c) * 0.018;
+            put(gx0 + c, gy0 + r, clamp(Math.floor(v * L + th(gx0 + c, gy0 + r) * 0.9), 2, L));
+          }
+        });
+        // Face: two dot eyes in the wide part of the arrow, and a one-dot mouth. Solid cells (no LED gap) so the
+        // glow can't wash them out at this size.
+        const ink = (x, y) => setPx(x, y, PAL[0], 255, true);
+        const lx = face.lookX > 0.5 ? 1 : 0, ly = face.lookY > 0.6 ? 1 : 0;
+        for (const ec of [2, 4]) {
+          const ex = gx0 + ec + lx, ey = gy0 + 6 + ly;
+          if (face.dizzy > 0.5) ink(ex, ey + ((Math.floor(t * 8) + ec) & 1));
+          else if (face.happy > 0.5) ink(ex, ey);
+          else if (face.open < 0.35) ink(ex, ey + 1);
+          else { ink(ex, ey); ink(ex, ey + 1); }
+        }
+        const mode = pose?.mouth ?? (act && { hype: 'shout', remind: 'o', upset: 'frown', motivate: 'grin' }[act.name]);
+        const mx = gx0 + 3 + lx, my = gy0 + 9;
+        if (mode === 'shout' || mode === 'talk2') { ink(mx, my); ink(mx + 1, my); }
+        else if (mode === 'talk1' || mode === 'o' || mode === 'flat') ink(mx, my);
+        else if (mode === 'frown') { ink(mx - 1, my); ink(mx, my - 1); ink(mx + 1, my); }
+        else if (mode === 'grin' || face.happy > 0.5) { ink(mx - 1, my - 1); ink(mx, my); ink(mx + 1, my - 1); }
       };
 
       // ---------- presence performances ----------
@@ -322,7 +376,7 @@
         get busy() { return !!act; },
         appear, vanish,
         stopAct: () => { if (act) { act = null; nextAct = rand(3, 6); } },
-        get presence() { return pres.state; }, get presU() { return pres.u; },
+        get presence() { return pres.state; }, get presU() { return pres.u; }, get form() { return form; },
       };
       const plug = o.plugin ? o.plugin(kit) : null;
       let pose = null;
@@ -333,7 +387,10 @@
         hit: (x, y) => !!plug?.hit?.(x, y),
         press: (x, y) => plug?.press?.(x, y),
         wheel: (dy) => plug?.wheel?.(dy),
+        get form() { return form; },
+        setForm(f) { form = ['small', 'cursor'].includes(f) ? f : 'default'; if (lastEnv) this.resize(lastEnv); },
         resize(env) {
+          lastEnv = env;
           const S = Roamie.unit(env);
           const base = (S / 110) * (o.pixel ?? 1);
           P = K > 1 ? K * Math.max(1, Math.round(base / K)) : Math.max(o.pixel < 1 ? 2 : 3, Math.round(base));
@@ -341,7 +398,7 @@
           IW = gw * K; IH = gh * K;
           off.width = IW; off.height = IH; img = octx.createImageData(IW, IH);
           if (bloom) { bloom.width = Math.ceil(gw / 4); bloom.height = Math.ceil(gh / 4); }
-          R = clamp(S * 0.15, 28, 140); m.radius = R * (o.ears || o.antenna ? 1.35 : 1.25);
+          R = form === 'cursor' ? 26 : clamp(S * 0.15, 28, 140) * (form === 'small' ? 0.5 : 1); m.radius = R * (o.ears || o.antenna ? 1.35 : 1.25);
         },
         boop() { sq.kick(11); S('boop'); if (ant) ant.forEach((p, i) => { p.vx += rand(-1, 1) * 260 * i; }); if (!forced) startAct('hype', true); },
         grab() { S('grab'); },
@@ -485,7 +542,9 @@
               ? (gx, gy) => { const v = 0.55 * th(gx, gy) + 0.45 * clamp(Math.hypot((gx + 0.5) * P - bx, (gy + 0.5) * P - by) / R2, 0, 1); return v < e ? (v > e - 0.14 ? 2 : 1) : 0; }
               : (gx, gy) => { const v = 0.5 * th(gx, gy) + 0.5 * clamp(((gy + 0.5) * P - top) / H2, 0, 1); return v < e ? 0 : v < e + 0.12 ? 2 : 1; };
           }
-          for (let gy = gy0; gy < gy1; gy++) {
+          if (form === 'cursor' && !clear) for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) setPx(gx, gy, PAL[0]);
+          if (form === 'cursor') drawCursor(bx, by, shX, shY, shK);
+          else for (let gy = gy0; gy < gy1; gy++) {
             const y = (gy + 0.5) * P;
             for (let gx = gx0; gx < gx1; gx++) {
               const x = (gx + 0.5) * P;
@@ -533,10 +592,12 @@
           const eye = o.eye === 'cyclops' ? eyeCyclops : o.eye === 'visor' ? eyeVisor : eyesPixel;
           const A = act?.name;
           browAt = [];
-          const my = eye(cx, cy);
-          mouth(cx, my, pose?.mouth ?? (act && { wave: null, hype: 'shout', remind: 'o', upset: 'frown', motivate: 'grin' }[A]));
-          const brow = pose ? pose.brow : A === 'upset' ? 'angry' : A === 'motivate' ? 'determined' : A === 'remind' ? 'raised' : null;
-          if (brow) for (const b of browAt) drawBrow(b, brow);
+          if (form !== 'cursor') {
+            const my = eye(cx, cy);
+            mouth(cx, my, pose?.mouth ?? (act && { wave: null, hype: 'shout', remind: 'o', upset: 'frown', motivate: 'grin' }[A]));
+            const brow = pose ? pose.brow : A === 'upset' ? 'angry' : A === 'motivate' ? 'determined' : A === 'remind' ? 'raised' : null;
+            if (brow) for (const b of browAt) drawBrow(b, brow);
+          }
           plug?.gridUnder?.(env);
           drawHands(bx, by);
           mask = null;

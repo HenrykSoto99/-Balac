@@ -201,6 +201,7 @@
 
   window.__roamieHost = (m) => {
     if (m.kind === 'sound') { if (Roamie.sfx) Roamie.sfx.enabled = m.on; return; }
+    if (m.kind === 'size') { for (const t of Roamie.tiles ?? []) t.creature.setForm?.(m.size); return; }
     if (!getAgent()) return;
     if (m.kind === 'greet') { getAgent().act('wave'); return; }
     if (m.kind === 'intro') { getAgent().intro(m.x, m.text); return; }

@@ -208,6 +208,8 @@ console.log('store tests: all passed');
 // A plain reminder is done once it has fired; a commitment stays open until the user finishes it.
 {
   const S6 = await import('../store.mjs?kinds');
+  // Regression: the 'ping' above comes due 5 s later; on a slow runner it fired here too.
+  for (const c of S6.openCommitments()) await S6.updateCommitment(c.id, { status: 'dropped' });
   const r = await S6.addCommitment('Call mom', Date.now() - 1000, 'reminder');
   const k = await S6.addCommitment('Finish the slides', Date.now() - 1000);
   const fired = await S6.takeDueReminders();

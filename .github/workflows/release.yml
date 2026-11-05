@@ -1,6 +1,7 @@
 # Release: tag a version (e.g. `git tag v0.1.0 && git push origin v0.1.0`) or run it by hand.
 # Builds a signed + notarized macOS DMG (Apple silicon and Intel) and a Windows installer, then attaches
-# them to a draft GitHub release for you to review and publish. CI (ci.yml) stays on Linux only.
+# them to a draft GitHub release for you to review and publish. CI (ci.yml) builds and tests on Linux,
+# macOS and Windows for every push and pull request, without signing.
 # Each build also uploads a signed update bundle; the manifest job writes latest.json, the feed the
 # in-app updater reads from the newest published release.
 name: Release

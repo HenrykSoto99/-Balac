@@ -211,6 +211,37 @@ enum OutputMute {
     }
 }
 
+// Some mics (many USB, headset and webcam ones) deliver speech near -50 dBFS, too faint for Speech to make
+// out words. Boost quiet speech toward ordinary level, at most +20 dB; normal and loud mics pass through as is.
+// Only sounds well above the room's noise count as speech, so silence alone never raises the boost.
+final class AutoGain {
+    static let target: Float = 0.05 // about -26 dBFS RMS, ordinary speech
+    static let maxGain: Float = 10
+    private(set) var gain: Float = 1
+    private var noise: Float = 0, speech: Float = 0
+
+    /// Feed one buffer's RMS (before boosting); returns the boost for it.
+    func next(_ rms: Float) -> Float {
+        noise = noise == 0 ? max(rms, 1e-5) : rms < noise ? max(rms, 1e-5) : noise * 1.002
+        if rms > noise * 3 && rms > 1e-4 { speech = max(speech, rms) } else { speech *= 0.998 }
+        let want = speech > 0 ? min(Self.maxGain, max(1, Self.target / speech)) : 1
+        // Down at once so a louder voice never clips; up gradually (about 0.5 s from 1x to 10x).
+        gain = want < gain ? want : min(want, gain * 1.1)
+        return gain
+    }
+
+    /// Boosts the buffer in place, ramping from the previous boost to avoid clicks.
+    func apply(_ buffer: AVAudioPCMBuffer, rms: Float) {
+        let from = gain, to = next(rms)
+        guard let ch = buffer.floatChannelData, from != 1 || to != 1 else { return }
+        let n = Int(buffer.frameLength), step = (to - from) / Float(max(n, 1))
+        for c in 0 ..< Int(buffer.format.channelCount) {
+            let x = ch[c]
+            for i in 0 ..< n { x[i] = min(1, max(-1, x[i] * (from + step * Float(i + 1)))) }
+        }
+    }
+}
+
 final class Voice {
     enum Phase { case idle, armed, holding, handsFree, finishing }
 
@@ -218,6 +249,8 @@ final class Voice {
     private var chordAt = 0.0, listenAt = 0.0, heardAt = 0.0, voiceAt = 0.0, levelAt = 0.0, releasedAt: Double?
     private var blocked = false, prevChord = false, authorizing = false, reportEmpty = false, failed = false
     private var engine: AVAudioEngine?
+    // Kept across sessions (same mic, usually), so later takes start at the right boost.
+    private let autoGain = AutoGain()
     private var rec: Recognizer?
     private var best = ""
     private var finishTimer: Timer?
@@ -309,7 +342,7 @@ final class Voice {
         }
     }
 
-    private func end(_ why: String) { log("session end: \(why) after \(String(format: "%.1f", uptime() - listenAt))s") }
+    private func end(_ why: String) { log("session end: \(why) after \(String(format: "%.1f", uptime() - listenAt))s, mic boost \(String(format: "%.1f", autoGain.gain))x") }
 
     // ---------- session ----------
 
@@ -450,13 +483,16 @@ final class Voice {
             emit(["type": "error", "code": "no_input"])
             return cancel()
         }
+        let gain = autoGain
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
-            r.append(buffer)
-            guard let samples = buffer.floatChannelData?[0] else { return }
+            guard let samples = buffer.floatChannelData?[0] else { r.append(buffer); return }
             let n = Int(buffer.frameLength)
             var sum: Float = 0
             for i in 0 ..< n { sum += samples[i] * samples[i] }
             let rms = sqrt(sum / Float(max(n, 1)))
+            gain.apply(buffer, rms: rms)
+            r.append(buffer)
+            // Level and pause detection use the mic's own level, so boosted room noise can't hold a session open.
             let level = min(1, max(0, (Double(20 * log10(max(rms, 1e-7))) + 55) / 40))
             DispatchQueue.main.async { self?.onLevel(level) }
         }
@@ -531,6 +567,29 @@ func permStatus() -> [String: Any] {
     ]
 }
 let args = CommandLine.arguments
+// --test-gain checks the quiet-mic boost with made-up levels; exits 1 on a failure.
+if args.contains("--test-gain") {
+    var bad = 0
+    func check(_ name: String, _ ok: Bool) { print("\(ok ? "ok" : "FAIL") \(name)"); if !ok { bad += 1 } }
+    func run(_ g: AutoGain, _ rms: Float, _ n: Int) { for _ in 0 ..< n { _ = g.next(rms) } }
+    var g = AutoGain(); run(g, 0.001, 50); run(g, 0.06, 50)
+    check("normal mic stays at 1x", g.gain == 1)
+    g = AutoGain(); run(g, 0.0003, 50); run(g, 0.003, 30)
+    check("quiet mic (-50 dB) boosted to 10x within 0.7 s", g.gain == AutoGain.maxGain)
+    g = AutoGain(); run(g, 0.0003, 50); run(g, 0.01, 50)
+    check("slightly quiet mic boosted just to ordinary level", abs(g.gain - 5) < 0.01)
+    g = AutoGain(); run(g, 0.0005, 500)
+    check("silence alone never boosted", g.gain == 1)
+    g = AutoGain(); run(g, 0.0003, 50); run(g, 0.003, 50); _ = g.next(0.2)
+    check("loud sound drops the boost at once", g.gain == 1)
+    let fmt = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+    let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 4)!
+    buf.frameLength = 4
+    for c in 0 ..< 2 { for i in 0 ..< 4 { buf.floatChannelData![c][i] = 0.5 } }
+    g = AutoGain(); run(g, 0.0003, 50); run(g, 0.003, 50); g.apply(buf, rms: 0.003)
+    check("boost applies to every channel and never clips", (0 ..< 2).allSatisfy { c in buf.floatChannelData![c][3] == 1 })
+    exit(bad == 0 ? 0 : 1)
+}
 if args.contains("--perms") { emit(permStatus()); exit(0) }
 if let i = args.firstIndex(of: "--request"), i + 1 < args.count {
     let done = DispatchSemaphore(value: 0)

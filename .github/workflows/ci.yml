@@ -15,10 +15,16 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Linux for the shared code, macOS for the Swift helpers, Windows for the Parakeet voice helper.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     defaults:
       run:
+        shell: bash
         working-directory: showcase/tauri
     steps:
       - uses: actions/checkout@v7
@@ -39,6 +45,7 @@ jobs:
 
       # Tauri's Linux build dependencies (v2.tauri.app/start/prerequisites, Debian list).
       - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
@@ -47,8 +54,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: showcase/tauri/src-tauri -> target
+          workspaces: |
+            showcase/tauri/src-tauri -> target
+            showcase/tauri/src-tauri/voice-win -> target
 
-      # Copies the web files into dist/, bundles the sidecar, then `cargo build` (debug).
+      # Copies the web files into dist/, bundles the sidecar, then `cargo build` (debug). On macOS this also
+      # compiles the Swift helpers; on Windows it builds the voice helper first (release, as shipped).
       - name: Build
         run: ./build.sh dev
+
+      - name: Test the macOS voice helper
+        if: runner.os == 'macOS'
+        run: |
+          src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-gain
+
+      # --release reuses the voice helper build.sh just made instead of compiling Parakeet again.
+      - name: Test the Windows voice helper
+        if: runner.os == 'Windows'
+        run: cargo test --release --locked --manifest-path src-tauri/voice-win/Cargo.toml --target x86_64-pc-windows-msvc

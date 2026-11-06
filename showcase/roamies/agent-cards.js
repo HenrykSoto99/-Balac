@@ -230,11 +230,14 @@
         const cam = (this.cam ??= want.slice()), u = clamp((now() - (this.camAt ?? 0)) * 6, 0, 1);
         this.camAt = now();
         for (let q = 0; q < 4; q++) cam[q] += (want[q] - cam[q]) * (u * 0.35 + 0.05);
-        const [sx, sy, sw, sh] = cam, sc = vw / sw;
-        // Rendered at a fixed, cached size per crop step so panning doesn't rebuild the LED picture every frame.
-        const crop = [Math.round(sx / 4) * 4, Math.round(sy / 4) * 4, Math.round(sw / 4) * 4, Math.round(sh / 4) * 4];
-        const pic = R.ledImage(img, crop, vw, Math.min(vh, crop[3] * (vw / crop[2])), k);
-        if (pic) ctx.drawImage(pic, vx, vy, vw, Math.min(vh, crop[3] * (vw / crop[2])));
+        // Panning draws straight from the once-tinted picture with the cached dot grid on top, so no frame rebuilds it.
+        const crop = cam, ph = Math.min(vh, crop[3] * (vw / crop[2])), dpr = Math.min(2, window.devicePixelRatio || 1);
+        const tint = R.ledTint(img, k), gaps = R.ledGaps(Math.round(vw * dpr), Math.round(vh * dpr), k);
+        if (tint && ph >= 1) {
+          ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(tint, crop[0], crop[1], crop[2], crop[3], vx, vy, vw, ph);
+          ctx.drawImage(gaps, 0, 0, gaps.width, Math.round(ph * dpr), vx, vy, vw, ph);
+        }
         if (wb) {
           const map = (x, y) => [vx + ((x - wb[0]) * kx - crop[0]) * (vw / crop[2]), vy + ((y - wb[1]) * kx - crop[1]) * (vw / crop[2])];
           if (this.hl && !this.end) {

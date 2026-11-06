@@ -28,6 +28,48 @@
   };
   // A real picture (a screenshot, a peek at a window) in the Sidekick's own look: its LED colours from dark glass to
   // bright mint, with the dot grid's gaps running through it. Full resolution underneath, so words stay readable.
+  // The per-pixel colouring runs once per picture; every size and crop after that is a scaled copy plus the cached
+  // dot grid, so animating or panning never redoes pixel work.
+  const tints = new WeakMap();
+  R.ledTint = (img, c) => {
+    if (!img?.complete || !img.naturalWidth) return null;
+    const have = tints.get(img);
+    if (have?.pal === c.PAL) return have.cv;
+    const PAL = c.PAL, L = c.L, W = img.naturalWidth, H = img.naturalHeight, lut = new Uint8ClampedArray(256 * 3);
+    for (let n = 0; n < 256; n++) {
+      const v = Math.pow(clamp((n / 255 - 0.04) / 0.82, 0, 1), 0.8) * L, a = Math.min(L - 1, Math.floor(v)), f = v - a;
+      const c0 = PAL[a], c1 = PAL[Math.min(L, a + 1)];
+      for (let q = 0; q < 3; q++) lut[n * 3 + q] = c0[q] + (c1[q] - c0[q]) * f;
+    }
+    const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+    const g = cv.getContext('2d', { willReadFrequently: true });
+    g.drawImage(img, 0, 0);
+    const id = g.getImageData(0, 0, W, H), d = id.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const n = Math.round(0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2]) * 3;
+      d[i] = lut[n]; d[i + 1] = lut[n + 1]; d[i + 2] = lut[n + 2]; d[i + 3] = 255;
+    }
+    g.putImageData(id, 0, 0);
+    tints.set(img, { pal: PAL, cv });
+    return cv;
+  };
+  // The LED grid's dark gaps for a W×H device-pixel area, laid over a tinted picture.
+  const gapsCache = new Map();
+  R.ledGaps = (W, H, c) => {
+    const dpr = Math.min(2, window.devicePixelRatio || 1), pitch = c.P * dpr, gap = Math.max(1, Math.round(pitch * 0.22));
+    const key = `${W}x${H}:${pitch}`;
+    if (gapsCache.has(key)) return gapsCache.get(key);
+    const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+    const g = cv.getContext('2d');
+    // One path, one fill: where a row and a column of gaps cross it's darkened once, not twice.
+    g.beginPath();
+    for (let k = 0; k * pitch < W; k++) { const x = Math.ceil(k * pitch + pitch - gap); g.rect(x, 0, Math.ceil((k + 1) * pitch) - x, H); }
+    for (let k = 0; k * pitch < H; k++) { const y = Math.ceil(k * pitch + pitch - gap); g.rect(0, y, W, Math.ceil((k + 1) * pitch) - y); }
+    g.fillStyle = 'rgba(0, 0, 0, 0.58)'; g.fill();
+    if (gapsCache.size > 12) gapsCache.delete(gapsCache.keys().next().value);
+    gapsCache.set(key, cv);
+    return cv;
+  };
   // src is the part of the image to use [x, y, w, h]; cached per size.
   const pics = new Map();
   R.ledImage = (img, src, w, h, c) => {
@@ -37,19 +79,10 @@
     const key = `${img.__ledId}:${src.map(Math.round).join(',')}:${W}x${H}:${c.P}`;
     if (pics.has(key)) return pics.get(key);
     const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
-    const g = cv.getContext('2d', { willReadFrequently: true });
+    const g = cv.getContext('2d');
     g.imageSmoothingQuality = 'high';
-    g.drawImage(img, src[0], src[1], src[2], src[3], 0, 0, W, H);
-    const id = g.getImageData(0, 0, W, H), d = id.data, PAL = c.PAL, L = c.L;
-    const pitch = c.P * dpr, gap = Math.max(1, Math.round(pitch * 0.22));
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4, lum = (0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2]) / 255;
-      const v = Math.pow(clamp((lum - 0.04) / 0.82, 0, 1), 0.8) * L, a = Math.min(L - 1, Math.floor(v)), f = v - a;
-      const c0 = PAL[a], c1 = PAL[Math.min(L, a + 1)];
-      const door = x % pitch >= pitch - gap || y % pitch >= pitch - gap ? 0.42 : 1;
-      d[i] = (c0[0] + (c1[0] - c0[0]) * f) * door; d[i + 1] = (c0[1] + (c1[1] - c0[1]) * f) * door; d[i + 2] = (c0[2] + (c1[2] - c0[2]) * f) * door; d[i + 3] = 255;
-    }
-    g.putImageData(id, 0, 0);
+    g.drawImage(R.ledTint(img, c), src[0], src[1], src[2], src[3], 0, 0, W, H);
+    g.drawImage(R.ledGaps(W, H, c), 0, 0);
     if (pics.size > 24) pics.delete(pics.keys().next().value);
     pics.set(key, cv);
     return cv;
@@ -264,15 +297,18 @@
         }
       }
     },
+    // The polaroid's settled size (px), before it flies home.
+    photoSize(st, c) {
+      const r = st.d.rect, pw = clamp(c.R * 1.5, 54, 110);
+      return [pw, pw * clamp((r[3] - r[1]) / Math.max(1, r[2] - r[0]), 0.45, 1.3)];
+    },
     // Where the little photo is right now (px), or null.
     photo(st, c) {
       const d = st.d;
       if (!d.snapped || d.gulped || !d.rect) return null;
       const since = st.age - d.snapped - SHOT.blink;
       if (since < 0) return null;
-      const r = d.rect, [lx, ly] = T.screenshot.lens(c);
-      const aspect = clamp((r[3] - r[1]) / Math.max(1, r[2] - r[0]), 0.45, 1.3);
-      const pw = clamp(c.R * 1.5, 54, 110), ph = pw * aspect;
+      const r = d.rect, [lx, ly] = T.screenshot.lens(c), [pw, ph] = T.screenshot.photoSize(st, c);
       const fcx = (r[0] + r[2]) / 2, fcy = (r[1] + r[3]) / 2;
       if (since < SHOT.eject) {
         // the shot pops out of the frame as a polaroid: it starts at half the frame and settles, bouncing
@@ -397,18 +433,21 @@
       // aiming, printed in full where the scanline has passed, gone as the shutter closes. Then on the polaroid.
       if (st.image?.complete) {
         const t = a - d.aimAt, alpha = !d.snapped ? clamp(t / 0.3, 0, 1) : 1 - clamp((a - d.snapped) / SHOT.blink, 0, 1);
-        const ins = c.P * 2, w = x1 - x0 - ins * 2, h = y1 - y0 - ins * 2;
-        if (t >= 0 && alpha > 0 && w > 24 && h > 24) {
-          const pic = R.ledImage(st.image, whole(st.image), w, h, c);
-          if (pic) {
-            const u = d.snapped ? 1 : d.scanning ? ease(clamp((t - SHOT.aim) / SHOT.scan, 0, 1)) : 0;
-            ctx.save();
-            ctx.globalAlpha = alpha * 0.3; ctx.drawImage(pic, x0 + ins, y0 + ins, w, h);
-            if (u > 0) { ctx.beginPath(); ctx.rect(x0 + ins, y0 + ins, w, h * u); ctx.clip(); ctx.globalAlpha = alpha; ctx.drawImage(pic, x0 + ins, y0 + ins, w, h); }
-            ctx.restore();
-          }
+        const ins = c.P * 2, w = x1 - x0 - ins * 2, h = y1 - y0 - ins * 2, r = d.rect;
+        // Built once at the frame's resting size and scaled while the brackets spring: a new size every frame meant
+        // re-dithering the whole screenshot every frame.
+        const fw = r[2] - r[0] - ins * 2, fh = r[3] - r[1] - ins * 2;
+        const full = fw > 24 && fh > 24 ? R.ledImage(st.image, whole(st.image), fw, fh, c) : null;
+        if (full && t >= 0 && alpha > 0 && w > 24 && h > 24) {
+          const u = d.snapped ? 1 : d.scanning ? ease(clamp((t - SHOT.aim) / SHOT.scan, 0, 1)) : 0;
+          ctx.save();
+          ctx.globalAlpha = alpha * 0.3; ctx.drawImage(full, x0 + ins, y0 + ins, w, h);
+          if (u > 0) { ctx.beginPath(); ctx.rect(x0 + ins, y0 + ins, w, h * u); ctx.clip(); ctx.globalAlpha = alpha; ctx.drawImage(full, x0 + ins, y0 + ins, w, h); }
+          ctx.restore();
         }
-        const box = T.screenshot.photoBox(st, c), pic = box && R.ledImage(st.image, whole(st.image), box[2], box[3], c);
+        // While it pops out bigger than its settled size, scale the frame's picture; small sizes are cheap to build.
+        const box = T.screenshot.photoBox(st, c), [pw, ph] = T.screenshot.photoSize(st, c);
+        const pic = box && (box[2] > pw || box[3] > ph ? full : R.ledImage(st.image, whole(st.image), box[2], box[3], c));
         if (pic) ctx.drawImage(pic, ...box);
       }
       // soft tint + app-name tag on the real window while aiming

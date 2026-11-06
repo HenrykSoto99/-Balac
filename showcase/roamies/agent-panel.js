@@ -1,7 +1,7 @@
 // The research card: when an answer comes from the web (a search or a fetched page) or turns into a list, it
-// streams into this card instead of the Sidekick's speech bubble, as a one-line answer, points and the sites
+// streams into this card instead of the Roamie's speech bubble, as a one-line answer, points and the sites
 // it used, with full markdown (markdown.js). It opens just past the cursor and then stays put
-// while the Sidekick keeps following the cursor. Drag it by its top bar; later cards open where it was left.
+// while the Roamie keeps following the cursor. Drag it by its top bar; later cards open where it was left.
 // Real type in the setup guide's look (pixel frame, Martian Mono), scrollable, closable, links open in the browser.
 // The overlay is click-through, so the host asks Roamie.panelHit(x, y) whether the cursor is over it.
 // API: Roamie.panel.open({ status, near }) .status(text) .append(text) .end() .fail(text) .close() .isOpen .onLink

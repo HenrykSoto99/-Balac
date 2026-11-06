@@ -1,4 +1,4 @@
-// The sidekick's cursor form while it just follows the cursor, drawn here instead of in the web overlay. The page
+// The Roamie's cursor form while it just follows the cursor, drawn here instead of in the web overlay. The page
 // hands over a picture of itself (eyes open and shut) and its follow rules; this moves it on the display's own clock,
 // which costs a small fraction of repainting a web view at 120 Hz. The page
 // takes it back for anything else (talking, cards, being clicked or dragged) and keeps the same follow maths, so the

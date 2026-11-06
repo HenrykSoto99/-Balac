@@ -152,7 +152,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     if (process.platform === 'darwin') {
       const t = String(target || 'screen').trim();
       const spec = t === 'screen' || t === 'front' || t.startsWith('window:') ? t : `app:${t}`;
-      // Shot straight away, with nothing played on screen (the Sidekick only shows a "looking" tag).
+      // Shot straight away, with nothing played on screen (the Roamie only shows a "looking" tag).
       // 1568 px is Claude's own cap; a bigger image gets shrunk again and its coordinates drift. The helper shrinks it
       // itself and says the final size; an older helper doesn't, so sips does it here.
       const res = await hands('capture', file, spec, '1568');

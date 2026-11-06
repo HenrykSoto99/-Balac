@@ -160,7 +160,7 @@ final class LegacyRecognizer: Recognizer {
         if rec.supportsOnDeviceRecognition { req.requiresOnDeviceRecognition = true }
         if #available(macOS 13, *) { req.addsPunctuation = true }
         req.taskHint = .dictation
-        req.contextualStrings = ["Sidekick", "Skool", "Yaatuber", "Roamies", "YouTube", "TikTok"]
+        req.contextualStrings = ["Roamies", "Roamie", "JARVIS"]
         task = rec.recognitionTask(with: req) { result, error in
             DispatchQueue.main.async {
                 if let result {

@@ -377,7 +377,7 @@
       d.cur[i] += d.vel[i] * dt;
     }
   };
-  // Looking at the screen (a screenshot): just the tag under the Sidekick while the shot
+  // Looking at the screen (a screenshot): just the tag under the Roamie while the shot
   // is taken, nothing played over the screen. It stays up at least a moment so it can be read.
   T.look = {
     variants: ['screen', 'window'], label: 'looking at your screen',

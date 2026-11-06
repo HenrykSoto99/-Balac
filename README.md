@@ -19,34 +19,39 @@
 <p align="center">
   <a href="https://github.com/KenKaiii/Roamies/releases/latest"><img src="https://img.shields.io/github/v/release/KenKaiii/Roamies?style=for-the-badge&label=Download&color=78ffe2" alt="Roamies desktop release"></a>
   <a href="https://github.com/KenKaiii/Roamies/stargazers"><img src="https://img.shields.io/github/stars/KenKaiii/Roamies?style=for-the-badge&label=Stars&color=yellow" alt="Star Roamies on GitHub"></a>
+  <a href="https://github.com/KenKaiii/Roamies/releases"><img src="https://img.shields.io/github/downloads/KenKaiii/Roamies/total?style=for-the-badge&label=App%20downloads&color=2ecc71" alt="Desktop app downloads"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg?style=for-the-badge" alt="AGPL-3.0 License"></a>
   <a href="https://youtube.com/@kenkaidoesai"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"></a>
   <a href="https://skool.com/kenkai"><img src="https://img.shields.io/badge/Skool-Community-78ffe2?style=for-the-badge" alt="Skool"></a>
 </p>
 
 Roamies are little creatures that live on your desktop. The main one, **Sidekick**, is a pixel-LED blob
-with an AI brain. Talk to it, and it answers in animated speech bubbles, acts out what it's doing, keeps
-track of what you said you'd do, and nudges you when it's due. It lives in the menu bar and stays out of
-your Dock.
+with an AI brain that keeps track of what you said you'd do and nudges you when it's due.
 
-## What you get
+> ⭐ **If Roamies keeps you on track, give it a star.** It's the main way other people find it.
 
-- **Talk to it:** hold ⌃⌥ to talk and let go to send, or tap ⌃⌥ for hands-free. ⌃⌥S shows or hides
-  Sidekick, and ⌃⌥A lets you snap an area of the screen and ask about it. Both shortcuts can be changed.
-- **It remembers:** commitments with reminders down to the second, facts about you, and conversations
+## Why Roamies
+
+- **Just talk to it.** Hold ⌃⌥ to talk and let go to send, or tap ⌃⌥ for hands-free. It answers in
+  animated speech bubbles and acts out what it's doing.
+- **It remembers.** Commitments with reminders down to the second, facts about you, and conversations
   that pick up where you left off. A conversation starts fresh after two quiet hours or on a new day.
-- **It sees and points:** it can screenshot a specific window, read what's in it, and point at the exact
-  spot on screen you need to click.
-- **It works your apps:** it can open apps, sites and files, and click or type in other apps for you.
-- **It shows its work:** every tool call plays its own animation, so you can see when it's taking a
-  screenshot, reading a file, running a command or searching the web.
-- **Your AI, your way:** it signs in through the same `~/.gg/auth.json` as GG Coder (Anthropic, OpenAI,
+- **It sees and points.** It can screenshot a specific window, read what's in it, and point at the exact
+  spot on screen you need to click. ⌃⌥A lets you snap an area of the screen and ask about it.
+- **It works your apps.** It can open apps, sites and files, and click or type in other apps for you.
+- **Your subscriptions.** It signs in through the same `~/.gg/auth.json` as GG Coder (Anthropic, OpenAI,
   Gemini, Kimi and xAI subscriptions, or API keys), so if GG Coder is signed in, so is Sidekick.
+
+## Also included
+
 - **Safe by default:** writing files, running commands and controlling other apps are off until you turn
   them on in setup or the menu bar ("Allow File Edits & Commands"). Even then, anything that changes things
   asks you first, and the dangerous stuff never runs: admin commands, wiping disks or your home folder,
   reading passwords and keys, startup scripts, downloaded scripts, and typing into terminals or password apps.
-- **Starts with your computer:** "Open at Login" is on by default (switch it in the menu bar or the setup
+- **Shows its work:** every tool call plays its own animation, so you can see when it's taking a
+  screenshot, reading a file, running a command or searching the web.
+- **Stays out of the way:** it lives in the menu bar, not your Dock. ⌃⌥S shows or hides Sidekick, and
+  both shortcuts can be changed. "Open at Login" is on by default (switch it in the menu bar or the setup
   guide).
 - **Updates itself:** when a new version is out, Sidekick tells you, and "Install Update and Restart" in the
   menu bar does the rest. Updates are signed and checked before they install.
@@ -78,10 +83,10 @@ voice never leaves it. Window reading, pointing and app control are macOS only f
 
 2. Open the app, follow the setup guide, and hold ⌃⌥ to say hi.
 
-## Built on gg-framework
+## Build with the framework
 
 Sidekick's brain is a [gg-framework](https://github.com/KenKaiii/gg-framework) agent running in a Node
-sidecar. Want to build your own?
+sidecar. Want to build your own? Install just what you need.
 
 - [**@kenkaiiii/gg-ai**](https://github.com/KenKaiii/gg-framework/blob/main/packages/gg-ai/README.md): Connect to AI providers and stream responses.
 - [**@kenkaiiii/gg-agent**](https://github.com/KenKaiii/gg-framework/blob/main/packages/gg-agent/README.md): Build agents that use your tools and work through tasks.
@@ -111,6 +116,22 @@ Voice on Windows uses [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidi
 [istupakov](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx), run with
 [parakeet-rs](https://github.com/altunenes/parakeet-rs). The model is downloaded at setup, not bundled.
 
+## Contributing
+
+Bug reports, ideas and pull requests are welcome. [Open an issue](https://github.com/KenKaiii/Roamies/issues)
+to get started, and report security problems as described in [SECURITY.md](SECURITY.md).
+
 ## Learn with me
 
 Come build with me in my [Skool community](https://skool.com/kenkai). Get help, share what you're making, and learn how to get more out of AI.
+
+## Star history
+
+<a href="https://star-history.com/#KenKaiii/Roamies&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=KenKaiii/Roamies&amp;type=Date&amp;theme=dark">
+    <img alt="Roamies star history chart" src="https://api.star-history.com/svg?repos=KenKaiii/Roamies&amp;type=Date">
+  </picture>
+</a>
+
+<p align="center">If Roamies is useful to you, ⭐ star the repo so more people find it.</p>

@@ -30,7 +30,7 @@ fn sidecar_script(app: &AppHandle) -> PathBuf {
 
 pub(crate) fn spawn_sidecar(app: &AppHandle) {
     let Some(node) = find_node() else {
-        fallback_menu(app, "Sidekick's runtime is missing; reinstall Roamies");
+        fallback_menu(app, "Roamies is missing a part; reinstall it");
         return;
     };
     let script = sidecar_script(app);
@@ -49,7 +49,7 @@ pub(crate) fn spawn_sidecar(app: &AppHandle) {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            fallback_menu(app, &format!("Sidekick failed to start: {e}"));
+            fallback_menu(app, &format!("Roamies failed to start: {e}"));
             return;
         }
     };
@@ -65,6 +65,6 @@ pub(crate) fn spawn_sidecar(app: &AppHandle) {
         let _ = child.wait();
         *app.state::<Sidecar>().0.lock().unwrap() = None;
         let app2 = app.clone();
-        let _ = app.run_on_main_thread(move || fallback_menu(&app2, "Sidekick stopped"));
+        let _ = app.run_on_main_thread(move || fallback_menu(&app2, "Roamies stopped"));
     });
 }

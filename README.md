@@ -2,15 +2,9 @@
   <img src="showcase/tauri/src-tauri/icons/128x128@2x.png" width="128" alt="Roamies icon">
 </p>
 
-<pre align="center">
-████████      ██████      ██████    ██      ██  ██████  ██████████    ████████
-██      ██  ██      ██  ██      ██  ████  ████    ██    ██          ██&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-██      ██  ██      ██  ██      ██  ██  ██  ██    ██    ██          ██&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-████████    ██      ██  ██████████  ██  ██  ██    ██    ████████      ██████&nbsp;&nbsp;
-██  ██      ██      ██  ██      ██  ██      ██    ██    ██                  ██
-██    ██    ██      ██  ██      ██  ██      ██    ██    ██                  ██
-██      ██    ██████    ██      ██  ██      ██  ██████  ██████████  ████████&nbsp;&nbsp;
-</pre>
+<p align="center">
+  <img src="docs/art/hero.gif" alt="Roamies: JARVIS, a glowing globe of LED dots, ripples as it says &quot;At your service.&quot; beside a mouse cursor, while Roamie, Anime Girl, Sarah and Adrian wave and hop on either side">
+</p>
 
 <p align="center">
   <strong>A little buddy that lives on your screen and keeps you on track.</strong>
@@ -25,43 +19,61 @@
   <a href="https://skool.com/kenkai"><img src="https://img.shields.io/badge/Skool-Community-78ffe2?style=for-the-badge" alt="Skool"></a>
 </p>
 
-Roamies are little creatures that live on your desktop. The main one, **Sidekick**, is a pixel-LED blob
-with an AI brain that keeps track of what you said you'd do and nudges you when it's due.
+Roamies is a little AI buddy that lives on your desktop. It stays by your cursor, talks back in its own
+voice, keeps track of what you said you'd do and nudges you when it's due.
 
 > ⭐ **If Roamies keeps you on track, give it a star.** It's the main way other people find it.
 
 ## Why Roamies
 
-- **Just talk to it.** Hold ⌃⌥ to talk and let go to send, or tap ⌃⌥ for hands-free. It answers in
-  animated speech bubbles and acts out what it's doing.
+- **Just talk to it.** Hold ⌃⌥ (Ctrl+Alt on Windows) to talk and let go to send, or tap it for hands-free.
+  It answers in speech bubbles and acts out what it's doing. Esc stops a reply, or sends it away.
+- **It talks back.** Add a [Fish Audio](https://fish.audio) key and every reply is spoken in your Roamie's
+  own voice, with real feeling: a laugh when something's funny, a whisper for a secret. Pick Drama 3 for the
+  most expressive voice, or S2.1 Pro for a cheaper one.
+- **Pick your Roamie.** Five looks, each with its own name, voice and animations: Roamie, JARVIS, Anime Girl,
+  Sarah and Adrian. Three sizes: Default, Small, or Cursor, a pixel pointer that rides along with your mouse.
 - **It remembers.** Commitments with reminders down to the second, facts about you, and conversations
   that pick up where you left off. A conversation starts fresh after two quiet hours or on a new day.
+  Search what it knows, or make it forget, from the Memory page.
 - **It sees and points.** It can screenshot a specific window, read what's in it, and point at the exact
   spot on screen you need to click. ⌃⌥A lets you snap an area of the screen and ask about it.
 - **It works your apps.** It can open apps, sites and files, and click or type in other apps for you.
-- **Your subscriptions.** It signs in through the same `~/.gg/auth.json` as GG Coder (Anthropic, OpenAI,
-  Gemini, Kimi and xAI subscriptions, or API keys), so if GG Coder is signed in, so is Sidekick.
+- **Your subscriptions.** Claude, ChatGPT, Gemini, Grok, Kimi or API keys. It signs in through the same
+  `~/.gg/auth.json` as GG Coder, so if GG Coder is signed in, so is Roamies.
 
 ## Also included
 
+- **The Roamies panel:** click the menu bar icon (the tray icon on Windows) for what it's doing, what it did
+  lately, what it remembers, and every setting: model, look and size, voice, behavior and updates.
+  Right-click for a short menu.
+- **Gets to know you:** the setup guide ends with a short chat where it asks about you and shows what
+  it'll remember.
 - **Safe by default:** writing files, running commands and controlling other apps are off until you turn
-  them on in setup or the menu bar ("Allow File Edits & Commands"). Even then, anything that changes things
+  them on in setup or the panel ("Allow file edits and commands"). Even then, anything that changes things
   asks you first, and the dangerous stuff never runs: admin commands, wiping disks or your home folder,
   reading passwords and keys, startup scripts, downloaded scripts, and typing into terminals or password apps.
 - **Shows its work:** every tool call plays its own animation, so you can see when it's taking a
   screenshot, reading a file, running a command or searching the web.
-- **Stays out of the way:** it lives in the menu bar, not your Dock. ⌃⌥S shows or hides Sidekick, and
-  both shortcuts can be changed. "Open at Login" is on by default (switch it in the menu bar or the setup
-  guide).
-- **Updates itself:** when a new version is out, Sidekick tells you, and "Install Update and Restart" in the
-  menu bar does the rest. Updates are signed and checked before they install.
+- **Keeps your keys safe:** your Fish Audio key lives in the macOS Keychain, or encrypted for your
+  Windows user, never in a plain file.
+- **Stays out of the way:** it lives in the menu bar, not your Dock. ⌃⌥S shows or hides your Roamie, and
+  every shortcut can be changed. "Open at login" is on by default.
+- **Updates itself:** when a new version is out, your Roamie tells you, and one click in the panel does the
+  rest. Updates are signed and checked before they install.
 - **Setup guide:** opens on first launch and walks through permissions (microphone, screen recording,
-  accessibility, files), connecting an AI account, shortcuts and where to find the menu bar icon. Reopen
-  it any time from the menu bar icon → Setup Guide….
+  accessibility, files), connecting an AI account, shortcuts, getting to know you and where to find the menu
+  bar icon. Reopen it any time from the panel's About page.
 
-Voice works best on macOS 26+, which doesn't need Siri or Dictation turned on. On Windows, voice runs
+Talking to it works best on macOS 26+, which doesn't need Siri or Dictation turned on. On Windows, it runs
 NVIDIA's Parakeet speech model on your PC (about 670 MB, downloaded once from the setup guide), so your
-voice never leaves it. Window reading, pointing and app control are macOS only for now.
+voice never leaves it. Spoken replies need a Fish Audio account and are billed to it; the panel shows what
+each voice model costs. Window reading, pointing and app control are macOS only for now.
+
+<sub>Voice on Windows uses [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
+([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), in the ONNX export by
+[istupakov](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx), run with
+[parakeet-rs](https://github.com/altunenes/parakeet-rs). The model is downloaded at setup, not bundled.</sub>
 
 ## Get started
 
@@ -81,40 +93,26 @@ voice never leaves it. Window reading, pointing and app control are macOS only f
    ./build.sh            # release bundle for this OS
    ```
 
-2. Open the app, follow the setup guide, and hold ⌃⌥ to say hi.
+2. Open the app, follow the setup guide, pick your Roamie, and hold ⌃⌥ to say hi.
 
 ## Build with the framework
 
-Sidekick's brain is a [gg-framework](https://github.com/KenKaiii/gg-framework) agent running in a Node
+Every Roamie's brain is a [gg-framework](https://github.com/KenKaiii/gg-framework) agent running in a Node
 sidecar. Want to build your own? Install just what you need.
 
 - [**@kenkaiiii/gg-ai**](https://github.com/KenKaiii/gg-framework/blob/main/packages/gg-ai/README.md): Connect to AI providers and stream responses.
 - [**@kenkaiiii/gg-agent**](https://github.com/KenKaiii/gg-framework/blob/main/packages/gg-agent/README.md): Build agents that use your tools and work through tasks.
 - [**@kenkaiiii/gg-core**](https://github.com/KenKaiii/gg-framework/blob/main/packages/gg-core/README.md): Model selection, authentication, and local model discovery.
 
+For your own agent, start here:
+
 ```bash
 npm install @kenkaiiii/gg-ai @kenkaiiii/gg-agent
 ```
 
-## What's in this repo
-
-| Path | What |
-|---|---|
-| `showcase/tauri/src-tauri/` | The desktop app shell (Tauri 2, Rust) and the macOS voice and hands helpers (Swift) |
-| `showcase/tauri/src-tauri/voice-win/` | The Windows voice helper (Rust, Parakeet speech on the PC) |
-| `showcase/tauri/sidecar/` | Sidekick's brain: the gg-framework agent, its tools, memory and tests |
-| `showcase/roamies/` | The creatures: physics, rendering, expressions, bubbles, tool animations, sounds |
-| `showcase/onboarding/` | The setup guide |
-
-## License
-
-[AGPL-3.0](LICENSE). You can use, change and share Roamies, but if you distribute it or run a modified
-version as a network service, you have to release your source under the same license.
-
-Voice on Windows uses [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
-([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), in the ONNX export by
-[istupakov](https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx), run with
-[parakeet-rs](https://github.com/altunenes/parakeet-rs). The model is downloaded at setup, not bundled.
+The package links above cover setup and usage. Roamies is licensed under [AGPL-3.0](LICENSE): you can build
+on it, and if you distribute your changes or run them as a network service, you share their source under
+the same license.
 
 ## Contributing
 

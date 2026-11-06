@@ -4,7 +4,10 @@
 // (quick tap) on a pause or the next press-and-release. Hold ⌃⌥ = push-to-talk (release sends). Quick tap = hands-free
 // (ends on a pause or another tap). JSON lines on stdout; exits when stdin closes.
 // Modifier state is read with CGEventSource, which needs no Input Monitoring permission.
+// While ⌃⌥ is held the mouse draws on the screen (ink.swift); the marked area goes out with what was said.
+// While listening, a small voice-bar pill rides beside the cursor (wave.swift) instead of a transcript bubble.
 import AVFoundation
+import AppKit
 import CoreAudio
 import CoreGraphics
 import Foundation
@@ -302,7 +305,13 @@ final class Voice {
         return false
     }
 
+    let ink = Ink()
+    let wave = Wave()
+    let buddy = Buddy()
+
     func tick() {
+        // Drawing follows the keys: only while ⌃⌥ is down for a talk.
+        defer { ink.setArmed(phase == .armed || phase == .holding); wave.tick(); buddy.tick() }
         let now = uptime()
         let f = CGEventSource.flagsState(.combinedSessionState).intersection(Self.allMods)
         let held = f.intersection(chordMask)
@@ -350,7 +359,11 @@ final class Voice {
         phase = .armed
         chordAt = now
         best = ""
-        if dryRun { return }
+        // The drawing layer first: starting the mic below holds this thread for a moment (longer with Bluetooth),
+        // and a drag begun in that moment would otherwise land in the app underneath.
+        ink.setArmed(true)
+        // ROAMIES_VOICE_DRYRUN_TEXT: what a dry run "hears", to test what goes out with the words (like pen marks).
+        if dryRun { best = ProcessInfo.processInfo.environment["ROAMIES_VOICE_DRYRUN_TEXT"] ?? ""; return }
         // Already allowed: start the mic now so the first word isn't lost. Otherwise wait until
         // the press is clearly a talk (hold or tap), so shortcuts like ⌃⌥S never trigger a prompt.
         if authorized { startAudio() }
@@ -369,7 +382,9 @@ final class Voice {
             }
         }
         if !dryRun { OutputMute.begin() }
-        emit(["type": "state", "state": "listening", "mode": mode])
+        wave.show()
+        // wave: the cursor shows the listening, so the app shows no listening bubble.
+        emit(["type": "state", "state": "listening", "mode": mode, "wave": true])
         if !best.isEmpty { emit(["type": "partial", "text": best]) }
     }
 
@@ -378,6 +393,9 @@ final class Voice {
         let shown = phase != .armed
         reportEmpty = shown && !failed
         phase = .finishing
+        wave.think()
+        wave.setHidden(true)
+        ink.capture { [weak self] in self?.wave.setHidden(false) }
         if shown { emit(["type": "state", "state": "processing"]) }
         guard let r = rec, !failed else { stopAudio(); finalize(); return }
         // Keep the mic open a moment after release so a word said while letting go isn't clipped.
@@ -399,11 +417,22 @@ final class Voice {
         rec?.cancel(); rec = nil
         phase = .idle
         let text = best.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty { emit(["type": "final", "text": text]) }
-        emit(["type": "state", "state": "idle"])
-        // Listened but got no words: say so instead of closing silently.
-        if text.isEmpty && reportEmpty { emit(["type": "error", "code": "nothing_heard", "spoke": voiceAt > listenAt + 0.05]) }
+        if text.isEmpty { wave.hide() } else { wave.awaitAnswer() }
+        let empty = text.isEmpty && reportEmpty, spoke = voiceAt > listenAt + 0.05
         reportEmpty = false
+        let rest = {
+            emit(["type": "state", "state": "idle"])
+            // Listened but got no words: say so instead of closing silently.
+            if empty { emit(["type": "error", "code": "nothing_heard", "spoke": spoke]) }
+        }
+        if text.isEmpty { ink.clear(); rest(); return }
+        // What was marked on screen while talking rides along with the words.
+        ink.take { area in
+            var msg: [String: Any] = ["type": "final", "text": text]
+            if let area { msg["area"] = area }
+            emit(msg)
+            rest()
+        }
     }
 
     private func cancel() {
@@ -412,6 +441,8 @@ final class Voice {
         finishTimer?.invalidate(); finishTimer = nil
         phase = .idle
         reportEmpty = false
+        ink.clear()
+        wave.hide()
         emit(["type": "state", "state": "idle", "cancelled": true])
     }
 
@@ -520,6 +551,7 @@ final class Voice {
     private func onLevel(_ v: Double) {
         let now = uptime()
         if v > 0.2 { voiceAt = now }
+        if phase == .holding || phase == .handsFree { wave.setLevel(v) }
         guard phase == .holding || phase == .handsFree, now - levelAt >= 0.05 else { return }
         levelAt = now
         emit(["type": "level", "v": (v * 100).rounded() / 100])
@@ -614,6 +646,11 @@ Thread.detachNewThread {
         switch msg["cmd"] as? String {
         case "cancel": DispatchQueue.main.async { voice.externalCancel() }
         case "listen": DispatchQueue.main.async { voice.listenNow() }
+        // The sidekick is answering (it appears where the cursor is): the listening pill can go.
+        case "handoff": DispatchQueue.main.async { voice.wave.hide() }
+        // The sidekick following the cursor in its cursor form, drawn here (buddy.swift) until the page takes it back.
+        case "buddy": DispatchQueue.main.async { if msg["on"] as? Bool == true { voice.buddy.show(msg) } else { voice.buddy.hide() } }
+        case "buddy_alpha": if let a = msg["a"] as? Double { DispatchQueue.main.async { voice.buddy.setHidden(a < 0.5) } }
         case "chord": if let mods = msg["mods"] as? [String] { DispatchQueue.main.async { voice.setChord(mods) } }
         case "mute": if let on = msg["on"] as? Bool { DispatchQueue.main.async { OutputMute.enabled = on; if !on { OutputMute.end() } } }
         default: break
@@ -632,4 +669,6 @@ for sig in [SIGTERM, SIGINT, SIGHUP] {
     signalSources.append(src)
 }
 emit(["type": "ready", "engine": voice.engineName, "dryRun": dryRun])
-RunLoop.main.run()
+// An app run loop (no Dock icon) so the drawing panels get mouse events.
+NSApplication.shared.setActivationPolicy(.accessory)
+NSApplication.shared.run()

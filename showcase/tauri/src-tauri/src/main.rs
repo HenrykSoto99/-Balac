@@ -14,20 +14,38 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 use std::{thread, time::Duration};
 
 use serde_json::{json, Value};
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Wry};
 
 use sidecar::spawn_sidecar;
-use voice::{init_hotkeys, set_hotkey, start_voice, stop_voice, to_voice, voice_binary};
+use voice::{init_hotkeys, set_esc, set_hotkey, start_voice, stop_voice, to_voice, voice_binary};
 
 static GENERATION: AtomicUsize = AtomicUsize::new(0);
+/// The overlay window the sidekick lives in. It moves to whichever screen the cursor is on.
+static SIDEKICK_OVERLAY: Mutex<Option<String>> = Mutex::new(None);
 /// The setup guide is open: voice events go to it (for the "try it" test) instead of the agent.
 static ONBOARDING: AtomicBool = AtomicBool::new(false);
 const ONBOARDING_LABEL: &str = "onboarding";
+const PANEL_LABEL: &str = "panel";
+/// When the panel last hid because it lost focus: a click on the icon that caused it mustn't reopen it.
+static PANEL_BLURRED: Mutex<Option<Instant>> = Mutex::new(None);
+/// Counts opens, so a close that's still playing its animation can tell it was opened again and stay up.
+static PANEL_GEN: AtomicUsize = AtomicUsize::new(0);
+/// The close animation is playing (the window is still on screen, but on its way out).
+static PANEL_CLOSING: AtomicBool = AtomicBool::new(false);
+/// How long the panel's close animation runs (panel.css: --shut).
+const PANEL_SHUT_MS: u64 = 150;
+/// The panel sits above the icon (a taskbar at the bottom), so it opens from its bottom edge.
+static PANEL_FROM_BOTTOM: AtomicBool = AtomicBool::new(false);
+
+fn panel_open_js() -> String {
+    format!("window.__panelOpen&&__panelOpen({})", PANEL_FROM_BOTTOM.load(Ordering::SeqCst))
+}
 
 struct Sidecar(Mutex<Option<ChildStdin>>);
 struct Roster(Mutex<Vec<String>>);
@@ -37,6 +55,8 @@ struct Voice(Mutex<Option<Child>>, AtomicUsize);
 struct TalkChord(Mutex<Vec<String>>);
 /// Windows: the downloaded speech model's folder (the sidecar owns the download and says where it is).
 struct VoiceModel(Mutex<Option<String>>);
+/// macOS: the "drag me into the list" panel the hands helper shows under System Settings.
+struct PermGuide(Mutex<Option<Child>>);
 
 /// Windows: helpers are console programs, so without this each one opens a console window.
 fn hide_console(cmd: &mut Command) -> &mut Command {
@@ -49,6 +69,9 @@ fn hide_console(cmd: &mut Command) -> &mut Command {
 }
 
 
+/// The voice helper is drawing the cursor-form sidekick (buddy.swift), so the page needs far fewer cursor updates.
+static BUDDY_ON: AtomicBool = AtomicBool::new(false);
+
 fn is_overlay(label: &str) -> bool {
     label.starts_with("overlay-")
 }
@@ -60,11 +83,26 @@ fn to_sidecar(app: &AppHandle, msg: &Value) {
 }
 
 fn to_overlays(app: &AppHandle, msg: &Value) {
+    if let Some([x, y, w, h]) = point_target(msg) {
+        // Teach mode: go to the screen the control is on, even if the cursor is elsewhere.
+        move_sidekick_to(app, x + w / 2.0, y + h / 2.0);
+    } else if starts_interaction(msg) {
+        follow_cursor(app);
+    }
+    if shows_answer(msg) {
+        to_voice(app, &json!({ "cmd": "handoff" }));
+    }
     let js = format!("window.__roamieHost&&__roamieHost({msg})");
     for (label, w) in app.webview_windows() {
         if is_overlay(&label) {
             let _ = w.eval(&js);
         }
+    }
+}
+
+fn to_panel(app: &AppHandle, msg: &Value) {
+    if let Some(w) = app.get_webview_window(PANEL_LABEL) {
+        let _ = w.eval(format!("window.__panel&&__panel({msg})"));
     }
 }
 
@@ -76,10 +114,66 @@ fn to_onboarding(app: &AppHandle, msg: &Value) {
 
 // ---------- commands called by the page ----------
 
+/// The Roamie came on screen in this overlay (on), or left it: Esc is held only meanwhile.
+#[tauri::command]
+fn esc_watch(app: AppHandle, window: WebviewWindow, on: bool) {
+    let label = window.label().to_owned();
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || set_esc(&app2, &label, on));
+}
+
 /// Cursor entered or left something clickable: flip click-through.
 #[tauri::command]
 fn set_hot(window: WebviewWindow, hot: bool) {
     let _ = window.set_ignore_cursor_events(!hot);
+}
+
+/// macOS: hand the cursor-form sidekick to the voice helper to draw while it just follows the cursor (on: true, with
+/// its picture, motion and follow rules in this overlay's CSS px), or take it back (on: false). False when there's no
+/// helper to draw it, so the page keeps drawing it itself.
+#[tauri::command]
+fn buddy(app: AppHandle, window: WebviewWindow, msg: Value) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let mut msg = msg;
+        let on = msg.get("on").and_then(Value::as_bool) == Some(true);
+        if app.state::<Voice>().0.lock().unwrap().is_none() {
+            BUDDY_ON.store(false, Ordering::Relaxed);
+            return false;
+        }
+        if on {
+            // Page px to global points: one points space across screens on macOS.
+            let (Ok(pos), Ok(scale)) = (window.inner_position(), window.scale_factor()) else { return false };
+            let o = pos.to_logical::<f64>(scale);
+            for (k, d) in [("x", o.x), ("l", o.x), ("r", o.x), ("y", o.y), ("t", o.y), ("b", o.y)] {
+                if let Some(v) = msg.get(k).and_then(Value::as_f64) {
+                    msg[k] = json!(v + d);
+                }
+            }
+        }
+        BUDDY_ON.store(on, Ordering::Relaxed);
+        msg["cmd"] = json!("buddy");
+        to_voice(&app, &msg);
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, window, msg);
+        false
+    }
+}
+
+/// Voice helper news about the natively drawn sidekick, for the page that owns it.
+fn to_sidekick_buddy(app: &AppHandle, msg: &Value) {
+    if msg.get("state").and_then(Value::as_str) != Some("shown") {
+        BUDDY_ON.store(false, Ordering::Relaxed);
+    }
+    let js = format!("window.__roamieBuddy&&__roamieBuddy({msg})");
+    for (label, w) in app.webview_windows() {
+        if is_overlay(&label) {
+            let _ = w.eval(&js);
+        }
+    }
 }
 
 #[tauri::command]
@@ -197,6 +291,69 @@ fn open_settings(pane: String) {
     let _ = Command::new("open").arg(format!("x-apple.systempreferences:com.apple.preference.security?{pane}")).spawn();
 }
 
+/// Takes one throwaway screenshot to prove Screen Recording really works, not just that it's switched on.
+#[tauri::command]
+async fn screen_check() -> Value {
+    if !cfg!(target_os = "macos") {
+        return json!({ "unsupported": true });
+    }
+    tauri::async_runtime::spawn_blocking(|| {
+        let Some(bin) = helper_binary("roamies-hands") else { return json!({ "unsupported": true }) };
+        Command::new(bin)
+            .arg("screencheck")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+            .unwrap_or_else(|| json!({ "seen": false }))
+    })
+    .await
+    .unwrap_or_else(|_| json!({ "seen": false }))
+}
+
+/// Shows the hands helper's panel under System Settings for one Privacy pane ("accessibility" or
+/// "screen"): Roamies' icon to drag into the list, in case macOS left it out. Any other kind just
+/// closes it. The helper waits for Settings to open and leaves once its stdin (held here) closes.
+#[tauri::command]
+fn perm_guide(app: AppHandle, kind: Option<String>) {
+    stop_perm_guide(&app);
+    #[cfg(target_os = "macos")]
+    {
+        let Some(kind) = kind.filter(|k| k == "accessibility" || k == "screen") else { return };
+        let Some(bin) = helper_binary("roamies-hands") else { return };
+        // The Roamies.app around this binary; a dev build has none, so the panel shows text only.
+        let bundle = std::env::current_exe()
+            .ok()
+            .and_then(|e| e.ancestors().find(|p| p.extension().is_some_and(|x| x == "app")).map(|p| p.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        let child = Command::new(bin)
+            .args(["guide", &kind, &bundle])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(log_stdio("sidekick-guide.log"))
+            .spawn();
+        match child {
+            Ok(c) => {
+                if let Ok(mut g) = app.state::<PermGuide>().0.lock() {
+                    *g = Some(c);
+                }
+            }
+            Err(e) => eprintln!("permission guide failed to start: {e}"),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = kind;
+}
+
+fn stop_perm_guide(app: &AppHandle) {
+    let old = app.state::<PermGuide>().0.lock().ok().and_then(|mut g| g.take());
+    if let Some(mut c) = old {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
+}
+
 /// The guide calls this once its page has loaded: by then the window is really on screen, so
 /// putting it on top sticks (doing it at creation time loses to whatever app is frontmost).
 #[tauri::command]
@@ -214,6 +371,20 @@ fn drag_window(window: WebviewWindow) {
 #[tauri::command]
 fn relaunch(app: AppHandle) {
     app.restart();
+}
+
+/// The panel's Esc, or an action that happens somewhere else (asking, the setup guide).
+#[tauri::command]
+fn panel_hide(app: AppHandle) {
+    hide_panel(&app, "panel");
+}
+
+/// Closes the guide without the drop-in (the chat-only guide is done).
+#[tauri::command]
+fn guide_close(app: AppHandle) {
+    if let Some(w) = app.get_webview_window(ONBOARDING_LABEL) {
+        let _ = w.close();
+    }
 }
 
 /// Finishes the guide: closes it and has the Sidekick drop in right under the tray icon.
@@ -296,6 +467,141 @@ fn tray_image() -> tauri::image::Image<'static> {
     tauri::image::Image::new_owned(rgba, n as u32, n as u32)
 }
 
+// ---------- panel ----------
+
+// Wide enough for the sidebar beside a page as roomy as the old one-column panel.
+const PANEL_W: f64 = 560.0;
+const PANEL_H: f64 = 560.0;
+
+/// Plays the panel's close animation, then hides it (unless it was opened again meanwhile). why: what closed it,
+/// for the log (blur, icon, esc, panel).
+pub(crate) fn hide_panel(app: &AppHandle, why: &'static str) {
+    let Some(w) = app.get_webview_window(PANEL_LABEL) else { return };
+    if !w.is_visible().unwrap_or(false) || PANEL_CLOSING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let gen = PANEL_GEN.load(Ordering::SeqCst);
+    let _ = w.eval("window.__panelShut&&__panelShut()");
+    let app = app.clone();
+    thread::spawn(move || {
+        // A little past the animation, so its last frame has drawn before the window goes.
+        thread::sleep(Duration::from_millis(PANEL_SHUT_MS + 40));
+        if PANEL_GEN.load(Ordering::SeqCst) != gen {
+            return;
+        }
+        PANEL_CLOSING.store(false, Ordering::SeqCst);
+        if let Some(w) = app.get_webview_window(PANEL_LABEL) {
+            let _ = w.hide();
+        }
+        to_sidecar(&app, &json!({ "type": "panel_closed", "why": why }));
+    });
+}
+
+/// Opens the panel by the icon (or closes it if it's open). `toggle`: false from the menu's Open Panel, which
+/// only opens. The icon's rect comes with a click; from the menu, it's asked for.
+fn show_panel(app: &AppHandle, rect: Option<tauri::Rect>, toggle: bool) {
+    let existing = app.get_webview_window(PANEL_LABEL);
+    if let Some(w) = &existing {
+        if w.is_visible().unwrap_or(false) {
+            // On its way out: a toggle lets it go, an open brings it back.
+            let closing = PANEL_CLOSING.load(Ordering::SeqCst);
+            if toggle || !closing {
+                if toggle && !closing {
+                    hide_panel(app, "icon");
+                }
+                return;
+            }
+            PANEL_GEN.fetch_add(1, Ordering::SeqCst);
+            PANEL_CLOSING.store(false, Ordering::SeqCst);
+            let _ = w.eval(panel_open_js());
+            let _ = w.set_focus();
+            return;
+        }
+    }
+    // The click that took focus away (and so hid it) is the same one asking to toggle: leave it closed.
+    if toggle && PANEL_BLURRED.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_millis(400)) {
+        return;
+    }
+    let w = match existing {
+        Some(w) => w,
+        None => {
+            let b = WebviewWindowBuilder::new(app, PANEL_LABEL, WebviewUrl::App("panel/index.html".into()))
+                .title("Roamies")
+                .inner_size(PANEL_W, PANEL_H)
+                .resizable(false)
+                .maximizable(false)
+                .minimizable(false)
+                .decorations(false)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .visible_on_all_workspaces(true)
+                // Transparent, so it opens and closes as its own shape (panel.css draws the frame).
+                // No native shadow: macOS works it out from the drawn pixels and would trail the animation.
+                .transparent(true)
+                .shadow(false)
+                .visible(false);
+            match b.build() {
+                Ok(w) => {
+                    let app2 = app.clone();
+                    w.on_window_event(move |e| {
+                        if let tauri::WindowEvent::Focused(false) = e {
+                            *PANEL_BLURRED.lock().unwrap() = Some(Instant::now());
+                            hide_panel(&app2, "blur");
+                        }
+                    });
+                    w
+                }
+                Err(e) => {
+                    eprintln!("panel failed to open: {e}");
+                    return;
+                }
+            }
+        }
+    };
+    let rect = rect.or_else(|| app.tray_by_id("roamies").and_then(|t| t.rect().ok().flatten()));
+    PANEL_FROM_BOTTOM.store(place_panel(app, &w, rect), Ordering::SeqCst);
+    PANEL_GEN.fetch_add(1, Ordering::SeqCst);
+    PANEL_CLOSING.store(false, Ordering::SeqCst);
+    let _ = w.eval(panel_open_js());
+    let _ = w.show();
+    let _ = w.set_focus();
+    activate_window(app, PANEL_LABEL);
+    to_sidecar(app, &json!({ "type": "panel_open" }));
+}
+
+/// Right under the icon in the menu bar (macOS, or a taskbar at the top), right above it in a taskbar at the
+/// bottom (Windows), kept inside the screen's usable area. True when it's above the icon.
+fn place_panel(app: &AppHandle, w: &WebviewWindow, rect: Option<tauri::Rect>) -> bool {
+    let icon = rect.map(|r| {
+        let p = r.position.to_physical::<f64>(1.0);
+        let z = r.size.to_physical::<f64>(1.0);
+        (p.x, p.y, z.width, z.height)
+    });
+    let monitor = match icon {
+        Some((x, y, iw, ih)) => app.monitor_from_point(x + iw / 2.0, y + ih / 2.0).ok().flatten(),
+        None => None,
+    }
+    .or_else(|| app.primary_monitor().ok().flatten());
+    let Some(m) = monitor else { return false };
+    let s = m.scale_factor();
+    let wa = m.work_area();
+    let (ax, ay, aw, ah) = (wa.position.x as f64, wa.position.y as f64, wa.size.width as f64, wa.size.height as f64);
+    let gap = 6.0 * s;
+    let margin = 8.0 * s;
+    let h = (PANEL_H * s).min(ah - 2.0 * margin);
+    let pw = PANEL_W * s;
+    let _ = w.set_size(tauri::PhysicalSize::new(pw.round() as u32, h.round() as u32));
+    let (cx, y, above) = match icon {
+        Some((x, y, iw, ih)) if y + ih / 2.0 < ay + ah / 2.0 => (x + iw / 2.0, (y + ih).max(ay) + gap, false),
+        Some((x, y, iw, _)) => (x + iw / 2.0, y.min(ay + ah) - h - gap, true),
+        None => (ax + aw - pw / 2.0 - margin, ay + gap, false),
+    };
+    let x = (cx - pw / 2.0).clamp(ax + margin, (ax + aw - pw - margin).max(ax + margin));
+    let y = y.clamp(ay + margin.min(gap), (ay + ah - h - margin).max(ay));
+    let _ = w.set_position(tauri::PhysicalPosition::new(x.round() as i32, y.round() as i32));
+    above
+}
+
 // ---------- setup guide window ----------
 
 /// While the setup guide is open Roamies is a normal app (Dock icon, ⌘Tab), so it's easy to get
@@ -311,16 +617,23 @@ fn set_dock(app: &AppHandle, visible: bool) {
     let _ = (app, visible);
 }
 
-fn open_onboarding(app: &AppHandle) {
+/// The setup guide, or (mode "chat") just its get-to-know-you chat. If it's already open, it's brought forward
+/// and told which part to show.
+fn open_onboarding(app: &AppHandle, mode: Option<&str>) {
     set_dock(app, true);
+    let chat = mode == Some("chat");
     if let Some(w) = app.get_webview_window(ONBOARDING_LABEL) {
         let _ = w.show();
         let _ = w.set_focus();
         activate_app(app);
+        if chat {
+            to_onboarding(app, &json!({ "kind": "mode", "mode": "chat" }));
+        }
         return;
     }
-    let mut b = WebviewWindowBuilder::new(app, ONBOARDING_LABEL, WebviewUrl::App("onboarding/index.html".into()))
-        .title("Welcome to Roamies")
+    let url = if chat { "onboarding/index.html?mode=chat" } else { "onboarding/index.html" };
+    let mut b = WebviewWindowBuilder::new(app, ONBOARDING_LABEL, WebviewUrl::App(url.into()))
+        .title(if chat { "Get to know you" } else { "Welcome to Roamies" })
         .inner_size(780.0, 540.0)
         .resizable(false)
         .maximizable(false)
@@ -339,6 +652,7 @@ fn open_onboarding(app: &AppHandle) {
             w.on_window_event(move |e| {
                 if let tauri::WindowEvent::Destroyed = e {
                     ONBOARDING.store(false, Ordering::Relaxed);
+                    stop_perm_guide(&app2);
                     set_dock(&app2, false);
                     to_sidecar(&app2, &json!({ "type": "ob_closed" }));
                 }
@@ -355,9 +669,13 @@ fn open_onboarding(app: &AppHandle) {
 /// A menu-bar-only app isn't frontmost, and macOS 14+ ignores requests to activate it from the
 /// background. So the guide window is put on top directly, then the app asks to become active.
 fn activate_app(app: &AppHandle) {
+    activate_window(app, ONBOARDING_LABEL);
+}
+
+fn activate_window(app: &AppHandle, label: &str) {
     #[cfg(target_os = "macos")]
     {
-        let ptr = app.get_webview_window(ONBOARDING_LABEL).and_then(|w| w.ns_window().ok()).map(|p| p as usize);
+        let ptr = app.get_webview_window(label).and_then(|w| w.ns_window().ok()).map(|p| p as usize);
         let _ = app.run_on_main_thread(move || unsafe {
             use objc2::runtime::{AnyObject, Bool};
             use objc2::{class, msg_send};
@@ -370,10 +688,97 @@ fn activate_app(app: &AppHandle) {
             let _: () = msg_send![ns_app, activateIgnoringOtherApps: Bool::YES];
         });
     }
-    let _ = app;
+    let _ = (app, label);
 }
 
 // ---------- overlays ----------
+
+/// Messages that make the sidekick appear or start something new (not the stream of an answer under way).
+fn starts_interaction(msg: &Value) -> bool {
+    let kind = msg.get("kind").and_then(Value::as_str);
+    let ty = |k: &str| msg.get(k).and_then(Value::as_str);
+    match kind {
+        Some("summon" | "say" | "ask" | "list") => true,
+        Some("voice") => ty("type") == Some("state") && ty("state") == Some("listening"),
+        Some("agent") => msg.pointer("/e/type").and_then(Value::as_str) == Some("start"),
+        _ => false,
+    }
+}
+
+/// The first thing of an answer that appears on screen: the listening pill by the cursor makes way for it.
+/// (The turn's start isn't one: the pill's dots are what shows while it thinks.)
+fn shows_answer(msg: &Value) -> bool {
+    match msg.get("kind").and_then(Value::as_str) {
+        Some("summon" | "say" | "ask" | "list") => true,
+        Some("agent") => match msg.pointer("/e/type").and_then(Value::as_str) {
+            Some("tool") => msg.pointer("/e/anim").is_some_and(|a| !a.is_null()),
+            Some("text" | "emote" | "point" | "act_start" | "trail" | "done" | "error") => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// The cursor in global points (macOS) or physical pixels (Windows): the units monitor_from_point takes.
+fn cursor_global(app: &AppHandle) -> Option<(f64, f64)> {
+    let cur = app.cursor_position().ok()?;
+    let s = app.primary_monitor().ok().flatten().map_or(1.0, |m| m.scale_factor());
+    Some(cursor_from_raw(cur.x, cur.y, s))
+}
+
+/// macOS reports the cursor in points times the main screen's scale; Windows in physical pixels as is.
+fn cursor_from_raw(x: f64, y: f64, primary_scale: f64) -> (f64, f64) {
+    if cfg!(target_os = "macos") {
+        (x / primary_scale, y / primary_scale)
+    } else {
+        let _ = primary_scale;
+        (x, y)
+    }
+}
+
+/// A teach-mode step's control bounds [x, y, w, h], in global screen points.
+fn point_target(msg: &Value) -> Option<[f64; 4]> {
+    if msg.get("kind").and_then(Value::as_str) != Some("agent") || msg.pointer("/e/type").and_then(Value::as_str) != Some("point") {
+        return None;
+    }
+    let r = msg.pointer("/e/rect")?.as_array()?;
+    let v: Vec<f64> = r.iter().filter_map(Value::as_f64).collect();
+    (v.len() == 4).then(|| [v[0], v[1], v[2], v[3]])
+}
+
+/// Move the sidekick's overlay to the screen the cursor is on, so it pops up where you're working.
+fn follow_cursor(app: &AppHandle) {
+    if let Some((x, y)) = cursor_global(app) {
+        move_sidekick_to(app, x, y);
+    }
+}
+
+/// Move the sidekick's overlay to the screen containing (x, y) (cursor_global's units), if it isn't there.
+fn move_sidekick_to(app: &AppHandle, x: f64, y: f64) {
+    let Some(label) = SIDEKICK_OVERLAY.lock().unwrap().clone() else { return };
+    let Some(w) = app.get_webview_window(&label) else { return };
+    let Ok(Some(mon)) = app.monitor_from_point(x, y) else { return };
+    if let Ok(Some(now)) = w.current_monitor() {
+        if now.position() == mon.position() && now.size() == mon.size() {
+            return;
+        }
+    }
+    // Logical on macOS (one points space across screens); physical on Windows, where a logical size
+    // would be converted with the old screen's scale.
+    #[cfg(target_os = "macos")]
+    {
+        let s = mon.scale_factor();
+        let _ = w.set_position(mon.position().to_logical::<f64>(s));
+        let _ = w.set_size(mon.size().to_logical::<f64>(s));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = w.set_position(*mon.position());
+        let _ = w.set_size(*mon.size());
+    }
+    let _ = w.eval(safe_js(&mon));
+    let _ = w.eval("window.__roamieMoved&&__roamieMoved()");
+}
 
 fn build_overlays(app: &AppHandle) -> tauri::Result<()> {
     for (label, w) in app.webview_windows() {
@@ -394,7 +799,11 @@ fn build_overlays(app: &AppHandle) -> tauri::Result<()> {
         let pos = mon.position().to_logical::<f64>(scale);
         let size = mon.size().to_logical::<f64>(scale);
         let init = format!("window.ROAMIE_ONLY=[{}];window.ROAMIE_AUTOSOUND=true;window.ROAMIE_UNIT=400;", mine.join(","));
-        let w = WebviewWindowBuilder::new(app, format!("overlay-{gen}-{i}"), WebviewUrl::App("desktop.html".into()))
+        let label = format!("overlay-{gen}-{i}");
+        if mine.iter().any(|id| id == "\"sidekick\"") {
+            *SIDEKICK_OVERLAY.lock().unwrap() = Some(label.clone());
+        }
+        let w = WebviewWindowBuilder::new(app, label, WebviewUrl::App("desktop.html".into()))
             .title("Roamies")
             .transparent(true)
             .decorations(false)
@@ -410,8 +819,46 @@ fn build_overlays(app: &AppHandle) -> tauri::Result<()> {
             .initialization_script(init)
             .build()?;
         w.set_ignore_cursor_events(true)?;
+        #[cfg(target_os = "macos")]
+        full_frame_rate(&w);
     }
     Ok(())
+}
+
+/// WebKit caps page animation frames near 60 fps; on a 120 Hz screen that makes following the cursor
+/// visibly coarser than a native overlay, so the overlays lift the cap (a WebKit feature flag; a no-op
+/// if this WebKit doesn't have it).
+#[cfg(target_os = "macos")]
+fn full_frame_rate(w: &WebviewWindow) {
+    let _ = w.with_webview(|wv| unsafe {
+        use objc2::runtime::{AnyClass, AnyObject, Bool};
+        use objc2::{msg_send, sel};
+        let Some(cls) = AnyClass::get(c"WKPreferences") else { return };
+        let ok: Bool = msg_send![cls, respondsToSelector: sel!(_features)];
+        if !ok.as_bool() {
+            return;
+        }
+        let web = wv.inner() as *mut AnyObject;
+        let cfg: *mut AnyObject = msg_send![web, configuration];
+        let prefs: *mut AnyObject = msg_send![cfg, preferences];
+        let can: Bool = msg_send![prefs, respondsToSelector: sel!(_setEnabled:forFeature:)];
+        if prefs.is_null() || !can.as_bool() {
+            return;
+        }
+        let feats: *mut AnyObject = msg_send![cls, _features];
+        let n: usize = msg_send![feats, count];
+        for i in 0..n {
+            let f: *mut AnyObject = msg_send![feats, objectAtIndex: i];
+            let key: *mut AnyObject = msg_send![f, key];
+            if key.is_null() {
+                continue;
+            }
+            let c: *const std::ffi::c_char = msg_send![key, UTF8String];
+            if !c.is_null() && std::ffi::CStr::from_ptr(c).to_bytes() == b"PreferPageRenderingUpdatesNear60FPSEnabled" {
+                let _: () = msg_send![prefs, _setEnabled: Bool::NO, forFeature: f];
+            }
+        }
+    });
 }
 
 /// Edges of a monitor covered by the menu bar, Dock or taskbar, in CSS px, as a JS call.
@@ -428,27 +875,67 @@ fn safe_js(mon: &tauri::Monitor) -> String {
     format!("window.__roamieSafe&&__roamieSafe({{top:{top:.0},left:{left:.0},bottom:{bottom:.0},right:{right:.0},ox:{ox:.0},oy:{oy:.0}}})")
 }
 
-// ~60 Hz: hand each overlay the cursor in its own CSS pixels. Every ~2 s, refresh the safe area
-// (the Dock can move, auto-hide or resize).
+// ~120 Hz (so a fresh position is ready for every frame, even on 120 Hz screens): hand each overlay the
+// cursor in its own CSS pixels. Every ~2 s, refresh the safe area (the Dock can move, auto-hide or resize).
+// Each sample carries the time it was read (ms since launch), so the overlay can replay the cursor's path at an
+// even pace instead of whenever samples happen to arrive (which made the Sidekick stutter when following it).
 fn pump_cursor(app: AppHandle) {
     let mut n: u32 = 0;
+    let mut primary_scale = 1.0;
+    let start = std::time::Instant::now();
+    let mut next = start;
+    let mut sent: std::collections::HashMap<String, (f64, f64)> = std::collections::HashMap::new();
+    let mut last_raw = (f64::NAN, f64::NAN);
     thread::spawn(move || loop {
-        thread::sleep(Duration::from_millis(16));
+        // A steady 8 ms beat (sleep alone drifts and bunches samples up).
+        next += Duration::from_millis(8);
+        let now = std::time::Instant::now();
+        if next > now {
+            thread::sleep(next - now);
+        } else {
+            next = now;
+        }
         n = n.wrapping_add(1);
-        let Ok(cur) = app.cursor_position() else { continue };
+        // The voice helper draws the following sidekick itself: the page only needs the cursor for its own bookkeeping.
+        if BUDDY_ON.load(Ordering::Relaxed) && n % 4 != 1 {
+            continue;
+        }
+        // Each monitor query is a round trip to the main thread, so the main screen's scale is looked up rarely.
+        if n % 240 == 1 {
+            primary_scale = app.primary_monitor().ok().flatten().map_or(1.0, |m| m.scale_factor());
+        }
+        let Ok(raw) = app.cursor_position() else { continue };
+        // Cursor still: nothing new to send, so skip the per-window lookups (each is a main-thread round trip).
+        if (raw.x, raw.y) == last_raw && n % 240 != 1 {
+            continue;
+        }
+        last_raw = (raw.x, raw.y);
+        let cur = cursor_from_raw(raw.x, raw.y, primary_scale);
         for (label, w) in app.webview_windows() {
             if !is_overlay(&label) {
                 continue;
             }
-            if n % 120 == 1 {
+            if n % 240 == 1 {
                 if let Ok(Some(mon)) = w.current_monitor() {
                     let _ = w.eval(safe_js(&mon));
                 }
             }
             let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor()) else { continue };
-            let x = (cur.x - pos.x as f64) / scale;
-            let y = (cur.y - pos.y as f64) / scale;
-            let _ = w.eval(format!("window.__roamiePtr&&__roamiePtr({x:.1},{y:.1})"));
+            // In the overlay's CSS px. macOS: global points minus the window's origin in points (screens
+            // can have different scales). Windows: physical pixels, scaled by this window's screen.
+            #[cfg(target_os = "macos")]
+            let (x, y) = {
+                let o = pos.to_logical::<f64>(scale);
+                (cur.0 - o.x, cur.1 - o.y)
+            };
+            #[cfg(not(target_os = "macos"))]
+            let (x, y) = ((cur.0 - pos.x as f64) / scale, (cur.1 - pos.y as f64) / scale);
+            if sent.get(&label) == Some(&(x, y)) {
+                continue;
+            }
+            sent.insert(label.clone(), (x, y));
+            let t = start.elapsed().as_secs_f64() * 1000.0;
+            let _ = w.eval(format!("window.__roamiePtr&&__roamiePtr({x:.1},{y:.1},{t:.1})"));
         }
     });
 }
@@ -495,7 +982,7 @@ fn fallback_menu(app: &AppHandle, status: &str) {
     set_menu(app, &[
         json!({ "id": "status", "label": status, "enabled": false }),
         json!({ "sep": true }),
-        json!({ "id": "restart", "label": "Restart Sidekick" }),
+        json!({ "id": "restart", "label": "Restart Roamies" }),
         json!({ "id": "quit", "label": "Quit Roamies" }),
     ]);
 }
@@ -620,12 +1107,19 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
                 to_overlays(app, m);
             }
         }
+        Some("panel") => {
+            if let Some(m) = msg.get("msg") {
+                to_panel(app, m);
+            }
+        }
+        Some("panel_show") => show_panel(app, None, false),
+        Some("quit") => app.exit(0),
         Some("onboard") => {
             if let Some(m) = msg.get("msg") {
                 to_onboarding(app, m);
             }
         }
-        Some("onboarding") => open_onboarding(app),
+        Some("onboarding") => open_onboarding(app, msg.get("mode").and_then(Value::as_str)),
         Some("keybinds") => {
             for (slot, which) in [(0usize, "summon"), (1, "snap"), (2, "list")] {
                 if which == "snap" && !cfg!(target_os = "macos") {
@@ -691,7 +1185,8 @@ fn main() {
         .manage(Voice(Mutex::new(None), AtomicUsize::new(0)))
         .manage(TalkChord(Mutex::new(vec!["control".into(), "option".into()])))
         .manage(VoiceModel(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![set_hot, sidecar_send, set_typing, perm_status, perm_request, open_settings, onboarding_finish, relaunch, focus_guide, drag_window])
+        .manage(PermGuide(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![buddy, set_hot, sidecar_send, set_typing, perm_status, perm_request, perm_guide, screen_check, open_settings, onboarding_finish, guide_close, panel_hide, esc_watch, relaunch, focus_guide, drag_window])
         .on_menu_event(|app, e| match e.id.as_ref() {
             "quit" => app.exit(0),
             "restart" => spawn_sidecar(app),
@@ -705,10 +1200,19 @@ fn main() {
                 app.set_menu(Menu::default(app.handle())?)?;
             }
 
-            let starting = MenuItem::with_id(app, "status", "Starting Sidekick…", false, None::<&str>)?;
+            let starting = MenuItem::with_id(app, "status", "Starting Roamies…", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Roamies", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&starting, &quit])?;
-            let mut tray = TrayIconBuilder::with_id("roamies").tooltip("Roamies").menu(&menu);
+            // Left click opens the panel; right click shows the short menu.
+            let mut tray = TrayIconBuilder::with_id("roamies")
+                .tooltip("Roamies")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, e| {
+                    if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, rect, .. } = e {
+                        show_panel(tray.app_handle(), Some(rect), true);
+                    }
+                });
             #[cfg(target_os = "macos")]
             {
                 tray = tray.icon(tray_image()).icon_as_template(true);

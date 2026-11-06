@@ -10,11 +10,14 @@
 //   roamies-hands act <json>                   {"app":"Brave","steps":[{"do":"focus","id":3},{"do":"type","text":"hi"}]}
 //   roamies-hands trusted [--prompt]           Accessibility permission status
 //   roamies-hands locate-control <target> <id>  where one control (from `ui`) is on screen, for pointing
+//   roamies-hands screencheck                  takes (and deletes) one test screenshot: {"seen": true|false}
+//   roamies-hands guide accessibility|screen [<Roamies.app>] [--preview]  drag-me-in panel under System Settings (until stdin closes)
 import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
 import ImageIO
+import Security
 import UniformTypeIdentifiers
 
 setvbuf(stdout, nil, _IOLBF, 0)
@@ -922,6 +925,245 @@ func handsOff(_ pid: pid_t) -> String? {
     return HANDS_OFF[id]
 }
 
+// ---------- permission guide ----------
+// A small panel that sits under System Settings while a Privacy pane is open, holding Roamies' icon
+// so it can be dragged straight into the list (macOS sometimes leaves the app out). Lives until
+// stdin closes (Roamies quit or stopped it), Settings closes, or Accessibility is granted.
+
+enum Pal {
+    static func c(_ hex: Int) -> NSColor {
+        NSColor(srgbRed: CGFloat(hex >> 16 & 255) / 255, green: CGFloat(hex >> 8 & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
+    }
+    static let bg = c(0x051214), panel = c(0x071a1c), ink = c(0xe8fffa), ink2 = c(0xb4d8d1)
+    static let line = c(0x1d4a48), lineHi = c(0x2f7c74), lineHot = c(0x4fbfa9), accent = c(0x78ffe2)
+}
+
+/// The onboarding's pixel frame: corners cut in two steps of `s` points (same polygon as .px in onboarding.css).
+func pixelPath(_ r: NSRect, _ s: CGFloat = 2) -> NSBezierPath {
+    let (x0, y0, x1, y1) = (r.minX, r.minY, r.maxX, r.maxY)
+    let pts: [(CGFloat, CGFloat)] = [
+        (x0 + 2 * s, y0), (x1 - 2 * s, y0), (x1 - 2 * s, y0 + s), (x1 - s, y0 + s), (x1 - s, y0 + 2 * s), (x1, y0 + 2 * s),
+        (x1, y1 - 2 * s), (x1 - s, y1 - 2 * s), (x1 - s, y1 - s), (x1 - 2 * s, y1 - s), (x1 - 2 * s, y1), (x0 + 2 * s, y1),
+        (x0 + 2 * s, y1 - s), (x0 + s, y1 - s), (x0 + s, y1 - 2 * s), (x0, y1 - 2 * s), (x0, y0 + 2 * s), (x0 + s, y0 + 2 * s),
+        (x0 + s, y0 + s), (x0 + 2 * s, y0 + s),
+    ]
+    let p = NSBezierPath()
+    p.move(to: NSPoint(x: pts[0].0, y: pts[0].1))
+    for q in pts.dropFirst() { p.line(to: NSPoint(x: q.0, y: q.1)) }
+    p.close()
+    return p
+}
+
+func drawFrame(_ r: NSRect, frame: NSColor, fill: NSColor, width: CGFloat = 2) {
+    frame.setFill(); pixelPath(r).fill()
+    fill.setFill(); pixelPath(r.insetBy(dx: width, dy: width)).fill()
+}
+
+func guideEvent(_ o: [String: Any]) {
+    if let d = try? JSONSerialization.data(withJSONObject: o), let t = String(data: d, encoding: .utf8) { print(t) }
+}
+
+final class GuideBack: NSView {
+    override var isFlipped: Bool { true }
+    override func draw(_ dirtyRect: NSRect) { drawFrame(bounds, frame: Pal.lineHi, fill: Pal.panel) }
+}
+
+/// Roamies' icon and name. Dragging it hands System Settings the app bundle, like dragging it from Finder.
+final class DragPill: NSView, NSDraggingSource {
+    let url: URL
+    let icon: NSImage
+    var hot = false { didSet { needsDisplay = true } }
+    var dragging = false { didSet { needsDisplay = true } }
+    init(frame: NSRect, url: URL) {
+        self.url = url
+        icon = NSWorkspace.shared.icon(forFile: url.path)
+        super.init(frame: frame)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.button)
+        setAccessibilityLabel("Roamies app. Drag into the list above.")
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+    required init?(coder: NSCoder) { nil }
+    override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: dragging ? .closedHand : .openHand) }
+    override func mouseEntered(with event: NSEvent) { hot = true }
+    override func mouseExited(with event: NSEvent) { hot = false }
+    override func draw(_ dirtyRect: NSRect) {
+        drawFrame(bounds, frame: hot || dragging ? Pal.accent : Pal.lineHot, fill: Pal.bg)
+        let side = bounds.height - 16
+        icon.draw(in: NSRect(x: 10, y: 8, width: side, height: side), from: .zero, operation: .sourceOver, fraction: dragging ? 0.35 : 1, respectFlipped: true, hints: nil)
+        let label = NSAttributedString(string: "Roamies", attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold), .foregroundColor: Pal.ink])
+        let sz = label.size()
+        label.draw(at: NSPoint(x: 10 + side + 8, y: (bounds.height - sz.height) / 2))
+    }
+    override func mouseDown(with event: NSEvent) {
+        let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+        let img = NSImage(size: NSSize(width: 64, height: 64))
+        img.lockFocus(); icon.draw(in: NSRect(x: 0, y: 0, width: 64, height: 64)); img.unlockFocus()
+        let p = convert(event.locationInWindow, from: nil)
+        item.setDraggingFrame(NSRect(x: p.x - 32, y: p.y - 32, width: 64, height: 64), contents: img)
+        dragging = true
+        window?.invalidateCursorRects(for: self)
+        guideEvent(["event": "drag_started"])
+        beginDraggingSession(with: [item], event: event, source: self)
+    }
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .outsideApplication ? [.copy, .link, .generic] : []
+    }
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        dragging = false
+        window?.invalidateCursorRects(for: self)
+        guideEvent(["event": "drag_ended", "dropped": !operation.isEmpty])
+    }
+}
+
+final class Guide: NSObject {
+    static let settingsID = "com.apple.systempreferences"
+    let kind: String
+    let preview: Bool
+    let panel: NSPanel
+    let title = NSTextField(labelWithString: ""), body = NSTextField(wrappingLabelWithString: "")
+    var pill: DragPill?
+    var seen = false, missing = 0, done = false
+    var dragging: Bool { pill?.dragging ?? false }
+
+    init(kind: String, app: URL?, preview: Bool) {
+        self.kind = kind
+        self.preview = preview
+        let hasPill = app != nil
+        let size = NSSize(width: hasPill ? 452 : 320, height: 80)
+        panel = NSPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        super.init()
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.level = .floating
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.alphaValue = 0
+        let back = GuideBack(frame: NSRect(origin: .zero, size: size))
+        panel.contentView = back
+        var textX: CGFloat = 16
+        if let app {
+            let p = DragPill(frame: NSRect(x: 12, y: 12, width: 132, height: 56), url: app)
+            back.addSubview(p)
+            pill = p
+            textX = 12 + 132 + 14
+        }
+        title.font = .monospacedSystemFont(ofSize: 12, weight: .semibold)
+        title.textColor = Pal.ink
+        body.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        body.textColor = Pal.ink2
+        body.maximumNumberOfLines = 2
+        let w = size.width - textX - 14
+        title.frame = NSRect(x: textX, y: 14, width: w, height: 18)
+        body.frame = NSRect(x: textX, y: 34, width: w, height: 34)
+        for t in [title, body] { t.lineBreakMode = .byWordWrapping; back.addSubview(t) }
+        // The guide opens Settings directly (no macOS dialog), so Roamies usually isn't in the list yet.
+        title.stringValue = hasPill ? "Drag me into the list above." : "Add me to the list above."
+        body.stringValue = kind == "screen"
+            ? "Use Screen & System Audio Recording, not the audio-only list."
+            : hasPill ? "Already there? Just switch me on." : "Press + under the list and pick Roamies."
+        panel.setAccessibilityLabel("Roamies permission guide")
+    }
+
+    /// The biggest System Settings window, in AppKit coordinates (origin bottom-left of the main screen).
+    func settingsFrame() -> NSRect? {
+        let pids = Set(NSRunningApplication.runningApplications(withBundleIdentifier: Guide.settingsID).map { $0.processIdentifier })
+        guard !pids.isEmpty, let main = NSScreen.screens.first else { return nil }
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let rects: [NSRect] = list.compactMap { w in
+            guard (w[kCGWindowLayer as String] as? Int) == 0, let pid = w[kCGWindowOwnerPID as String] as? Int32, pids.contains(pid),
+                  let b = w[kCGWindowBounds as String] as? [String: Double], (b["Width"] ?? 0) > 300, (b["Height"] ?? 0) > 200 else { return nil }
+            let (x, y, ww, hh) = (b["X"] ?? 0, b["Y"] ?? 0, b["Width"] ?? 0, b["Height"] ?? 0)
+            return NSRect(x: x, y: main.frame.maxY - y - hh, width: ww, height: hh)
+        }
+        return rects.max { $0.width * $0.height < $1.width * $1.height }
+    }
+
+    /// Under the window, centred on its content side (right of the sidebar); inside its bottom edge if there's no room below.
+    func place(_ win: NSRect) {
+        let size = panel.frame.size
+        let screen = NSScreen.screens.first { $0.frame.intersects(win) }?.visibleFrame ?? win
+        let sidebar: CGFloat = win.width > 640 ? 220 : 0
+        var x = win.minX + sidebar + (win.width - sidebar - size.width) / 2
+        var y = win.minY - size.height - 10
+        if y < screen.minY { y = win.minY + 14 }
+        x = min(max(x, screen.minX + 8), screen.maxX - size.width - 8)
+        y = min(max(y, screen.minY + 8), screen.maxY - size.height - 8)
+        let to = NSRect(origin: NSPoint(x: x.rounded(), y: y.rounded()), size: size)
+        if to != panel.frame { panel.setFrame(to, display: true) }
+    }
+
+    func show(_ on: Bool) {
+        let target: CGFloat = on ? 1 : 0
+        if panel.alphaValue == target { return }
+        if on { panel.orderFrontRegardless() }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            panel.animator().alphaValue = target
+        }
+    }
+
+    func tick() {
+        if done { return }
+        if kind == "accessibility" && !preview && AXIsProcessTrusted() {
+            done = true
+            title.stringValue = "All set!"
+            body.stringValue = "You can close System Settings."
+            pill?.isHidden = true
+            guideEvent(["event": "granted"])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { self.show(false) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { exit(0) }
+            return
+        }
+        guard let win = settingsFrame() else {
+            missing += 1
+            // Settings closed after it was up (or never opened within a minute): nothing left to guide.
+            if !dragging && ((seen && missing > 8) || missing > 240) { guideEvent(["event": "closed"]); exit(0) }
+            if !dragging { show(false) }
+            return
+        }
+        missing = 0
+        if !seen { seen = true; guideEvent(["event": "attached"]) }
+        place(win)
+        let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        show(dragging || front == Guide.settingsID || front == nil)
+    }
+}
+
+func runGuide(_ rest: [String]) -> Never {
+    // --preview: stay up even when already allowed, to look at the panel.
+    let preview = rest.contains("--preview")
+    let pos = rest.filter { $0 != "--preview" }
+    let kind = pos.first ?? "accessibility"
+    let app = pos.count > 1 && pos[1].hasSuffix(".app") ? URL(fileURLWithPath: pos[1]) : nil
+    let nsApp = NSApplication.shared
+    nsApp.setActivationPolicy(.accessory)
+    let guide = Guide(kind: kind, app: app, preview: preview)
+    // Roamies holds our stdin open; when it closes (stopped, or Roamies quit), go.
+    Thread { while FileHandle.standardInput.availableData.count > 0 {}; exit(0) }.start()
+    Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in guide.tick() }
+    guide.tick()
+    nsApp.run()
+    exit(0)
+}
+
+// ---------- secrets ----------
+// The user's own API keys (Fish Audio) live in their login keychain: encrypted at rest, locked with their Mac
+// login, and readable without a prompt only by this signed helper. A secret comes in on stdin and goes out on
+// stdout, never in arguments (other processes can read those).
+let secretService = "com.kenkai.roamies"
+func secretName(_ i: Int) -> String {
+    guard args.count > i, args[i].range(of: "^[a-z0-9-]{1,40}$", options: .regularExpression) != nil else { fail("bad secret name") }
+    return args[i]
+}
+func secretQuery(_ name: String) -> [String: Any] {
+    [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: secretService, kSecAttrAccount as String: name]
+}
+
 // ---------- commands ----------
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -935,6 +1177,39 @@ case "trusted":
 case "windows":
     let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
     out(["ok": true, "windows": windows().prefix(30).map { var i = winInfo($0); if $0.pid == front { i["frontApp"] = true }; return i }])
+
+// Where the user is right now, for each message's live state: the app in front (never Roamies), its focused
+// window's title, and for a browser the page's address. Accessibility for the title and address; the window list
+// (title only with Screen Recording) as a fallback. Fast, read-only, never focuses anything.
+case "front":
+    var o: [String: Any] = ["ok": true]
+    let wins = windows()
+    let frontPid = NSWorkspace.shared.frontmostApplication.flatMap { isRoamies($0.processIdentifier) ? nil : $0.processIdentifier }
+    guard let pid = frontPid ?? wins.first?.pid, let app = NSRunningApplication(processIdentifier: pid) else { out(o) }
+    o["app"] = app.localizedName ?? "?"
+    if let b = app.bundleIdentifier { o["bundle"] = b }
+    let ax = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(ax, 0.25)
+    var title = wins.first { $0.pid == pid }?.title ?? ""
+    if let w = attr(ax, kAXFocusedWindowAttribute) {
+        let win = w as! AXUIElement
+        if let t = str(win, kAXTitleAttribute) { title = t }
+        // Browsers put the address on the window (Safari) or on the web area inside it (Chromium browsers).
+        if BROWSERS.contains(app.localizedName ?? "") {
+            var url = str(win, "AXURL") ?? (attr(win, "AXURL") as? URL)?.absoluteString
+            if url == nil {
+                var queue: [AXUIElement] = [win], seen = 0
+                while url == nil, !queue.isEmpty, seen < 400 {
+                    let el = queue.removeFirst(); seen += 1
+                    if str(el, kAXRoleAttribute) == "AXWebArea" { url = (attr(el, "AXURL") as? URL)?.absoluteString ?? str(el, "AXURL"); if url != nil { break } }
+                    if let kids = attr(el, kAXChildrenAttribute) as? [AXUIElement] { queue.append(contentsOf: kids.prefix(40)) }
+                }
+            }
+            if let u = url { o["url"] = u }
+        }
+    }
+    if !title.isEmpty { o["title"] = title }
+    out(o)
 
 case "locate":
     guard args.count >= 2 else { fail("usage: locate <target>") }
@@ -969,11 +1244,13 @@ case "capture":
         return CGImageDestinationFinalize(dst) ? [img.width, img.height] : nil
     }
     if target == "screen" {
-        guard run("/usr/sbin/screencapture", ["-x", "-t", "jpg", file]) == 0 else { fail("Screen capture failed. Roamies may need Screen Recording permission.") }
-        // screencapture with one file shoots the main display; its bounds (points) let the caller map pixels back.
+        // The main display without Roamies on it (shared/shot.swift); older macOS: screencapture, Roamies and all.
+        let px = Shot.capture(nil, to: file, png: false, maxPx: maxPx)
+        if px == nil { guard run("/usr/sbin/screencapture", ["-x", "-t", "jpg", file]) == 0 else { fail("Screen capture failed. Roamies may need Screen Recording permission.") } }
+        // Its bounds (points) let the caller map pixels back.
         let d = CGDisplayBounds(CGMainDisplayID())
         var o: [String: Any] = ["ok": true, "file": file, "what": "screen", "bounds": [Int(d.minX), Int(d.minY), Int(d.width), Int(d.height)]]
-        if let px = shrink() { o["pixels"] = px }
+        if let px = px ?? shrink() { o["pixels"] = px }
         makeThumb()
         out(o)
     }
@@ -1390,6 +1667,48 @@ case "act":
         out(["ok": true, "done": done, "window": winInfo(w2), "controls": now, "texts": pageText(app2, w2, cap: 2000)])
     }
     out(["ok": true, "done": done, "window": winInfo(w)])
+
+case "guide":
+    runGuide(Array(args.dropFirst()))
+
+case "secret-get":
+    var q = secretQuery(secretName(1))
+    q[kSecReturnData as String] = true
+    q[kSecMatchLimit as String] = kSecMatchLimitOne
+    var item: CFTypeRef?
+    let st = SecItemCopyMatching(q as CFDictionary, &item)
+    if st == errSecItemNotFound { out(["ok": true, "found": false]) }
+    guard st == errSecSuccess, let data = item as? Data, let value = String(data: data, encoding: .utf8) else { fail("keychain read failed (\(st))") }
+    out(["ok": true, "found": true, "value": value])
+
+case "secret-set":
+    let name = secretName(1)
+    let raw = FileHandle.standardInput.readDataToEndOfFile()
+    guard let text = String(data: raw, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty, text.utf8.count <= 4096 else { fail("no secret on stdin") }
+    let data = Data(text.utf8)
+    var st = SecItemUpdate(secretQuery(name) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+    if st == errSecItemNotFound {
+        var add = secretQuery(name)
+        add[kSecValueData as String] = data
+        add[kSecAttrLabel as String] = "Roamies (\(name))"
+        st = SecItemAdd(add as CFDictionary, nil)
+    }
+    guard st == errSecSuccess else { fail("keychain save failed (\(st))") }
+    out(["ok": true])
+
+case "secret-delete":
+    let st = SecItemDelete(secretQuery(secretName(1)) as CFDictionary)
+    guard st == errSecSuccess || st == errSecItemNotFound else { fail("keychain delete failed (\(st))") }
+    out(["ok": true])
+
+case "screencheck":
+    // Screen Recording can read as allowed and still not work (say, before a relaunch), so take one real screenshot.
+    guard CGPreflightScreenCaptureAccess() else { out(["ok": true, "seen": false]) }
+    let file = NSTemporaryDirectory() + "roamies-screencheck-\(me).jpg"
+    let code = run("/usr/sbin/screencapture", ["-x", "-t", "jpg", file])
+    let size = ((try? FileManager.default.attributesOfItem(atPath: file))?[.size] as? Int) ?? 0
+    try? FileManager.default.removeItem(atPath: file)
+    out(["ok": true, "seen": code == 0 && size > 0])
 
 default:
     fail("unknown command \(cmd)")

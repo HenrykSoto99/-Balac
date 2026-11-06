@@ -1,6 +1,6 @@
 // The safety rules: what runs on its own, what needs a yes, what never runs. Run: npm test
 import assert from 'node:assert/strict';
-import { ASK, BLOCK, SAFE, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isYes, splitCommand } from '../safety.mjs';
+import { ASK, BLOCK, SAFE, checkLink, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isYes, splitCommand } from '../safety.mjs';
 
 const HOME = '/Users/ken';
 const failures = [];
@@ -78,6 +78,17 @@ cases('open', (t) => checkOpen(t, HOME), [
 
 assert.equal(checkOpen('~/tools/runme', HOME, { executable: true }).level, BLOCK, 'executable files without an extension');
 assert.equal(checkOpen('~/Documents', HOME).level, SAFE, 'folders open');
+
+cases('link', checkLink, [
+  ['https://www.anthropic.com/news', SAFE],
+  ['http://example.com/a?b=1', SAFE],
+  ['mailto:hi@example.com', SAFE],
+  ['file:///etc/passwd', BLOCK],
+  ['javascript:alert(1)', BLOCK],
+  ['vscode://file/x', BLOCK],
+  ['https://user:pw@example.com', BLOCK],
+  ['not a url', BLOCK],
+]);
 
 cases('url', checkUrl, [
   ['https://example.com/page', SAFE], ['http://news.ycombinator.com', SAFE], ['https://192.0.2.10/x', SAFE],

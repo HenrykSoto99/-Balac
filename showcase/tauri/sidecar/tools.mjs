@@ -1,6 +1,6 @@
 // The agent's tools: screen capture, reading and working other apps (macOS "hands" helper), files, commands,
 // web pages and memory. Every file, command, URL and open goes through safety.mjs first.
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -28,25 +28,6 @@ const STALE_ID = 'The page changed since read_window, so that id is out of date.
 function pickTextMatch(matches, find) {
   const q = String(find).trim();
   return (matches ?? []).find((m) => m.match !== 'partial' && m.text.trim().length <= Math.max(40, q.length * 3)) ?? null;
-}
-// Like run(), but hands each "@{json}" line the helper writes to stderr to onLine as it arrives.
-function runLive(cmd, args, onLine) {
-  return new Promise((res) => {
-    const p = spawn(cmd, args, { windowsHide: true });
-    let stdout = '', stderr = '', buf = '';
-    const timer = setTimeout(() => p.kill(), 120_000);
-    p.stdout.on('data', (d) => { stdout += d; });
-    p.stderr.on('data', (d) => {
-      buf += d;
-      let i;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i); buf = buf.slice(i + 1);
-        if (line.startsWith('@')) { try { onLine(JSON.parse(line.slice(1))); } catch {} } else stderr += line + '\n';
-      }
-    });
-    p.on('error', (err) => { clearTimeout(timer); res({ err, stdout, stderr }); });
-    p.on('close', (code) => { clearTimeout(timer); res({ err: code ? new Error(`exit ${code}`) : null, stdout, stderr: stderr + buf }); });
-  });
 }
 // An app named in read_window or act_in_app that isn't open: open it (with the open tool's safety check) and wait
 // up to 6 s for its window. True when it's there. Only plain app names, never paths or links.
@@ -104,6 +85,17 @@ export function typedAddress(target, steps) {
   return before && ret && after ? String(steps[i].text).trim() : null;
 }
 
+// One line for the live state: which app, window and page is in front right now. Query strings and
+// fragments are dropped (they can hold tokens), and long titles are cut.
+export function frontLine(f, who = 'The user') {
+  if (!f?.app) return '';
+  const cut = (t, n) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+  let url = '';
+  try { if (f.url) { const u = new URL(f.url); url = /^https?:$/.test(u.protocol) ? cut(u.host + u.pathname.replace(/\/$/, ''), 120) : ''; } } catch { /* not a URL */ }
+  const title = f.title ? ` — "${cut(String(f.title).replace(/\s+/g, ' ').trim(), 120)}"` : '';
+  return `- Right now ${who} is in ${f.app}${title}${url ? ` (${url})` : ''}. This was just checked and overrides any app or page from earlier messages; they can still ask about something elsewhere.`;
+}
+
 export function createTools({ allowActions, ui, ask, openUrl, onCommitments, showList, fmtWhen, commitmentsText, userName, onPlan = () => {} }) {
   let axNudged = 0;
   const pointWaits = new Map(); // point_at call id → resolve, settled when the overlay has shown the step
@@ -132,11 +124,9 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       return c;
     };
   }
-  // onProgress: the helper's live "@{...}" lines on stderr while it acts (steps, borrowing the cursor), as objects.
   async function hands(...args) {
     if (!HANDS) throw new Error('This needs the Roamies app on macOS.');
-    const onProgress = typeof args.at(-1) === 'function' ? args.pop() : null;
-    const r = onProgress ? await runLive(HANDS, args, onProgress) : await run(HANDS, args, { timeout: 120_000 });
+    const r = await run(HANDS, args, { timeout: 120_000 });
     let res;
     try { res = JSON.parse(r.stdout.trim().split('\n').pop() || '{}'); } catch { throw new Error(`hands helper failed: ${r.stderr.trim().slice(0, 200) || 'no output'}`); }
     if (res.ok === false && !res.cancelled) {
@@ -162,26 +152,10 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     if (process.platform === 'darwin') {
       const t = String(target || 'screen').trim();
       const spec = t === 'screen' || t === 'front' || t.startsWith('window:') ? t : `app:${t}`;
-      // Find the window first so the camera animation can frame the real thing (screen points), then shoot while it
-      // flies there (the shot is of that window alone, so the animation isn't in it); the result waits for the animation.
-      let shown = Promise.resolve();
-      if (spec !== 'screen' && ctx?.toolCallId) {
-        const at = await hands('locate', spec).catch(() => null);
-        if (at?.window) {
-          ui({ kind: 'agent', e: { type: 'tool_target', id: ctx.toolCallId, window: at.window } });
-          shown = new Promise((r) => setTimeout(r, 250));
-        }
-      }
+      // Shot straight away, with nothing played on screen (the Sidekick only shows a "looking" tag).
       // 1568 px is Claude's own cap; a bigger image gets shrunk again and its coordinates drift. The helper shrinks it
       // itself and says the final size; an older helper doesn't, so sips does it here.
-      const thumb = ctx?.toolCallId ? `${file.slice(0, -4)}-peek.jpg` : null;
-      const [res] = await Promise.all([hands('capture', file, spec, '1568', ...(thumb ? [thumb, '900'] : [])), shown]);
-      // The Sidekick shows what it actually took: in its frame and on the photo it carries back.
-      if (thumb && existsSync(thumb)) {
-        const b64 = (await fs.readFile(thumb)).toString('base64');
-        ui({ kind: 'agent', e: { type: 'tool_image', id: ctx.toolCallId, src: `data:image/jpeg;base64,${b64}` } });
-        fs.unlink(thumb).catch(() => {});
-      }
+      const res = await hands('capture', file, spec, '1568');
       const size = Array.isArray(res.pixels) && res.pixels.length === 2 ? res.pixels : await fitImage(file);
       const bounds = res.window?.bounds ?? res.bounds;
       lastShot = size && bounds ? { ...shotMap(bounds, ...size), bounds, win: res.window?.id ?? null, turn } : null;
@@ -350,30 +324,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
             delete s.label;
           }
           const plan = { steps: mapped, ...(t === 'front' ? {} : t.startsWith('window:') ? { window: +t.slice(7) } : { app: t }) };
-          // Show it working: steps (where it clicks, what it types) and borrowing the cursor go to the Sidekick live;
-          // a small picture of the window follows each step, so a window behind others can still be watched.
-          const id = ctx?.toolCallId;
-          let peekWin = null, peekBusy = false, peekAgain = false, peekN = 0;
-          const peek = async () => {
-            if (!id || !peekWin) return;
-            if (peekBusy) { peekAgain = true; return; }
-            peekBusy = true;
-            try {
-              const f = path.join(os.tmpdir(), `sidekick-peek-${process.pid}-${++peekN}.jpg`);
-              const r = await hands('capture', f, `window:${peekWin}`, '640').catch(() => null);
-              if (r?.ok !== false && existsSync(f)) {
-                ui({ kind: 'agent', e: { type: 'act_peek', id, src: `data:image/jpeg;base64,${(await fs.readFile(f)).toString('base64')}`, window: r?.window } });
-                fs.unlink(f).catch(() => {});
-              }
-            } finally { peekBusy = false; if (peekAgain) { peekAgain = false; peek(); } }
-          };
-          const onProgress = (ev) => {
-            if (!id) return;
-            if (ev.ev === 'start') { peekWin = ev.window?.id ?? null; ui({ kind: 'agent', e: { type: 'act_start', id, window: ev.window, steps: ev.steps } }); peek(); }
-            else if (ev.ev === 'step') { ui({ kind: 'agent', e: { type: 'act_step', id, ...ev } }); setTimeout(peek, 350); }
-            else if (ev.ev === 'borrow' || ev.ev === 'return') ui({ kind: 'agent', e: { type: `act_${ev.ev}`, id } });
-          };
-          const act = () => hands('act', JSON.stringify(plan), onProgress);
+          const act = () => hands('act', JSON.stringify(plan));
           let res;
           try {
             try { res = await act(); }
@@ -388,7 +339,6 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
             }
           } finally {
             if (lastShot && mapped.some((s) => s.do !== 'wait')) lastShot.used = true;
-            if (id) { await peek(); ui({ kind: 'agent', e: { type: 'act_end', id } }); }
           }
           return finish(res);
           function finish(res) {
@@ -558,5 +508,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     },
   ];
 
-  return { tools, hands, pointWaits, nextTurn: () => ++turn };
+  // What's in front, for the live state. Quick and never fails: '' if the helper is missing, slow or denied.
+  async function whereNow() {
+    if (!HANDS) return '';
+    const r = await run(HANDS, ['front'], { timeout: 900 });
+    try { return frontLine(JSON.parse(r.stdout.trim().split('\n').pop() || '{}'), userName); } catch { return ''; }
+  }
+  return { tools, hands, whereNow, pointWaits, nextTurn: () => ++turn };
 }

@@ -337,5 +337,15 @@ export function checkUrl(url) {
   return verdict(SAFE);
 }
 
+/** A link the user clicked in a reply: opened in their browser, so web and mail links only (no file:, apps or scripts). */
+export function checkLink(url) {
+  let u;
+  try { u = new URL(String(url)); } catch { return verdict(BLOCK, "That isn't a valid link."); }
+  if (u.protocol === 'mailto:') return verdict(SAFE);
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return verdict(BLOCK, 'Only web and email links open from a reply.');
+  if (u.username || u.password) return verdict(BLOCK, 'Links with passwords in them are blocked.');
+  return verdict(SAFE);
+}
+
 /** A yes from the user, typed or spoken. */
 export const isYes = (text) => /^\s*(y|yes|yeah|yep|yup|ok|okay|sure|go|go ahead|do it|run it|allow|confirm)\b/i.test(String(text ?? ''));

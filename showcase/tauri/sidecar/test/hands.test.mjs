@@ -31,6 +31,7 @@ const r = await tool('act_in_app').execute({ target: 'TextEdit', steps: [{ do: '
 assert.match(r, /key, type/);
 const act = calls().find((c) => c[0] === 'act');
 assert.deepEqual(JSON.parse(act[1]).steps.map((s) => s.do), ['key', 'type']);
+assert.ok(!calls().some((c) => c[0] === 'capture'), 'no window pictures taken while it works in an app');
 await assert.rejects(tool('act_in_app').execute({ target: 'TextEdit', steps: [{ do: 'read_window' }] }, ctx), /only read the window/);
 
 // Screenshots ask the helper to shrink to 1568 px and use the size it reports.
@@ -38,6 +39,9 @@ fs.writeFileSync(log, '');
 const shot = await tool('take_screenshot').execute({ target: 'TextEdit' }, ctx);
 assert.match(shot.content[0].text, /800×600 px/);
 assert.ok(calls().some((c) => c[0] === 'capture' && c[3] === '1568'));
+// Shot at once with nothing shown on screen: no window lookup first, no preview copy for an animation.
+assert.ok(!calls().some((c) => c[0] === 'locate'), 'no locate round trip before the shot');
+assert.equal(calls().find((c) => c[0] === 'capture').length, 4, 'no preview thumbnail requested');
 
 // An app that isn't installed: one clear answer instead of "No matching window".
 await assert.rejects(tool('act_in_app').execute({ target: 'NoSuchAppRoamiesTest', steps: [{ do: 'key', key: 'return' }] }, ctx), /no app called "NoSuchAppRoamiesTest"/);
@@ -49,3 +53,16 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
 
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('hands tests: passed');
+
+// Live "where am I" line: app, window title and page, without query strings; '' when nothing is known.
+{
+  const { frontLine } = await import('../tools.mjs');
+  const l = frontLine({ app: 'Google Chrome', title: 'Inbox (3) - me@example.com - Gmail', url: 'https://mail.google.com/mail/u/0/?tab=rm&token=SECRET#inbox' }, 'Ken');
+  assert.match(l, /Right now Ken is in Google Chrome — "Inbox \(3\) - me@example.com - Gmail" \(mail\.google\.com\/mail\/u\/0\)/);
+  assert.match(l, /overrides any app or page from earlier/);
+  assert.ok(!/SECRET|tab=/.test(l), 'query string dropped');
+  assert.equal(frontLine({ app: 'Notes', url: 'file:///Users/x/secret.txt' }), '- Right now The user is in Notes. This was just checked and overrides any app or page from earlier messages; they can still ask about something elsewhere.');
+  assert.equal(frontLine({}), '');
+  assert.equal(frontLine(null), '');
+  console.log('front line tests: passed');
+}

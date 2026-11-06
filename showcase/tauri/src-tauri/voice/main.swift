@@ -4,7 +4,7 @@
 // (quick tap) on a pause or the next press-and-release. Hold ⌃⌥ = push-to-talk (release sends). Quick tap = hands-free
 // (ends on a pause or another tap). JSON lines on stdout; exits when stdin closes.
 // Modifier state is read with CGEventSource, which needs no Input Monitoring permission.
-// While ⌃⌥ is held the mouse draws on the screen (ink.swift); the marked area goes out with what was said.
+// While ⌃⌥ is held, moving the cursor draws on the screen (ink.swift); the marked area goes out with what was said.
 // While listening, a small voice-bar pill rides beside the cursor (wave.swift) instead of a transcript bubble.
 import AVFoundation
 import AppKit
@@ -206,6 +206,13 @@ enum OutputMute {
         guard enabled, device == nil, let dev = defaultOutput(), muted(dev) == false else { return }
         if set(dev, true) { device = dev; log("output muted while listening") }
     }
+    /// Unmute for a moment (a cue that must be heard while listening), then mute again if still listening.
+    static func lift(for seconds: Double) {
+        guard let dev = device, set(dev, false) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            if device == dev, muted(dev) == false { _ = set(dev, true) }
+        }
+    }
     static func end() {
         guard let dev = device else { return }
         device = nil
@@ -311,7 +318,7 @@ final class Voice {
 
     func tick() {
         // Drawing follows the keys: only while ⌃⌥ is down for a talk.
-        defer { ink.setArmed(phase == .armed || phase == .holding); wave.tick(); buddy.tick() }
+        defer { ink.setArmed(phase == .armed || phase == .holding); ink.follow(); wave.tick(); buddy.tick() }
         let now = uptime()
         let f = CGEventSource.flagsState(.combinedSessionState).intersection(Self.allMods)
         let held = f.intersection(chordMask)
@@ -425,11 +432,21 @@ final class Voice {
             // Listened but got no words: say so instead of closing silently.
             if empty { emit(["type": "error", "code": "nothing_heard", "spoke": spoke]) }
         }
-        if text.isEmpty { ink.clear(); rest(); return }
+        if text.isEmpty {
+            // Circled something but said nothing: drop it quietly and just go (no "I didn't hear you").
+            ink.take { area in
+                guard let file = area?["file"] as? String else { return rest() }
+                try? FileManager.default.removeItem(atPath: file)
+                log("nothing said, dropped the circled area")
+                emit(["type": "state", "state": "idle"])
+            }
+            return
+        }
         // What was marked on screen while talking rides along with the words.
         ink.take { area in
             var msg: [String: Any] = ["type": "final", "text": text]
             if let area { msg["area"] = area }
+            log("sent what was said\(area == nil ? "" : ", with the circled area")")
             emit(msg)
             rest()
         }
@@ -622,6 +639,31 @@ if args.contains("--test-gain") {
     check("boost applies to every channel and never clips", (0 ..< 2).allSatisfy { c in buf.floatChannelData![c][3] == 1 })
     exit(bad == 0 ? 0 : 1)
 }
+// --test-snap checks which drawn paths count as a circled area; exits 1 on a failure.
+if args.contains("--test-snap") {
+    var bad = 0
+    func check(_ name: String, _ ok: Bool) { print("\(ok ? "ok" : "FAIL") \(name)"); if !ok { bad += 1 } }
+    func arc(_ cx: CGFloat, _ cy: CGFloat, _ r: CGFloat, turns: CGFloat, steps: Int = 80) -> [CGPoint] {
+        (0 ... steps).map { k in let a = turns * 2 * .pi * CGFloat(k) / CGFloat(steps); return CGPoint(x: cx + r * cos(a), y: cy + r * sin(a)) }
+    }
+    let lead = (0 ..< 20).map { CGPoint(x: 100 + CGFloat($0) * 4, y: 300) }
+    check("a full circle snaps", Loop.closing(arc(300, 300, 60, turns: 1)) != nil)
+    check("a circle with a run-up and overshoot snaps from where the loop starts", Loop.closing(lead + arc(200, 300, 60, turns: 1.08)).map { $0 >= lead.count - 2 } == true)
+    check("three-quarters of a circle doesn't", Loop.closing(arc(300, 300, 60, turns: 0.75)) == nil)
+    check("three-quarters doesn't close even at the end", Loop.closing(arc(300, 300, 60, turns: 0.75), gap: Loop.closeGap * 1.8) == nil)
+    check("a nearly closed circle closes with the looser gap at the end", Loop.closing(arc(300, 300, 60, turns: 0.93), gap: Loop.closeGap * 1.8) != nil)
+    check("a straight line doesn't", Loop.closing((0 ..< 80).map { CGPoint(x: CGFloat($0) * 5, y: 200) }) == nil)
+    let there = (0 ..< 40).map { CGPoint(x: CGFloat($0) * 5, y: 200) }
+    check("a line drawn back over itself doesn't", Loop.closing(there + there.reversed().map { CGPoint(x: $0.x, y: $0.y + 3) }) == nil)
+    check("a zigzag doesn't", Loop.closing((0 ..< 60).map { CGPoint(x: CGFloat($0) * 6, y: 200 + ($0 % 2 == 0 ? 0 : 30)) }) == nil)
+    check("a tiny scribble doesn't", Loop.closing(arc(300, 300, 8, turns: 3)) == nil)
+    var box: [CGPoint] = stride(from: CGFloat(0), through: 120, by: 6).map { CGPoint(x: $0, y: 0) }
+    box += stride(from: CGFloat(0), through: 90, by: 6).map { CGPoint(x: 120, y: $0) }
+    box += stride(from: CGFloat(120), through: 0, by: -6).map { CGPoint(x: $0, y: 90) }
+    box += stride(from: CGFloat(90), through: 0, by: -6).map { CGPoint(x: 2, y: $0) }
+    check("a rough box snaps", Loop.closing(box) != nil)
+    exit(bad == 0 ? 0 : 1)
+}
 if args.contains("--perms") { emit(permStatus()); exit(0) }
 if let i = args.firstIndex(of: "--request"), i + 1 < args.count {
     let done = DispatchSemaphore(value: 0)
@@ -652,6 +694,7 @@ Thread.detachNewThread {
         case "buddy": DispatchQueue.main.async { if msg["on"] as? Bool == true { voice.buddy.show(msg) } else { voice.buddy.hide() } }
         case "buddy_alpha": if let a = msg["a"] as? Double { DispatchQueue.main.async { voice.buddy.setHidden(a < 0.5) } }
         case "chord": if let mods = msg["mods"] as? [String] { DispatchQueue.main.async { voice.setChord(mods) } }
+        case "sound": if let on = msg["on"] as? Bool { DispatchQueue.main.async { SnapCue.soundOn = on } }
         case "mute": if let on = msg["on"] as? Bool { DispatchQueue.main.async { OutputMute.enabled = on; if !on { OutputMute.end() } } }
         default: break
         }

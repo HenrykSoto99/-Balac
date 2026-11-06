@@ -1,7 +1,10 @@
-// Drawing on the screen while talking. While ⌃⌥ is held, a see-through panel over every screen takes the
-// mouse, so dragging draws teal pen strokes (tapered, faster = thinner, with a soft glow). When the talk
-// ends, the marked part of the screen is captured with the strokes on it and sent with what was said;
-// then the strokes fade. Without ⌃⌥ held the panels let every click through (and are off screen when empty).
+// Drawing on the screen while talking. While ⌃⌥ is held, moving the cursor draws teal pen strokes (tapered,
+// faster = thinner, with a soft glow) on a see-through panel over every screen: circle something, no clicking.
+// A stroke counts only once it closes round something: it snaps shut (a glow pulse, a soft click, a trackpad tick)
+// and stays. One circle per talk: after it snaps, the cursor stops drawing until the keys are let go. Lines and
+// scribbles that never close fade on their own and are never sent. When the talk ends, the part of the screen with
+// the circle is captured with it on it and sent with what was said; then it fades.
+// The panels never take a click (macOS may not deliver one while ⌃⌥ is down anyway), and are off screen when empty.
 import AppKit
 import QuartzCore
 
@@ -12,7 +15,7 @@ private let rim = CGColor(srgbRed: 0x03 / 255, green: 0x27 / 255, blue: 0x22 / 2
 final class InkStroke {
     var pts: [CGPoint] = []
     var radii: [CGFloat] = []
-    var done = false
+    var done = false, closed = false
     let group = CALayer(), edge = CAShapeLayer(), fill = CAShapeLayer()
 
     init() {
@@ -27,7 +30,9 @@ final class InkStroke {
         fill.shadowOffset = .zero
         group.addSublayer(edge)
         group.addSublayer(fill)
-        for l in [group, edge, fill] { l.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull()] }
+        // Dimmer until it snaps shut, so it's clear when a mark has counted.
+        group.opacity = 0.55
+        for l in [group, edge, fill] { l.actions = ["path": NSNull(), "position": NSNull(), "bounds": NSNull(), "opacity": NSNull()] }
     }
 
     static let base: CGFloat = 2.8
@@ -50,6 +55,15 @@ final class InkStroke {
         // Taper the tail, like a pen lifting off.
         let n = radii.count
         for k in 0 ..< min(6, n) { radii[n - 1 - k] *= 0.45 + 0.55 * CGFloat(k) / 6 }
+        redraw()
+    }
+
+    /// Close the stroke into the loop that starts at pts[i], dropping what came before it (the run-up).
+    func snap(from i: Int) {
+        pts = Array(pts[i...]); radii = Array(radii[i...])
+        pts.append(pts[0]); radii.append(radii[0])
+        closed = true; done = true
+        group.opacity = 1
         redraw()
     }
 
@@ -94,6 +108,70 @@ final class InkStroke {
     }
 }
 
+/// When a path closes round something: its newest point comes back near an earlier one, round a shape with room
+/// inside it. A line, a line drawn back over itself, a zigzag or a tiny scribble never closes.
+enum Loop {
+    static let closeGap: CGFloat = 22, minRun: CGFloat = 110, minSide: CGFloat = 26, minFill: CGFloat = 0.3
+
+    /// Where the loop the path has just closed starts (an index into p), or nil.
+    static func closing(_ p: [CGPoint], gap: CGFloat = closeGap) -> Int? {
+        guard p.count >= 8, let end = p.last else { return nil }
+        var run: CGFloat = 0
+        var i = p.count - 1
+        while i > 0 {
+            run += hypot(p[i].x - p[i - 1].x, p[i].y - p[i - 1].y)
+            i -= 1
+            if run >= minRun, hypot(p[i].x - end.x, p[i].y - end.y) <= gap, encloses(Array(p[i...])) { return i }
+        }
+        return nil
+    }
+
+    /// Big enough both ways, and its outline holds a fair share of its box (a closed zigzag or a sliver doesn't).
+    static func encloses(_ q: [CGPoint]) -> Bool {
+        guard q.count >= 3 else { return false }
+        let xs = q.map(\.x), ys = q.map(\.y)
+        let w = xs.max()! - xs.min()!, h = ys.max()! - ys.min()!
+        guard w >= minSide, h >= minSide else { return false }
+        var a: CGFloat = 0
+        for k in 0 ..< q.count { let u = q[k], v = q[(k + 1) % q.count]; a += u.x * v.y - v.x * u.y }
+        return abs(a) / 2 >= minFill * w * h
+    }
+}
+
+/// The snap: a short, soft two-note chime with a click on the front, made once (quiet triangle tones, like the
+/// app's own sound effects), plus a tick on a Force Touch trackpad.
+enum SnapCue {
+    static var soundOn = true
+    private static let sound: NSSound? = {
+        let rate = 44100.0, n = Int(rate * 0.16)
+        var pcm = [Int16](repeating: 0, count: n)
+        func tri(_ f: Double, _ t: Double) -> Double { let x = (t * f).truncatingRemainder(dividingBy: 1); return 4 * abs(x - 0.5) - 1 }
+        for i in 0 ..< n {
+            let t = Double(i) / rate
+            var v = 0.0
+            if t < 0.004 { v += Double.random(in: -1 ... 1) * 0.10 * (1 - t / 0.004) } // the click
+            if t < 0.05 { v += tri(1318.5, t) * 0.16 * min(1, t / 0.002) * exp(-t * 40) } // E6
+            if t >= 0.035 { let u = t - 0.035; v += tri(1568, u) * 0.14 * min(1, u / 0.003) * exp(-u * 28) } // G6
+            pcm[i] = Int16(max(-1, min(1, v)) * 32767)
+        }
+        var d = Data()
+        func le<T: FixedWidthInteger>(_ x: T) { withUnsafeBytes(of: x.littleEndian) { d.append(contentsOf: $0) } }
+        d.append(contentsOf: Array("RIFF".utf8)); le(UInt32(36 + n * 2)); d.append(contentsOf: Array("WAVEfmt ".utf8))
+        le(UInt32(16)); le(UInt16(1)); le(UInt16(1)); le(UInt32(rate)); le(UInt32(rate * 2)); le(UInt16(2)); le(UInt16(16))
+        d.append(contentsOf: Array("data".utf8)); le(UInt32(n * 2))
+        pcm.forEach { le($0) }
+        return NSSound(data: d)
+    }()
+
+    static func play() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        guard soundOn, let s = sound else { return }
+        // Output is muted while listening (a setting): lift it just for the chime.
+        OutputMute.lift(for: 0.2)
+        s.stop(); s.play()
+    }
+}
+
 final class InkView: NSView {
     var strokes: [InkStroke] = []
     var current: InkStroke?
@@ -105,35 +183,58 @@ final class InkView: NSView {
     }
     required init?(coder: NSCoder) { nil }
     override var isFlipped: Bool { true }
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    private func point(_ e: NSEvent) -> CGPoint { convert(e.locationInWindow, from: nil) }
-    override func mouseDown(with e: NSEvent) {
+    func begin(at p: CGPoint) {
+        end()
         let s = InkStroke()
         s.group.frame = bounds
         for l in [s.edge, s.fill] { l.frame = bounds }
         layer?.addSublayer(s.group)
         strokes.append(s)
         current = s
-        s.add(point(e))
+        s.add(p)
     }
-    override func mouseDragged(with e: NSEvent) { current?.add(point(e)) }
-    override func mouseUp(with e: NSEvent) { end() }
-    // ⌃ is held while talking, which can turn a click into a right click.
-    override func rightMouseDown(with e: NSEvent) { mouseDown(with: e) }
-    override func rightMouseDragged(with e: NSEvent) { mouseDragged(with: e) }
-    override func rightMouseUp(with e: NSEvent) { end() }
-    override func scrollWheel(with e: NSEvent) {}
-
-    func end() {
-        guard let s = current else { return }
+    /// Adds the point; true when that closed the stroke into a loop (it has snapped and ended).
+    @discardableResult
+    func move(to p: CGPoint) -> Bool {
+        guard let s = current else { return false }
+        s.add(p)
+        guard let i = Loop.closing(s.pts) else { return false }
         current = nil
-        s.finish()
-        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            let pulse = CABasicAnimation(keyPath: "shadowRadius")
-            pulse.fromValue = 6; pulse.toValue = 11; pulse.duration = 0.18; pulse.autoreverses = true
-            s.fill.add(pulse, forKey: "pulse")
+        s.snap(from: i)
+        pulse(s)
+        SnapCue.play()
+        return true
+    }
+
+    private func pulse(_ s: InkStroke) {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let a = CABasicAnimation(keyPath: "shadowRadius")
+        a.fromValue = 6; a.toValue = 16; a.duration = 0.16; a.autoreverses = true
+        a.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        s.fill.add(a, forKey: "snap")
+    }
+
+    /// The stroke ended (a pause, another screen, letting go): if it nearly closed, it snaps shut now; otherwise it
+    /// was a line or a scribble, so it fades and never counts.
+    /// Returns true when it snapped shut here.
+    @discardableResult
+    func end() -> Bool {
+        guard let s = current else { return false }
+        current = nil
+        if let i = Loop.closing(s.pts, gap: Loop.closeGap * 1.8) {
+            s.snap(from: i); pulse(s); SnapCue.play(); return true
         }
+        s.finish()
+        strokes.removeAll { $0 === s }
+        let a = CABasicAnimation(keyPath: "opacity")
+        a.fromValue = s.group.opacity; a.toValue = 0; a.duration = 0.35
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { s.group.removeFromSuperlayer() }
+        s.group.opacity = 0
+        s.group.add(a, forKey: "drop")
+        CATransaction.commit()
+        return false
     }
 }
 
@@ -160,6 +261,11 @@ final class InkPanel: NSPanel {
 final class Ink {
     private var panels: [InkPanel] = []
     private var armed = false
+    // Following the cursor while armed: where it was, when it last moved, and the panel the stroke is on.
+    private var last: CGPoint?, lastMoved = 0.0, onPanel: InkPanel?
+    // A circle has snapped this talk: nothing more draws until the keys are let go.
+    private var snapped = false
+    private static let startAfter: CGFloat = 6, pauseEnds = 0.35
     // The capture of the last talk: under way, or done and waiting to be taken.
     private var pending = false, abandoned = false
     private var result: [String: Any]?
@@ -171,14 +277,34 @@ final class Ink {
         armed = on
         if on {
             syncScreens()
-            for p in panels { p.ignoresMouseEvents = false; p.orderFrontRegardless() }
+            for p in panels { p.orderFrontRegardless() }
+            last = NSEvent.mouseLocation; lastMoved = ProcessInfo.processInfo.systemUptime; onPanel = nil; snapped = false
         } else {
             for p in panels {
                 p.view.end()
-                p.ignoresMouseEvents = true
                 if p.view.strokes.isEmpty { p.orderOut(nil) }
             }
+            last = nil; onPanel = nil
         }
+    }
+
+    /// Called every display tick: while armed, the cursor's path becomes ink. A stroke starts once the cursor has
+    /// clearly moved (not a nudge) and ends after a short pause or on another screen.
+    func follow() {
+        guard armed, !snapped, let prev = last else { return }
+        let m = NSEvent.mouseLocation, now = ProcessInfo.processInfo.systemUptime
+        if let p = onPanel, now - lastMoved > Self.pauseEnds { snapped = p.view.end(); onPanel = nil; if snapped { return } }
+        guard hypot(m.x - prev.x, m.y - prev.y) >= (onPanel == nil ? Self.startAfter : 0.5) else { return }
+        last = m; lastMoved = now
+        guard let p = panels.first(where: { NSMouseInRect(m, $0.frame, false) }) else { return }
+        // The view is flipped: y runs down from the panel's top.
+        let at = { (q: CGPoint) in CGPoint(x: q.x - p.frame.minX, y: p.frame.maxY - q.y) }
+        if p !== onPanel {
+            if onPanel?.view.end() == true { onPanel = nil; snapped = true; return }
+            onPanel = p
+            p.view.begin(at: at(prev))
+        }
+        if p.view.move(to: at(m)) { onPanel = nil; snapped = true }
     }
 
     private func syncScreens() {
@@ -199,9 +325,12 @@ final class Ink {
     /// done: called on the main queue once the screen has been shot (straight away if nothing was drawn).
     func capture(then done: @escaping () -> Void = {}) {
         setArmed(false)
-        guard let panel = panels.max(by: { $0.view.strokes.count < $1.view.strokes.count }), !panel.view.strokes.isEmpty else { return done() }
+        // Only loops that snapped shut count (end() above already dropped the rest).
+        let loops = { (p: InkPanel) in p.view.strokes.filter(\.closed) }
+        guard let panel = panels.max(by: { loops($0).count < loops($1).count }), !loops(panel).isEmpty else { return done() }
         let o = origin(panel)
-        let strokes = panel.view.strokes
+        let strokes = loops(panel)
+        log("drawing: \(strokes.count) circled area(s) captured")
         var box = CGRect.null
         for s in strokes { for p in s.pts { box = box.union(CGRect(x: p.x, y: p.y, width: 0, height: 0)) } }
         box = box.insetBy(dx: -48, dy: -48)

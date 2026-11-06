@@ -67,6 +67,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-gain
+          src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-snap
 
       # --release reuses the voice helper build.sh just made instead of compiling Parakeet again.
       - name: Test the Windows voice helper

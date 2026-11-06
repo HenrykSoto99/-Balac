@@ -17,11 +17,11 @@
   const SWING = new Set(['t', 'T']);
 
   // eye: the viewer's-right eye's inner column (from the centre) and top row; mouth: its row; cy: the row of the
-  // body point; neck: the first row that doesn't bob with the head; fade: rows at the bottom that fade out.
+  // body point; fade: rows at the bottom that fade out.
   const ART = {
     anime: {
       L: {
-        w: 29, cy: 14, neck: 22, fade: 5, eye: [2, 12], mouth: 18, blush: [6, 17], tail: [5, 27],
+        w: 29, cy: 14, fade: 5, eye: [2, 12], mouth: 18, blush: [6, 17], tail: [5, 27],
         patch: [[0, 14, 'hh'], [1, 14, 'h']],
         rows: [
           '...............', '...............', '..........hhhhh', '.......hhhHHHHH', '...ww.hhHHhhhhh', '..wwwwhhhhhhhhh',
@@ -32,17 +32,17 @@
         ],
       },
       S: {
-        w: 17, cy: 8, neck: 13, fade: 3, eye: [2, 8], mouth: 11, blush: [4, 10], tail: [4, 16],
+        w: 17, cy: 8, fade: 3, eye: [2, 8], mouth: 11, blush: [4, 10], tail: [4, 16],
         rows: ['........h', '.....hhhh', '..w.hhHHH', '.wwwhhhhh', 'tthhhhhhh', 'tthhhhhhh', 'tThhhshhs', 'tThhsssss', 'tThssssss', 'tThssssss', 'tT.hsssss', 'tT..sssss', 'tT....sss', 't......zs', 't....kkzs', '...kkwwkw', '.kwcccccc'],
       },
       X: {
-        w: 11, cy: 4, neck: 8, fade: 1, eye: [1, 3], mouth: 5, tail: [1, 7],
+        w: 11, cy: 4, fade: 1, eye: [1, 3], mouth: 5, tail: [1, 7],
         rows: ['....hh', 'w.hhhh', 'wwhhhh', 'thhsss', 'thssss', 'thssss', 't..sss', 't...zs', '..kkkw'],
       },
     },
     sarah: {
       L: {
-        w: 29, cy: 14, neck: 21, fade: 5, eye: [2, 12], mouth: 18, blush: [6, 16], earring: [9, 15], tail: [11, 27],
+        w: 29, cy: 14, fade: 5, eye: [2, 12], mouth: 18, blush: [6, 16], earring: [9, 15], tail: [11, 27],
         // A side parting on her left: the fringe sweeps across and down over the other side.
         patch: [[7, 16, 'sss'], [8, 9, 'hhhhhh'], [8, 15, 'ssss'], [9, 8, 'hhhhh'], [10, 8, 'hhh'], [26, 14, '4']],
         rows: [
@@ -54,19 +54,19 @@
         ],
       },
       S: {
-        w: 17, cy: 8, neck: 13, fade: 3, eye: [2, 8], mouth: 11, tail: [7, 16],
+        w: 17, cy: 8, fade: 3, eye: [2, 8], mouth: 11, tail: [7, 16],
         patch: [[5, 5, 'hhhh'], [6, 5, 'hh'], [5, 10, 'ss']],
         rows: ['.....hhhh', '...hhHHHH', '..hhHhhhh', '.hhhhhhhh', '.hhhhhhhh', '.hhhhhhss', '.hhhsssss', 'thhssssss', 'thhssssss', 'thhssssss', 'thhhsssss', 'thhh.ssss', 'thhh...ss', 'thhh...zs', 'thhhcccss', 'thccccccc', 'ccccccccc'],
       },
       X: {
-        w: 11, cy: 4, neck: 8, fade: 1, eye: [1, 3], mouth: 5, tail: [3, 8],
+        w: 11, cy: 4, fade: 1, eye: [1, 3], mouth: 5, tail: [3, 8],
         patch: [[2, 4, 'h'], [2, 6, 'ss']],
         rows: ['..hhhh', '.hhhhh', 'hhhhss', 'hhssss', 'hhssss', 'thssss', 'th.sss', 'th..zs', 'tccccs'],
       },
     },
     adrian: {
       L: {
-        w: 29, cy: 14, neck: 22, fade: 5, eye: [2, 12], mouth: 19,
+        w: 29, cy: 14, fade: 5, eye: [2, 12], mouth: 19,
         // The quiff, swept up and over to his right; a moustache.
         patch: [[0, 9, 'hhhhhhhh'], [1, 8, 'hhHHH'], [2, 9, 'HH'], [18, 13, 'hhh']],
         rows: [
@@ -78,12 +78,12 @@
         ],
       },
       S: {
-        w: 17, cy: 8, neck: 14, fade: 3, eye: [2, 8], mouth: 11,
+        w: 17, cy: 8, fade: 3, eye: [2, 8], mouth: 11,
         patch: [[0, 5, 'hhhh'], [1, 4, 'hhH'], [10, 7, 'hhh']],
         rows: ['.........', '....hhhHH', '...hhhhhh', '..hhhhhhh', '..hhhhhhh', '..hhsssss', '..hssssss', '.zsssssss', '.zsssssss', '..sssssss', '..hssssss', '..hhsssss', '...hhhhhh', '.....hhhh', '.......zs', '..CCCCcck', 'CCCCCCcck'],
       },
       X: {
-        w: 11, cy: 4, neck: 8, fade: 1, eye: [1, 3], mouth: 5,
+        w: 11, cy: 4, fade: 1, eye: [1, 3], mouth: 5,
         patch: [[0, 2, 'hh']],
         rows: ['...hhh', '..hhHH', '.hhhhh', '.hssss', 'zsssss', '.sssss', '.hhsss', '..hhhh', '..CCck'],
       },
@@ -92,7 +92,7 @@
     // and a hoodie with its drawstrings.
     ken: {
       L: {
-        w: 29, cy: 14, neck: 22, fade: 5, eye: [2, 12], mouth: 18,
+        w: 29, cy: 14, fade: 5, eye: [2, 12], mouth: 18,
         patch: [[0, 10, 'hh.h'], [0, 16, 'h.hh'], [1, 9, 'hhhHhhh'], [7, 15, 'shh'], [8, 16, 'h']],
         rows: [
           '...............', '.........hhhhhh', '.......hhhhhhhh', '......hhhhHHhhh', '.....hhhhhhhhhh', '.....Hhhhhhhhhh',
@@ -103,12 +103,12 @@
         ],
       },
       S: {
-        w: 17, cy: 8, neck: 14, fade: 3, eye: [2, 8], mouth: 11,
+        w: 17, cy: 8, fade: 3, eye: [2, 8], mouth: 11,
         patch: [[0, 5, 'h.h'], [0, 10, 'h'], [4, 9, 'sh']],
         rows: ['.........', '....hhhhh', '...hhhHhh', '..Hhhhhhh', '..Hhhshhs', '..Hssssss', '..sssssss', '.zsssssss', '.zsssssss', '..sssssss', '..sssssss', '...ssssss', '....sssss', '......sss', '.......zs', '...CCcccz', 'CCCCCCCwC'],
       },
       X: {
-        w: 11, cy: 4, neck: 8, fade: 1, eye: [1, 3], mouth: 5,
+        w: 11, cy: 4, fade: 1, eye: [1, 3], mouth: 5,
         patch: [[0, 3, 'h.hh']],
         rows: ['......', '.hhhhh', '.Hhshh', '.sssss', 'zsssss', '.sssss', '..ssss', '...zss', '..CCwC'],
       },
@@ -199,11 +199,11 @@
 
     draw(k, cx, cy, st, size) {
       const a = ART[who][size], t = st.t, lvl = this.level(st), A = st.act;
-      // Body motion: a hop on hype, a shake when upset, a droop asleep; the head bobs with a loud voice.
+      // Body motion: a hop on hype, a shake when upset, a droop asleep. Talking moves only the mouth, so the head
+      // and the speech bubble beside it hold still while it speaks.
       const hop = A === 'hype' ? -Math.round(Math.abs(Math.sin(st.actA * 9)) * (size === 'L' ? 2 : 1)) : 0;
       const shake = A === 'upset' && st.actA % 0.9 < 0.32 ? Math.round(Math.sin(t * 48)) : 0;
       const droop = st.sleepy > 0.5 ? 1 : 0;
-      const bob = size !== 'X' && st.mode === 'talk' && lvl > 0.65 ? -1 : 0;
       const x0 = cx - a.cx + shake, y0 = cy - a.cy + hop + droop;
       const G = grid(x0 - 3, y0 - 4, a.w + 6, a.rows.length + 8);
       // Swinging hair: against the way it moves, a little sway at rest, a toss on hype.
@@ -211,7 +211,6 @@
       const [tTop, tEnd] = a.tail ?? [0, 1];
       const fadeAt = a.rows.length - a.fade;
       a.rows.forEach((row, j) => {
-        const head = j < a.neck ? bob : 0;
         for (let i = 0; i < row.length; i++) {
           const ch = row[i];
           if (ch === '.' || ch === ' ') continue;
@@ -219,10 +218,10 @@
           if (j >= fadeAt && (j - fadeAt + 1) / (a.fade + 1) > (size === 'L' ? k.th(x0 + i, y0 + j) : ((i + j) & 1 ? 0.3 : 0.65))) continue;
           let dx = 0;
           if (SWING.has(ch)) { const u = clamp((j - tTop) / (tEnd - tTop), 0, 1); dx = Math.round(swing * u * u); }
-          set(G, x0 + i + dx, y0 + j + head, LV[ch], 1);
+          set(G, x0 + i + dx, y0 + j, LV[ch], 1);
         }
       });
-      const c = { G, a, x: x0 + a.cx, y: y0 + bob, st, t, size, lvl };
+      const c = { G, a, x: x0 + a.cx, y: y0, st, t, size, lvl };
       this.face(c);
       this.extra(c);
       outline(G, (gy) => gy < y0 + fadeAt);

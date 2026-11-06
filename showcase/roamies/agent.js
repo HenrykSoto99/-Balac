@@ -1180,7 +1180,7 @@
         return {
           arms: talking ? 1 : 0.4,
           tr: [0.95 + g * 0.08, 0.05 - Math.max(0, g) * 0.35], tl: [-0.98 - g2 * 0.06, 0.25 - Math.max(0, g2) * 0.18],
-          oy: talking ? -Math.abs(Math.sin(gestT * 9)) * k.R * 0.03 : 0,
+          // No hop while it talks: the body (and the bubble and cards placed from it) stays level to be read.
           mouth: mouthT > 0 ? mouthMode : b.mood === 'annoyed' ? 'frown' : null, brow, mode: talking ? 'talk' : null,
         };
       }

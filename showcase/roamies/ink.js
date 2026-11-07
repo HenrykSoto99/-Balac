@@ -1093,7 +1093,8 @@
       const own = m.at?.rect ? grow(rectOf(m), 4) : null;
       if (own) upcoming = upcoming.filter((r) => r.join() !== own.join());
       try { made.push(await runMark(m, ctx)); } catch (err) { console.error('ink mark', m.kind, err); }
-      if (gen !== G.gen) return;
+      // Stopped while it was being made (a card waits for fonts or a photo first): it appeared after the clear, so it goes.
+      if (gen !== G.gen) { if (m.part) fadeOut(marks.filter((q) => q.alive && q.part === m.part), 0.2); return; }
     }
     upcoming = [];
     await until_(t0 + dur, gen);

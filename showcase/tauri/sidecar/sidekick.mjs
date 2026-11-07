@@ -1168,7 +1168,7 @@ async function onMenu(id) {
   else if (id === 'ask') {
     const text = await ask({ placeholder: 'Ask me anything…' });
     if (text?.trim()) enqueue(text.trim());
-  } else if (id === 'stop') { endIntro(); controller?.abort(); speech.stop(); ink.stop(); }
+  } else if (id === 'stop') { const cancelled = busy; endIntro(); controller?.abort(); speech.stop(); ink.stop(cancelled); }
   else if (id === 'new') {
     endIntro();
     freshSession('new'); menu();

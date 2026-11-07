@@ -134,13 +134,26 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   await new Promise((r) => setTimeout(r, 20));
   talk.abort();
   assert.equal(await cut, 'Stopped.');
-  assert.deepEqual(other.at(-1), { type: 'ink_clear', screen: true, stop: true }, 'the overlay stops too');
+  assert.deepEqual(other.at(-1), { type: 'ink_clear' }, 'the overlay stops too, and what it drew goes');
   hold = false;
   // Cut off before it got to waiting: it stops at once instead of waiting out the timeout.
   const early = new AbortController(); early.abort();
   const t0 = Date.now();
   assert.equal(await draw.execute({ beats: [step('Click Scale.', 'Scale')] }, { toolCallId: 'd10', signal: early.signal }), 'Stopped.');
   assert.ok(Date.now() - t0 < 5000, 'no wait for the timeout');
+  // Regression: Stop while it was drawing diagrams (cards only, no screen marks) left them playing and on screen.
+  made.nextTurn();
+  await draw.execute({ beats: [{ say: 'A diagram.', marks: [{ kind: 'note', text: 'diagram' }] }] }, { toolCallId: 'd11' });
+  other.length = 0;
+  made.ink.stop(true);
+  assert.deepEqual(other, [{ type: 'ink_clear' }], 'cancelling the request clears its cards and stops the overlay');
+  assert.equal(made.ink.describe(), '', 'nothing of it is left');
+  // Stopping only the voice after the answer is done keeps the cards, but still stops the overlay playing.
+  await draw.execute({ beats: [{ say: 'Another.', marks: [{ kind: 'note', text: 'kept' }] }] }, { toolCallId: 'd12' });
+  other.length = 0;
+  made.ink.stop();
+  assert.deepEqual(other, [{ type: 'ink_clear', screen: true, stop: true }]);
+  assert.match(made.ink.describe(), /note “kept”/);
   console.log('draw tool tests: passed');
 }
 

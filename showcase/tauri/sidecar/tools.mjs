@@ -367,7 +367,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     if (!segs.length) segs.push({ from: 0, to: 0 });
     const drawn = [];
     // Cut off (they spoke over it): the overlay stops too, or it keeps the caption up waiting for a click.
-    const stopped = () => { if (ctx?.signal?.aborted && parts.screenCount) clearScreenInk(true); return 'Stopped.'; };
+    const stopped = () => { if (ctx?.signal?.aborted) clearAllInk(); return 'Stopped.'; };
     // Where there's room for cards: the screen minus the front window; and what's on it, so names avoid covering words.
     const hasCards = beats.some((b) => b.marks.some((m) => CARDS.includes(m.kind)));
     const win = hasCards && HANDS ? (await hands('locate', 'front').catch(() => null))?.window?.bounds ?? null : null;
@@ -377,6 +377,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     let look = null;
     try {
       for (const [k, sg] of segs.entries()) {
+        if (ctx?.signal?.aborted) return stopped();
         let seg;
         try {
           if (!look || sg.after) look = lookups(spec, sg.after);
@@ -389,6 +390,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
           notes.push(`Stopped before beat ${sg.from + 1}: ${e.message}`);
           break;
         }
+        // Cancelled while this step's places were looked up: it never shows.
+        if (ctx?.signal?.aborted) return stopped();
         const ids = parts.assign(seg);
         drawn.push(...ids);
         if (opts.fade) for (const p of ids) loose.add(p);
@@ -425,7 +428,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     button: (part) => buttons.get(String(part)) ?? null,
     // A request ended: if it drew nothing, the marks from before it are done with.
     endRequest: () => { if (ink.turn !== turn && parts.screenCount) clearScreenInk(); },
-    stop: () => { for (const done of [...ink.waits.values()]) done('stopped'); if (parts.screenCount) clearScreenInk(true); },
+    // Stop. Cancelling a request that drew: all of its drawing goes, diagrams and cards too, and the overlay stops
+    // playing it. Otherwise (only the voice was still going) the screen marks go and the cards stay.
+    stop: (cancelled = false) => {
+      for (const done of [...ink.waits.values()]) done('stopped');
+      if (cancelled && ink.turn === turn && parts.ids.length) clearAllInk(); else clearScreenInk(true);
+    },
     // The user sent the whole drawing away (Esc): nothing is on screen any more.
     cleared: () => { for (const done of [...ink.waits.values()]) done('stopped'); parts.clear(); buttons.clear(); loose.clear(); },
     // The app takes its own drawing away (the setup showcase, when its step is left): everything goes.

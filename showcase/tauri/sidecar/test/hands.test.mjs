@@ -16,6 +16,7 @@ const win = fs.existsSync(swap) ? JSON.parse(fs.readFileSync(swap, 'utf8')) : { 
 let o = { ok: true, window: win };
 if (a[0] === 'act') { const p = JSON.parse(a[1]); o = p.app === 'NoSuchAppRoamiesTest' ? { ok: false, error: 'No matching window is open.' } : { ok: true, done: p.steps.map((s) => s.do), window: win }; }
 if (a[0] === 'find-text') o = { ok: true, matches: [{ text: a[2], match: 'exact', role: 'button', bounds: [100, 100, 80, 24], window: win }] };
+if (a[0] === 'ui') o = { ok: true, window: win, controls: [], texts: [], note: 'Nothing to list.' };
 if (a[0] === 'front') o = { ok: true, app: 'TextEdit', title: 'notes.txt' };
 if (a[0] === 'capture') { fs.writeFileSync(a[1], 'x'); o = { ok: true, file: a[1], window: win, pixels: [800, 600] }; }
 console.log(JSON.stringify(o));
@@ -35,7 +36,9 @@ assert.match(r, /key, type/);
 const act = calls().find((c) => c[0] === 'act');
 assert.deepEqual(JSON.parse(act[1]).steps.map((s) => s.do), ['key', 'type']);
 assert.ok(!calls().some((c) => c[0] === 'capture'), 'no window pictures taken while it works in an app');
-await assert.rejects(tool('act_in_app').execute({ target: 'TextEdit', steps: [{ do: 'read_window' }] }, ctx), /only read the window/);
+// Regression: only a read_window step failed the call; it reads the window instead.
+assert.match(await tool('act_in_app').execute({ target: 'TextEdit', steps: [{ do: 'read_window' }] }, ctx), /^TextEdit — notes\.txt/);
+assert.ok(!calls().some((c) => c[0] === 'act' && JSON.parse(c[1]).steps.length === 0), 'no empty act sent');
 
 // Screenshots ask the helper to shrink to 1568 px and use the size it reports.
 fs.writeFileSync(log, '');

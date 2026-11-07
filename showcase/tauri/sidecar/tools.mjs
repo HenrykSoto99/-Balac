@@ -139,6 +139,19 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     }
     return res;
   }
+  async function readWindow(target = 'front') {
+    const t = String(target || 'front');
+    const read = () => Promise.all([hands('ui', t === 'front' ? 'front' : `app:${t}`), hands('windows').catch(() => null)]);
+    const [res, all] = await read().catch(async (err) => {
+      if (t === 'front' || !/No matching window/.test(String(err?.message ?? err)) || !(await launchApp(t, hands))) throw err;
+      return read();
+    });
+    lastRead = { win: res.window.id, app: res.window.app, controls: res.controls, turn };
+    const others = (all?.windows ?? []).filter((w) => w.app === res.window.app && w.id !== res.window.id).length;
+    const head = `${res.window.app}${res.window.title ? ` — ${res.window.title}` : ''}${others ? ` (front window; ${res.window.app} has ${others} more, which draw with text also searches)` : ''}`;
+    if (!res.controls.length) return `${head}\n${res.note}`;
+    return `${head}\n${controlList(res.controls, res.texts)}${res.elsewhere?.length ? `\nElsewhere on the page (scrolled out of view): ${res.elsewhere.join(' | ')}` : ''}`;
+  }
   // A yes/no in an input bubble. Stop (or the turn ending) counts as no.
   async function confirm(question, ctx) {
     const answer = await ask({ placeholder: question }, ctx?.signal);
@@ -428,19 +441,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         name: 'read_window',
         description: "List the buttons, links, fields, checkboxes and other controls in an app's front window (id, role, label, value), plus the text on screen and the text scrolled out of view above and below it, so you can read a whole page without scrolling or a screenshot. Needed before act_in_app steps that use ids. To mark or click something by its visible words you don't need this: use draw or click_text with text. target: 'front', an app name, or 'browser'.",
         parameters: z.object({ target: z.string().optional() }),
-        execute: async ({ target = 'front' }) => {
-          const t = String(target || 'front');
-          const read = () => Promise.all([hands('ui', t === 'front' ? 'front' : `app:${t}`), hands('windows').catch(() => null)]);
-          const [res, all] = await read().catch(async (err) => {
-            if (t === 'front' || !/No matching window/.test(String(err?.message ?? err)) || !(await launchApp(t, hands))) throw err;
-            return read();
-          });
-          lastRead = { win: res.window.id, app: res.window.app, controls: res.controls, turn };
-          const others = (all?.windows ?? []).filter((w) => w.app === res.window.app && w.id !== res.window.id).length;
-          const head = `${res.window.app}${res.window.title ? ` — ${res.window.title}` : ''}${others ? ` (front window; ${res.window.app} has ${others} more, which draw with text also searches)` : ''}`;
-          if (!res.controls.length) return `${head}\n${res.note}`;
-          return `${head}\n${controlList(res.controls, res.texts)}${res.elsewhere?.length ? `\nElsewhere on the page (scrolled out of view): ${res.elsewhere.join(' | ')}` : ''}`;
-        },
+        execute: async ({ target = 'front' }) => readWindow(target),
       },
       {
         name: 'act_in_app',
@@ -458,10 +459,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         }),
         executionMode: 'sequential',
         execute: async ({ target = 'front', steps: given }, ctx) => {
-          if (!allowActions()) throw new Error(actionsOff);
           const asked = String(target || 'front');
           const steps = given.filter((s) => !['read_window', 'take_screenshot', 'screenshot'].includes(s.do));
-          if (!steps.length) throw new Error('Those steps only read the window. Use read_window or take_screenshot for that.');
+          // Only reading steps (models sometimes send read_window here): read the window instead of failing the call.
+          if (!steps.length) return readWindow(asked);
+          if (!allowActions()) throw new Error(actionsOff);
           // "Type a web address into the browser's bar and press Return" is just opening a link: do that directly
           // (instant, and nothing can land in the wrong field) instead of clicking the bar and typing.
           const url = typedAddress(asked, steps);

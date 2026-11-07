@@ -755,12 +755,16 @@
       await card(m, w, h, function (b, l, t, x, y, age) { m.keys.forEach((k, i) => { const [kx, r, text] = at0[i], ky = y + 20 + r * 22; b.fillStyle = tone(k.tone); b.beginPath(); b.arc(x + kx + 4, ky - 4, 4, 0, Math.PI * 2); b.fill(); typed(b, text, x + kx + 14, ky, SMALL, DIM, age / 0.4); }); }, { bar: false });
     },
     async timeline(m) {
-      const ev = m.events, w = clamp(ev.length * 82, 320, 620), gap = ev.length > 1 ? (w - 60) / (ev.length - 1) : w - 40;
-      // Each event's words in full, wrapped to its column; the line moves down to make room for the tallest one above it.
-      const words = ev.map((e) => wrapRows(e.text, Math.min(w - 20, Math.max(64, gap * 2 - 14)), SMALL));
+      const ev = m.events, w = clamp(ev.length * 82, 320, 620);
+      const xs = ev.map((_, i) => 30 + ((w - 60) * i) / Math.max(1, ev.length - 1));
+      // Each event's words in full, wrapped to its own column: halfway to the next event on its side of the line (or
+      // the card's edge), so end events kept inside the card can't run into their neighbours. The line moves down to
+      // make room for the tallest one above it.
+      const cols = xs.map((px, i) => [i >= 2 ? (xs[i - 2] + px) / 2 + 4 : 10, i + 2 < ev.length ? (px + xs[i + 2]) / 2 - 4 : w - 10]);
+      const words = ev.map((e, i) => wrapRows(e.text, cols[i][1] - cols[i][0], SMALL));
       const upN = Math.max(1, ...words.filter((_, i) => i % 2 === 0).map((r) => r.length)), downN = Math.max(1, ...words.filter((_, i) => i % 2).map((r) => r.length));
       const ty = 58 + (upN - 1) * 13, h = 26 + ty + 62 + (downN - 1) * 13;
-      const xs = ev.map((_, i) => 30 + ((w - 60) * i) / Math.max(1, ev.length - 1)), line = handLine([16, ty], [w - 16, ty], { jitter: 0.5, bow: 0.006 });
+      const line = handLine([16, ty], [w - 16, ty], { jitter: 0.5, bow: 0.006 });
       let lp = 0; const shown = [];
       const c = await card(m, w, h, function (b, l, t, x, y) {
         this.__line ??= line.map(([px, py]) => [px + x, py + y]);
@@ -770,9 +774,10 @@
           chip(b, px - 7, y + ty - 7, 14, 14, '', a, { color: this.color });
           // Centred on its dot, but never past the card's edges.
           const inCard = (str, font) => { const tw = textW(str, font); return clamp(px, x + 10 + tw / 2, x + w - 10 - tw / 2); };
+          const inCol = (str) => { const tw = textW(str, SMALL); return clamp(px, x + cols[i][0] + tw / 2, x + cols[i][1] - tw / 2); };
           const when = `800 15px ${DOTO}`, rows = words[i], n = rows.length;
           typed(b, e.when, inCard(e.when, when), y + ty + (up ? -18 : 34), when, TEXT, a / 0.3, { anchor: 'middle' });
-          rows.forEach((r, k) => typed(b, r, inCard(r, SMALL), y + ty + (up ? -36 - (n - 1 - k) * 13 : 50 + k * 13), SMALL, DIM, (a - 0.1 - k * 0.1) / 0.4, { anchor: 'middle' }));
+          rows.forEach((r, k) => typed(b, r, inCol(r), y + ty + (up ? -36 - (n - 1 - k) * 13 : 50 + k * 13), SMALL, DIM, (a - 0.1 - k * 0.1) / 0.4, { anchor: 'middle' }));
         });
       }, { title: m.title || 'timeline' });
       const [x, y] = [markBox(c)[0] + 4, markBox(c)[1] + 4 + 26];

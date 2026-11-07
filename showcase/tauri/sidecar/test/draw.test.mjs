@@ -135,3 +135,11 @@ console.log('shape radius tests: passed');
   assert.equal(await faviconFor('javascript:alert(1)'), null, 'not a web link');
   console.log('photo and favicon tests: passed');
 }
+
+// Regression: a timeline event of 41+ characters failed the whole draw call; event text wraps now, up to 60.
+{
+  const tl = (text) => ({ beats: [{ say: 'When.', marks: [{ kind: 'timeline', events: [{ when: 'c. 330 BC', text }] }] }] });
+  assert.ok(ok(tl('Aristotle gives strong evidence for a round Earth')), 'a 49-character event');
+  assert.ok(!ok(tl('x'.repeat(61))), 'past 60 still fails');
+  console.log('timeline schema tests: passed');
+}

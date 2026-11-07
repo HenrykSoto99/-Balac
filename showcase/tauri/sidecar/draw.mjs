@@ -38,7 +38,7 @@ const Mark = z.object({
   plots: z.array(z.object({ points: z.array(pair).min(2).max(LIMITS.points), tone: z.enum(TONES).optional(), label: z.string().max(30).optional() })).max(4).optional(),
   dots: z.array(z.object({ x: num, y: num, label: z.string().max(30).optional() })).max(12).optional(),
   keys: z.array(z.object({ tone: z.enum(TONES), text: z.string().min(1).max(40) })).max(8).optional(),
-  events: z.array(z.object({ when: z.string().min(1).max(16), text: z.string().min(1).max(40) })).max(10).optional(),
+  events: z.array(z.object({ when: z.string().min(1).max(16), text: z.string().min(1).max(60) })).max(10).optional(),
   smiles: z.string().min(1).max(200).optional(),
   parts: z.array(z.object({
     shape: z.enum(SHAPES), at: triple.optional(), size: triple.optional(), rot: triple.optional(),

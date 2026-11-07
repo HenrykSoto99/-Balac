@@ -14,7 +14,7 @@ export function describe(name, args = {}) {
     case 'list_windows': return ['Checking your windows', 'Checked your windows'];
     case 'read_window': { const a = appOf(args.target); return a ? [`Reading ${a}`, `Read ${a}`] : ['Reading a window', 'Read a window']; }
     case 'act_in_app': { const a = appOf(args.target); return a ? [`Working in ${a}`, `Worked in ${a}`] : ['Working in an app', 'Worked in an app']; }
-    case 'point_at': return ['Pointing it out', 'Pointed it out'];
+    case 'draw': return (args.beats ?? []).length ? ['Drawing on your screen', 'Drew on your screen'] : ['Changing the drawing', 'Changed the drawing'];
     case 'read_file': return [`Reading ${short(base(args.path))}`, `Read ${short(base(args.path))}`];
     case 'list_files': return [`Looking in ${short(base(args.dir))}`, `Looked in ${short(base(args.dir))}`];
     case 'search_files': return ['Searching your files', 'Searched your files'];
@@ -24,7 +24,6 @@ export function describe(name, args = {}) {
     case 'web_search': return ['Searching the web', 'Searched the web'];
     case 'remember_commitment': return ['Adding a reminder', 'Added a reminder'];
     case 'update_commitment': return ['Updating a reminder', 'Updated a reminder'];
-    case 'remember_fact': return ['Saving to memory', 'Saved to memory'];
     case 'forget_fact': return ['Forgetting it', 'Forgot it'];
     case 'open': {
       const t = String(args.target ?? '');
@@ -43,6 +42,8 @@ export function createActivity({ max = 12, now = () => Date.now() } = {}) {
   return {
     recent,
     asked(text) { add('ask', short(text, 80)); },
+    // A drawing handed part of the work on: said in the list like anything else it did.
+    handoff(task) { add('did', `Handed off: ${short(task, 60)}`); },
     start(id, name, args) { const d = describe(name, args); if (d) running.set(id, d); return d?.[0] ?? null; },
     end(id, isError) { const d = running.get(id); running.delete(id); if (d) add(isError ? 'bad' : 'did', isError ? `Couldn't finish: ${d[1].charAt(0).toLowerCase()}${d[1].slice(1)}` : d[1]); },
     // What it's doing right now (the newest tool still running), or null.

@@ -7,6 +7,9 @@
   if (!invoke) return;
   const send = (msg) => invoke('sidecar_send', { msg }).catch(() => {});
   const typing = (on) => invoke('set_typing', { on }).catch(() => {});
+  // Drawings (ink.js) talk to the sidecar (started, waits done, buttons, closed cards) and arm the shell's click watch.
+  if (Roamie.ink) { Roamie.ink.send = send; Roamie.ink.invoke = (cmd, args) => invoke(cmd, args).catch(() => {}); }
+  window.__roamieClick = (x, y) => Roamie.ink?.click(x, y);
 
   window.__roamieSafe = (s) => Roamie.setSafe?.(s);
   // macOS: the voice helper can draw the cursor-form sidekick while it just follows the cursor (agent.js nativeStep,
@@ -24,6 +27,7 @@
   window.__roamiePtr = (x, y, t) => {
     if (!window.Roamie?.ptr) return;
     cursor = [x, y];
+    Roamie.ink?.ptr(x, y);
     const h = Roamie.ptr(x, y, t);
     if (h !== hot) { hot = h; invoke('set_hot', { hot: h }).catch(() => { hot = null; }); }
   };
@@ -115,7 +119,23 @@
     job.h?.done(!isError);
   };
 
+  // While a drawing plays, the rest of the answer (its last line, the end of the turn) waits for it, so the reply's
+  // bubble doesn't ride along on the drawing cursor. Drawings themselves, and a new request or an error, never wait.
+  let deferred = null;
+  const PASS = new Set(['draw', 'ink_clear', 'ink_stale', 'start', 'error', 'tool_target', 'tool_image']);
   function onAgent(e) {
+    if (e.type === 'start' || e.type === 'error') flushDeferred();
+    if (deferred && !PASS.has(e.type)) { deferred.push(e); return; }
+    if (!PASS.has(e.type) && ['text', 'done', 'emote', 'trail'].includes(e.type) && Roamie.ink?.playing) {
+      deferred = [e];
+      // Never held for good, even if a drawing gets stuck.
+      Promise.race([Roamie.ink.whenIdle(), new Promise((r) => setTimeout(r, 150_000))]).then(flushDeferred);
+      return;
+    }
+    agentEvent(e);
+  }
+  function flushDeferred() { const q = deferred; deferred = null; for (const e of q ?? []) agentEvent(e); }
+  function agentEvent(e) {
     const a = getAgent();
     if (!a) return;
     switch (e.type) {
@@ -177,14 +197,13 @@
       case 'tool_end':
         settle(e.id, e.isError);
         break;
-      case 'point': {
-        // Teach mode: control bounds arrive in global screen points → this overlay's coordinates.
+      // A drawing's next segment (beats with their places already on screen), or clearing what's drawn.
+      case 'draw':
         endTalk();
-        const o = Roamie.origin ?? { x: 0, y: 0 }, [x, y, w, h] = e.rect;
-        a.point({ rect: [x - o.x, y - o.y, w, h], say: e.say, step: e.step, of: e.of, label: e.label })
-          .then(() => send({ type: 'point_shown', id: e.id }));
+        Roamie.ink?.play(e);
         break;
-      }
+      case 'ink_clear': Roamie.ink?.clear(e); break;
+      case 'ink_stale': Roamie.ink?.stale(); break;
       case 'tool_target': {
         // The real window being captured, in global screen points → this overlay's coordinates.
         const job = current?.id === e.id ? current : jobs.find((j) => j.id === e.id);
@@ -215,7 +234,6 @@
         if (research) panel()?.end(fromWeb ? 'From the web' : 'Answer');
         research = waveTurn = false;
         endTalk();
-        setTimeout(() => a.endGuide?.(), 6000);
         break;
       case 'error':
         responding = false;
@@ -241,7 +259,6 @@
       if (m.wave) {
         waveTurn = true;
         thought?.end(); thought = null;
-        a.endGuide?.();
         if (a.visible) a.hide();
         Roamie.sfx?.play('listen');
         return;
@@ -316,12 +333,15 @@
   // ---------- Esc ----------
   // While it's on screen, Esc stops an answer (and the voice), or sends it away when it's idle. The shell holds a
   // global Esc only meanwhile (other apps don't get Esc while it does), so this overlay says when it's up.
-  const up = () => !!(getAgent()?.visible || ask || Roamie.panel?.isOpen);
+  // A drawing counts only while it plays: cards left on screen have their own close button and don't hold Esc.
+  const up = () => !!(getAgent()?.visible || ask || Roamie.panel?.isOpen || Roamie.ink?.playing);
   function onEsc() {
     const a = getAgent();
     if (!a || !up()) return;
     if (ask) { finishAsk(null); return; }
     if (responding || Roamie.voiceOut?.playing()) { send({ type: 'menu', id: 'stop' }); Roamie.voiceOut?.stop(); return; }
+    // A drawing on screen: Esc takes it all away (and the sidecar forgets its parts).
+    if (Roamie.ink?.busy) { Roamie.ink.clear({}); send({ type: 'ink_cleared' }); return; }
     if (Roamie.panel?.isOpen) Roamie.panel.close();
     endTalk(); listen?.close(); listen = null;
     if (a.visible) a.hide();

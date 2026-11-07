@@ -139,8 +139,12 @@
     // scoots to the closest spot that's clear of the cursor; dropping it somewhere makes that home.
     // byCursor: the cursor position it popped up beside, while it's still there for that request.
     const station = { x: null, y: null, flee: 0, moving: false, quietUntil: 0, held: false, byCursor: null };
-    // Teach mode: fly next to a control, point at it, light it up, say the step. One at a time.
-    let guide = null;
+    // The pen: while a drawing holds it, the Sidekick is its cursor form and goes only where the drawing moves its
+    // tip (no station, following, fleeing, idle acts or native follower). tip: the arrow's tip, in overlay px.
+    // home: where it was when taken, to go back to. tw: running moves (resolved on the agent's clock). idle: a
+    // little motion while parked on a control (tapping, circling).
+    // speed: above 1 when a drawing has fallen behind its voice and is catching up.
+    const pen = { held: false, tip: [0, 0], home: null, tw: [], idle: null, idleAt: 0, reduced: false, v: [0, 0], speed: 1 };
     const AVOID = () => k.R * 5;
     const spotOK = (x, y) => {
       const S = bounds(), r = k.R;
@@ -206,6 +210,36 @@
       return fol.reach > 0.15 || onIt || typing || R.panelHit?.(p[0], p[1]);
     };
     const env0 = { mouse: {}, dt: 0 };
+    // From the tip to the body point: the cursor form's arrow tip sits up and left of it. The same offset in every form,
+    // so the body doesn't jump when it turns into the cursor while held.
+    const tipOff = () => k.tip ?? [0, 0];
+    const penEase = (u) => (u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
+    // A hand's pace: a gentle start and finish, steady in between.
+    const penSmooth = (u) => { const a = 0.18; return u < a ? (u * u) / (2 * a * (1 - a)) : u > 1 - a ? 1 - ((1 - u) ** 2) / (2 * a * (1 - a)) : (u - a / 2) / (1 - a); };
+    const penTween = (dur, f) => new Promise((res) => {
+      // Not held (hidden with Esc, say): nothing moves it, so a move finishes at once instead of never.
+      if (pen.reduced || dur <= 0 || !pen.held) { f(1); res(); return; }
+      pen.tw.push({ t0: null, dur: dur / pen.speed, f, res });
+    });
+    const penWait = (sec) => penTween(sec, () => {});
+    const penAt = (pts, u) => {
+      const f = clamp(u, 0, 1) * (pts.length - 1), i = Math.floor(f), q = f - i, a = pts[i], c = pts[Math.min(i + 1, pts.length - 1)];
+      return [lerp(a[0], c[0], q), lerp(a[1], c[1], q)];
+    };
+    // Travel: one smooth glide that speeds up and settles, curving a little like a wrist, never a snap.
+    const penFly = (x, y) => {
+      pen.idle = null;
+      const [x0, y0] = pen.tip, d = Math.hypot(x - x0, y - y0);
+      if (d < 2) return Promise.resolve();
+      const dur = clamp(0.16 + d / 2600, 0.18, 0.5), c = [(x0 + x) / 2 - (y - y0) * 0.1, (y0 + y) / 2 + (x - x0) * 0.08];
+      return penTween(dur, (u) => { const e = penEase(u); pen.tip = [(1 - e) ** 2 * x0 + 2 * (1 - e) * e * c[0] + e * e * x, (1 - e) ** 2 * y0 + 2 * (1 - e) * e * c[1] + e * e * y]; });
+    };
+    const penRelease = () => { pen.held = false; pen.idle = null; for (const t of pen.tw) t.res(); pen.tw = []; if (m.drive === penDrive) m.drive = null; };
+    const penDrive = (dt) => {
+      const [ox, oy] = tipOff(), x = pen.tip[0] + ox, y = pen.tip[1] + oy;
+      if (dt > 0) { m.vx = (x - m.x) / dt; m.vy = (y - m.y) / dt; }
+      m.x = x; m.y = y; m.tx = x; m.ty = y; m.mode = 'rest'; m.rest = 1;
+    };
     const drive = (dt, env) => {
       const p = [env.mouse.x, env.mouse.y], S = bounds(), F = folRules();
       if (!fol.on) {
@@ -246,7 +280,7 @@
       const B = R.buddy;
       if (!B) return;
       if (B.onEvent !== onBuddy) B.onEvent = onBuddy;
-      const ok = B.available() && k.form === 'cursor' && k.presence === 'shown' && !!m.drive && !guide && !station.moving
+      const ok = B.available() && k.form === 'cursor' && k.presence === 'shown' && !!m.drive && !pen.held && !station.moving
         && !!self.quiet?.() && !!k.calmBody?.();
       nat.ok = ok ? nat.ok + dt : 0;
       if (!ok) {
@@ -278,7 +312,7 @@
     // A new request (talking, typing, summoning): come over to the cursor if it's somewhere else now.
     const comeToCursor = () => {
       const p = presence.ptr;
-      if (!p || !visible() || guide || m.dragging || m.flung) return;
+      if (!p || !visible() || pen.held || m.dragging || m.flung) return;
       if (station.byCursor && Math.hypot(p[0] - station.byCursor[0], p[1] - station.byCursor[1]) < k.R * 2.5) return;
       const [x, y] = besideCursor(fol.keep && fol.side < 0 ? 'left' : 'right');
       setStation(x, y, p.slice()); m.goTo(x, y);
@@ -949,6 +983,7 @@
         return k.appear(variant ?? entrance(), x, y);
       },
       hide: ({ instant = false, variant } = {}) => {
+        if (pen.held) penRelease();
         if (b) close(b);
         if (list.open) { list.open = false; list.closing = 0; }
         if (tool) tool.finish(true);
@@ -970,33 +1005,58 @@
         k.appear('drop', px, py);
         return api.say(text, { mood: 'happy', point: [reach, -1.75] });
       },
-      // Make (x, y) home and move there now, e.g. to restore where the user last left it.
-      // rect: [x, y, w, h] in overlay px. Resolves when the Sidekick has arrived and the step is showing.
-      point: ({ rect, say: text, step, of, label }) => {
-        ensureShown();
-        const [rx, ry, rw, rh] = rect, cx = rx + rw / 2, cy = ry + rh / 2, R0 = k.R, S = bounds();
-        // Stand beside the target on whichever side has room (prefer the right), a little below it,
-        // so the raised mitt reaches it and the speech bubble doesn't cover it.
-        const room = { right: S.r - (rx + rw), left: rx - S.l, below: S.b - (ry + rh), above: ry - S.t };
-        const side = room.right > R0 * 3.4 ? 'right' : room.left > R0 * 3.4 ? 'left' : room.below > R0 * 3.4 ? 'below' : 'above';
-        const off = R0 * 2.3;
-        let px = side === 'right' ? rx + rw + off : side === 'left' ? rx - off : cx;
-        let py = side === 'below' ? ry + rh + off : side === 'above' ? ry - off : cy + R0 * 0.6;
-        px = clamp(px, S.l + R0 * 1.6, S.r - R0 * 1.6); py = clamp(py, S.t + R0 * 1.8, S.b - R0 * 1.5);
-        // Hand target in body radii, pointing from the body toward the control's near edge.
-        const tx = clamp(cx, rx + 6, rx + rw - 6), ty = clamp(cy, ry + 6, ry + rh - 6);
-        let hx = (tx - px) / R0, hy = (ty - py) / R0;
-        const len = Math.hypot(hx, hy) || 1, reach = Math.min(len, 1.7);
-        hx = (hx / len) * reach; hy = (hy / len) * reach;
-        if (guide?.bubble) guide.bubble.end?.();
-        const g = { rect, tx, ty, hand: [hx, hy], px, py, text, step, of, label, started: now, arrived: false, done: deferred() };
-        guide = g;
-        setStation(px, py); m.goTo(px, py); station.moving = true; station.quietUntil = now + 30;
-        presence.summoned = true; presence.lastActive = now;
-        k.S('pip');
-        return g.done;
+      // The pen, for drawings (ink.js): take() turns it into its cursor and holds it; the tip then only moves where told
+      // (move: glide there; trace: draw along points at a hand's pace, onP(u) as it goes; tap: a little press; park:
+      // tap or circle on the spot while waiting); release() glides home and grows back to its own size.
+      pen: {
+        get held() { return pen.held; },
+        set speed(v) { pen.speed = clamp(v, 1, 3); },
+        get tip() { return pen.tip.slice(); },
+        get home() { return pen.home?.slice() ?? null; },
+        async take() {
+          ensureShown();
+          if (b) close(b);
+          k.stopAct?.();
+          // Coming on screen (it hides when idle): let it land first, so the tip starts where the body really is.
+          for (let i = 0; i < 40 && k.presence !== 'shown'; i++) await new Promise((r) => setTimeout(r, 50));
+          if (!pen.held) {
+            const [ox, oy] = tipOff();
+            pen.home = [station.x ?? m.x, station.y ?? m.y]; pen.tip = [m.x - ox, m.y - oy]; pen.held = true;
+            presence.summoned = true; fol.on = false; station.moving = station.rush = false; m.drive = penDrive;
+          }
+          if (k.form !== 'cursor') await k.morph?.('cursor');
+        },
+        move: (x, y) => penFly(x, y),
+        // Straight there this frame (it's dragging something: a card's corner, a part being moved).
+        set(x, y) { if (pen.held && !pen.tw.length) { pen.idle = null; pen.tip = [x, y]; } },
+        async trace(pts, dur, onP = () => {}) {
+          if (!pts?.length) return;
+          await penFly(pts[0][0], pts[0][1]); await penWait(0.03);
+          await penTween(dur, (u) => { const e = penSmooth(u); pen.tip = penAt(pts, e); onP(e); });
+          onP(1); await penWait(0.04);
+        },
+        async tap(x, y) { await penFly(x, y); k.S('pip'); await penTween(0.16, (u) => { pen.tip = [x, y + Math.sin(u * Math.PI) * 3]; }); },
+        // Drift just off a finished mark (down and right of it), so the cursor never covers it.
+        rest(x, y) { const [x0, y0] = pen.tip, tx = x + 16, ty = y + 14; return penTween(0.2, (u) => { const e = penEase(u); pen.tip = [lerp(x0, tx, e), lerp(y0, ty, e)]; }); },
+        park(kind, x, y) {
+          pen.idleAt = now;
+          pen.idle = kind === 'tap' ? (t) => [x, y + Math.max(0, Math.sin(t * 4.5)) * 3]
+            : kind === 'circle' ? (t) => [x + Math.cos(t * 2.4) * 6, y + Math.sin(t * 2.4) * 4] : null;
+        },
+        wait: (sec) => penWait(sec),
+        async release() {
+          if (!pen.held) return;
+          pen.idle = null;
+          const [hx, hy] = pen.home ?? [m.x, m.y], [ox, oy] = tipOff();
+          await penFly(hx - ox, hy - oy);
+          if (!pen.held) return;
+          penRelease();
+          api.place(hx, hy);
+          presence.lastActive = now;
+          if (k.userForm && k.userForm !== k.form) await k.morph?.(k.userForm);
+        },
       },
-      endGuide: () => { if (guide) { guide.bubble?.end?.(); guide = null; station.quietUntil = now + 1; } },
+      // Make (x, y) home and move there now, e.g. to restore where the user last left it.
       place: (x, y) => {
         setStation(x, y); m.x = x; m.y = y; m.vx = m.vy = 0; m.mode = 'rest'; m.rest = 1;
         station.moving = false; station.flee = 0; station.quietUntil = now + 1;
@@ -1118,7 +1178,9 @@
 
     const plugin = {
       api,
-      busy: () => !!(b || tool || (list.open && !list.closing)),
+      busy: () => !!(b || tool || pen.held || (list.open && !list.closing)),
+      // Held as the pen: clicks go through it to the app underneath (it may be parked right on the thing to click).
+      ghost: () => pen.held,
       // A bubble is up: emotes keep their gestures but drop icons and particles, so the text stays readable.
       calm: () => !!(b && !b.closing) || (list.open && !list.closing),
       hit: (x, y) => hitBubble(b, x, y) || hitList(x, y),
@@ -1189,22 +1251,21 @@
       ...plugin,
       update: (dt, env) => {
         now += dt; W = env.w; H = env.h; SAFE = env.safe ?? R.safe;
-        // Popping up beside the cursor keeps up with it too, so it never sits still while appearing.
-        const popping = k.presence === 'in' && station.byCursor && !guide && !m.dragging;
-        if (k.presence !== 'shown' && !popping && m.drive) { m.drive = null; fol.on = false; }
-        if (k.presence !== 'shown' && (nat.on || nat.ask)) { R.buddy?.hide(); nat.on = false; nat.ask = 0; m.native = false; }
-        if (guide) {
+        pen.reduced = !!env.reduced;
+        if (pen.held) {
           presence.lastActive = now;
-          const g = guide, d = Math.hypot(m.x - g.px, m.y - g.py);
-          if (!g.arrived && (d < k.R * 0.35 || now - g.started > 0.9)) {
-            g.arrived = true; g.arrivedAt = now;
-            m.x = g.px; m.y = g.py; m.vx = m.vy = 0;
-            k.S('ping'); k.sq.kick(6);
-            g.bubble = api.say(g.text, { mood: 'happy', point: g.hand });
-            setTimeout(() => g.done.resolve(), 400);
-          }
-          if (g.arrived && now - g.arrivedAt > 45) api.endGuide();
+          const tw = pen.tw[0];
+          if (tw) {
+            tw.t0 ??= now;
+            const u = clamp((now - tw.t0) / tw.dur, 0, 1);
+            tw.f(u);
+            if (u >= 1) { pen.tw.shift(); tw.res(); }
+          } else if (pen.idle) pen.tip = pen.idle(now - pen.idleAt);
         }
+        // Popping up beside the cursor keeps up with it too, so it never sits still while appearing.
+        const popping = k.presence === 'in' && station.byCursor && !pen.held && !m.dragging;
+        if (k.presence !== 'shown' && !popping && m.drive && !pen.held) { m.drive = null; fol.on = false; }
+        if (k.presence !== 'shown' && (nat.on || nat.ask)) { R.buddy?.hide(); nat.on = false; nat.ask = 0; m.native = false; }
         if (env.mouse?.active || presence.cursor == null) presence.cursor = [env.mouse?.x ?? W / 2, env.mouse?.y ?? H / 2];
         const mx = env.mouse?.x, my = env.mouse?.y;
         presence.ptr = mx != null && mx >= 0 && my >= 0 && mx <= W && my <= H ? [mx, my] : null;
@@ -1212,7 +1273,7 @@
         const onStage = stage();
         if (presence.auto) {
           const hover = env.mouse?.active && Math.hypot(env.mouse.x - m.x, env.mouse.y - m.y) < k.R * 1.5;
-          const busyNow = b || dying.length || tool || (list.open && !list.closing) || now < actUntil || m.dragging || m.flung || hover || k.presence === 'in' || R.panel?.working;
+          const busyNow = b || dying.length || tool || pen.held || (list.open && !list.closing) || now < actUntil || m.dragging || m.flung || hover || k.presence === 'in' || R.panel?.working;
           if (busyNow) presence.lastActive = now;
           const idleFor = presence.summoned ? presence.summonIdle : presence.idle;
           if (k.presence === 'shown' && now - presence.lastActive > idleFor) { presence.summoned = false; k.vanish(nextVariant()); }
@@ -1234,11 +1295,12 @@
           }
           station.held = held;
           // Popped up beside the cursor: it goes where the cursor goes (until it's dragged somewhere).
-          if (!held && !guide && station.byCursor && presence.ptr) { follow(env, dt); station.flee = 0; }
+          if (pen.held) { fol.on = false; m.drive = held ? null : penDrive; station.flee = 0; }
+          else if (!held && station.byCursor && presence.ptr) { follow(env, dt); station.flee = 0; }
           else { fol.on = false; m.drive = null; }
           nativeStep(dt, self);
-          // While pointing at a step, stay put: the user's cursor is supposed to come over here.
-          if (!held && env.mouse && !guide && !station.byCursor) {
+          // While drawing, stay put: the user's cursor is supposed to come over here.
+          if (!held && env.mouse && !pen.held && !station.byCursor) {
             const cx = env.mouse.x, cy = env.mouse.y, dBody = Math.hypot(cx - m.x, cy - m.y);
             // Pointing right at it or its bubble means "I want this"; hovering around it means "you're in my way".
             const onIt = dBody < m.radius * 1.1 || (b && hitBubble(b, cx, cy));
@@ -1306,8 +1368,8 @@
         for (const bb of dying) drawBubbleGrid(bb);
         if (b) drawBubbleGrid(b);
       },
-      // Drawing beyond the LED grid (a tool's screen effects, the guide's frame) needs the whole screen.
-      wide: () => !!tool || !!guide,
+      // Drawing beyond the LED grid (a tool's screen effects) needs the whole screen.
+      wide: () => !!tool,
       // The body is drawn snapped to its grid cell while it follows (10-dither.js): bubbles riding with it move too.
       shift: (dx, dy) => {
         for (const bb of [b, ...dying]) {
@@ -1318,50 +1380,9 @@
         }
       },
       // Nothing drawn outside the LED grid this frame, so the grid alone decides whether the picture changed.
-      quiet: () => !b && !dying.length && !tool && !guide && !list.open && !glyphParts.length,
+      quiet: () => !b && !dying.length && !tool && !list.open && !glyphParts.length,
       over: (ctx, env) => {
         if (!stage()) return;
-        if (guide?.arrived) {
-          const g = guide, [rx, ry, rw, rh] = g.rect, age = now - g.arrivedAt;
-          const pulse = 0.5 + 0.5 * Math.sin(age * 5), grow = Math.min(1, age / 0.25);
-          const pad = 5 + (1 - grow) * 14, x0 = rx - pad, y0 = ry - pad, w = rw + pad * 2, h = rh + pad * 2;
-          const P = k.P, col = (a) => css(PAL[L], a);
-          ctx.save();
-          // soft glow + stepped LED frame (pixel corners, like the rest of the app)
-          ctx.shadowColor = col(0.9); ctx.shadowBlur = 10 + pulse * 10;
-          ctx.strokeStyle = col(0.9); ctx.lineWidth = 2;
-          const c = Math.max(P * 2, 6);
-          ctx.beginPath();
-          ctx.moveTo(x0 + c, y0); ctx.lineTo(x0 + w - c, y0); ctx.lineTo(x0 + w - c, y0 + P); ctx.lineTo(x0 + w, y0 + P); ctx.lineTo(x0 + w, y0 + c);
-          ctx.lineTo(x0 + w, y0 + h - c); ctx.lineTo(x0 + w, y0 + h - P); ctx.lineTo(x0 + w - c, y0 + h - P); ctx.lineTo(x0 + w - c, y0 + h);
-          ctx.lineTo(x0 + c, y0 + h); ctx.lineTo(x0 + c, y0 + h - P); ctx.lineTo(x0, y0 + h - P); ctx.lineTo(x0, y0 + h - c);
-          ctx.lineTo(x0, y0 + c); ctx.lineTo(x0, y0 + P); ctx.lineTo(x0 + c, y0 + P); ctx.closePath();
-          ctx.stroke();
-          ctx.shadowBlur = 0;
-          ctx.fillStyle = col(0.08 + pulse * 0.06); ctx.fill();
-          // a ripple every 1.4 s, so the eye finds it
-          const rp = (age % 1.4) / 1.4;
-          if (rp < 0.7) { ctx.strokeStyle = col(0.5 * (1 - rp / 0.7)); ctx.lineWidth = 1.5; ctx.strokeRect(x0 - rp * 18, y0 - rp * 18, w + rp * 36, h + rp * 36); }
-          // marching LED dots from the mitt to the frame
-          const hx = m.x + g.hand[0] * k.R, hy = m.y + g.hand[1] * k.R;
-          const ex = clamp(hx, x0, x0 + w), ey = clamp(hy, y0, y0 + h), dist = Math.hypot(ex - hx, ey - hy);
-          if (dist > 14) {
-            const n = Math.floor(dist / 8), off = (age * 30) % 8;
-            for (let i = 1; i < n; i++) {
-              const u = (i * 8 + off) / dist; if (u >= 1) break;
-              ctx.fillStyle = col(0.35 + 0.5 * u); ctx.fillRect(Math.round(hx + (ex - hx) * u) - 1, Math.round(hy + (ey - hy) * u) - 1, 3, 3);
-            }
-          }
-          // step badge: "2/4" on a tag at the frame's top-left
-          if (g.step) {
-            const t = g.of ? `${g.step}/${g.of}` : String(g.step);
-            ctx.font = '700 12px "Martian Mono", ui-monospace, monospace';
-            const tw = ctx.measureText(t).width + 14, th = 20, bx = x0, by = y0 >= th + 6 ? y0 - th - 4 : y0 + h + 4;
-            ctx.fillStyle = col(1); ctx.fillRect(bx, by, tw, th);
-            ctx.fillStyle = css(PAL[0], 1); ctx.textBaseline = 'middle'; ctx.fillText(t, bx + 7, by + th / 2 + 0.5);
-          }
-          ctx.restore();
-        }
         if (tool) {
           ctx.save();
           if (b?.grid) {

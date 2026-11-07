@@ -7,8 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotMap, shotProblem, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isRiskyClick, isYes } from './safety.mjs';
-import { addCommitment, addFact, forgetFact, parseDue, updateCommitment } from './store.mjs';
+import { ASK, BLOCK, checkDrawAction, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isRiskyClick, isYes } from './safety.mjs';
+import { CARDS, DrawArgs, checkDraw, createParts, faviconFor, photoFor, pickTextMatch, resolveTargets } from './draw.mjs';
+import { plain } from './intro.mjs';
+import { addCommitment, forgetFact, parseDue, updateCommitment } from './store.mjs';
 
 const HOME = os.homedir();
 export const expand = (p) => path.resolve(String(p).replace(/^~(?=$|\/|\\)/, HOME));
@@ -23,12 +25,6 @@ const actionsOff = `File edits and commands are switched off. Tell the user to t
 // macOS "hands": the bundled helper that captures one window or area and reads/controls other apps.
 const HANDS = process.env.ROAMIES_HANDS || '';
 const STALE_ID = 'The page changed since read_window, so that id is out of date. Call read_window again and use the new ids.';
-// The text point_at should use: a whole label or heading (exact or word match), not the words buried in a
-// paragraph, which is what a guessed word like "version" or "settings" tends to hit.
-function pickTextMatch(matches, find) {
-  const q = String(find).trim();
-  return (matches ?? []).find((m) => m.match !== 'partial' && m.text.trim().length <= Math.max(40, q.length * 3)) ?? null;
-}
 // An app named in read_window or act_in_app that isn't open: open it (with the open tool's safety check) and wait
 // up to 6 s for its window. True when it's there. Only plain app names, never paths or links.
 async function launchApp(name, hands) {
@@ -51,7 +47,7 @@ function controlList(controls, texts = []) {
   const labels = new Set(controls.map((c) => c.label));
   const words = texts.filter((t) => !labels.has(t));
   return vis.map(line).join('\n')
-    + (off.length ? `\nFurther down (point_at or click_text scrolls to them): ${off.map((c) => `${c.id} "${c.label || c.role}"`).join(', ')}` : '')
+    + (off.length ? `\nFurther down (draw or click_text with their text scrolls to them): ${off.map((c) => `${c.id} "${c.label || c.role}"`).join(', ')}` : '')
     + (words.length ? `\nText on screen: ${words.join(' | ')}` : '');
 }
 // A safety verdict: blocked throws with the reason, otherwise returns the checked absolute path.
@@ -96,9 +92,8 @@ export function frontLine(f, who = 'The user') {
   return `- Right now ${who} is in ${f.app}${title}${url ? ` (${url})` : ''}. This was just checked and overrides any app or page from earlier messages; they can still ask about something elsewhere.`;
 }
 
-export function createTools({ allowActions, ui, ask, openUrl, onCommitments, showList, fmtWhen, commitmentsText, userName, onPlan = () => {} }) {
+export function createTools({ allowActions, ui, ask, openUrl, onCommitments, showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {} }) {
   let axNudged = 0;
-  const pointWaits = new Map(); // point_at call id → resolve, settled when the overlay has shown the step
   let lastShot = null; // how the latest screenshot's pixels map to screen points (see pointing.mjs)
   let lastRead = null; // { win, controls } from the latest read_window, to catch ids that went stale
   // Bumped for every new request: what was seen before it may be another page, tab or app by now.
@@ -160,7 +155,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       const bounds = res.window?.bounds ?? res.bounds;
       lastShot = size && bounds ? { ...shotMap(bounds, ...size), bounds, win: res.window?.id ?? null, turn } : null;
       const what = res.window ? `the ${res.window.app} window${res.window.title ? ` "${res.window.title}"` : ''}` : 'the whole screen';
-      const dims = size ? ` (${size[0]}×${size[1]} px; for point_at or click_at give x, y in this image's pixels)` : '';
+      const dims = size ? ` (${size[0]}×${size[1]} px; for draw or click_at give x, y in this image's pixels)` : '';
       return { content: [{ type: 'text', text: `Screenshot of ${what}${dims}.` }, await imageBlock(file, 'image/jpeg')] };
     } else if (process.platform === 'win32') {
       // DPI-aware (or scaled displays capture only the top-left part), shrunk to Claude's 1568 px cap, and the
@@ -176,10 +171,17 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         '$o=New-Object System.Drawing.Bitmap ([int]($b.Width*$s)),([int]($b.Height*$s))',
         "$g=[System.Drawing.Graphics]::FromImage($o);$g.InterpolationMode='HighQualityBicubic';$g.DrawImage($i,0,0,$o.Width,$o.Height)",
         '$o.Save($env:ROAMIES_SHOT,[System.Drawing.Imaging.ImageFormat]::Jpeg)',
+        // Physical size, the image size and the screen's scale, so draw can turn its pixels into overlay points.
+        "Write-Output ('{0} {1} {2} {3} {4}' -f $b.Width,$b.Height,$o.Width,$o.Height,([System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero).DpiX/96))",
       ].join(';');
       // -EncodedCommand (UTF-16LE base64): no quoting for Windows' command line to mangle.
       const r = await run('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(ps, 'utf16le').toString('base64')], { env: { ...process.env, ROAMIES_SHOT: file } });
       if (r.err) throw new Error('Screen capture failed.');
+      const [pw, ph, iw, ih, sc] = r.stdout.trim().split(/\s+/).map(Number);
+      lastShot = pw && iw && sc ? { ...shotMap([0, 0, pw / sc, ph / sc], iw, ih), bounds: [0, 0, pw / sc, ph / sc], win: null, turn } : null;
+      const data = (await fs.readFile(file)).toString('base64');
+      fs.unlink(file).catch(() => {});
+      return { content: [{ type: 'text', text: `Screenshot of the main display${iw ? ` (${iw}×${ih} px; for draw give x, y in this image's pixels)` : ''}.` }, { type: 'image', mediaType: 'image/jpeg', data }] };
     } else {
       let r = await run('grim', [file]);
       if (r.err) r = await run('gnome-screenshot', ['-f', file]);
@@ -189,6 +191,211 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     fs.unlink(file).catch(() => {});
     return { content: [{ type: 'text', text: 'Screenshot of the main display.' }, { type: 'image', mediaType: 'image/jpeg', data }] };
   }
+
+  // ---------- drawing on screen (the draw tool) ----------
+  // The overlay plays a drawing a beat at a time; each beat's places are looked up just before it's sent, so a
+  // walkthrough's next step is found on the screen as it is after the click. A drawing stays until it's cleared or the
+  // screen changes: a new drawing in a later request replaces it (unless it edits it), the front window switching,
+  // moving or closing clears it, and Esc or Clear all on screen does. Screen marks also go at the end of a request that
+  // drew nothing (they were about the screen as it was). Parts (p1 …) stay editable meanwhile.
+  const parts = createParts();
+  const buttons = new Map(); // part id → the button's action, for when it's clicked
+  const ink = { waits: new Map(), turn: -1, active: 0, front: '', watch: null };
+  const inkWait = (key, ms, signal) => new Promise((resolve) => {
+    const done = (v) => { clearTimeout(t); signal?.removeEventListener('abort', stop); ink.waits.delete(key); resolve(v); };
+    const t = setTimeout(() => done('timeout'), ms), stop = () => done('stopped');
+    signal?.addEventListener('abort', stop, { once: true });
+    ink.waits.set(key, done);
+  });
+  const clearScreenInk = (stop = false) => { parts.clearScreen(); for (const id of buttons.keys()) if (!parts.has(id)) buttons.delete(id); ui({ kind: 'agent', e: { type: 'ink_clear', screen: true, stop } }); };
+  const clearAllInk = () => { parts.clear(); buttons.clear(); ui({ kind: 'agent', e: { type: 'ink_clear' } }); };
+  // The window a drawing belongs to: the front window's id and place. Its title isn't part of it (a page updating
+  // its title, a document being edited, isn't the screen changing).
+  const frontKey = async () => {
+    if (!HANDS) return '';
+    const r = await run(HANDS, ['locate', 'front'], { timeout: 900 });
+    try { const w = JSON.parse(r.stdout.trim().split('\n').pop() || '{}').window; return w ? `${w.id}|${(w.bounds ?? []).map((v) => Math.round(v / 4)).join(',')}` : ''; } catch { return ''; }
+  };
+  // When another window comes to the front, or that window moves or closes, the drawing no longer sits on what it
+  // was about: all of it fades (cards too).
+  function watchStale() {
+    if (!HANDS || ink.watch) return;
+    ink.watch = setInterval(async () => {
+      if (ink.active) return;
+      if (!parts.ids.length) { clearInterval(ink.watch); ink.watch = null; return; }
+      const k = await frontKey();
+      if (k && ink.front && k !== ink.front) { parts.clear(); buttons.clear(); ui({ kind: 'agent', e: { type: 'ink_stale' } }); }
+    }, 1500);
+    ink.watch.unref?.();
+  }
+  // Copied text goes to the clipboard through stdin, so nothing in it is ever parsed as a command.
+  const toClipboard = (text) => new Promise((res) => {
+    const [cmd, args] = process.platform === 'darwin' ? ['pbcopy', []] : process.platform === 'win32' ? ['powershell', ['-NoProfile', '-NonInteractive', '-Command', '$input | Set-Clipboard']] : ['xclip', ['-selection', 'clipboard']];
+    const p = execFile(cmd, args, { timeout: 5000, windowsHide: true }, (err) => res(!err));
+    p.stdin?.end(String(text));
+  });
+  // How each kind of place is found. retry: just after a click, when a menu or dialog may still be opening.
+  function lookups(spec, retry) {
+    let live = null, shotOk = null;
+    // The same words marked twice in a segment (a ring and a connect to it): one helper round trip.
+    const seen = new Map();
+    return {
+      text(find) {
+        const k = String(find).trim().toLowerCase();
+        if (!seen.has(k)) seen.set(k, this.findText(find));
+        return seen.get(k);
+      },
+      async findText(find) {
+        if (!HANDS) throw new Error('Finding words on screen is Mac only; take a screenshot and give x, y instead.');
+        for (let k = 0; ; k++) {
+          // "front" searches every window of the front app; text is often in a window behind the frontmost one.
+          const res = await hands('find-text', spec, find, 'scroll').catch((e) => (k < (retry ? 4 : 0) ? { matches: [] } : Promise.reject(e)));
+          const m = pickTextMatch(res.matches, find);
+          if (m) return m;
+          if (k >= (retry ? 4 : 0)) {
+            const near = (res.matches ?? []).slice(0, 3).map((x) => `"${x.text.replace(/\s+/g, ' ').slice(0, 50)}"`).join(', ');
+            throw new Error(`No button, label or heading reads "${find}"${near ? ` (it only appears inside longer text: ${near})` : ''}. Use the exact words shown on screen; if you don't know them, take a screenshot first.`);
+          }
+          await new Promise((r) => setTimeout(r, 400));
+        }
+      },
+      async id(n) {
+        if (!HANDS) throw new Error('read_window ids are Mac only; give x, y from a screenshot instead.');
+        live ??= await liveControls(spec);
+        const c = live(n);
+        if (c.offscreen) throw new Error(`"${c.label || c.role}" is further down the page. Use its text instead; that scrolls to it.`);
+        return c;
+      },
+      // The screenshot is checked once per segment (not for every point of a traced outline).
+      async pixel(x, y) {
+        if (!shotOk) {
+          const problem = shotProblem(lastShot, turn);
+          if (problem) throw new Error(problem);
+          if (lastShot.win != null) {
+            const now = await hands('locate', `window:${lastShot.win}`).catch(() => null);
+            if (!sameBounds(now?.window?.bounds, lastShot.bounds)) throw new Error('That window moved or closed since the screenshot. Take a new screenshot first.');
+          }
+          shotOk = true;
+        }
+        const [w, h] = lastShot.size ?? [];
+        if (w && h && (x < -2 || y < -2 || x > w + 2 || y > h + 2)) throw new Error(`${Math.round(x)}, ${Math.round(y)} is outside the screenshot (${w}×${h} px).`);
+        return toScreen(lastShot, x, y);
+      },
+    };
+  }
+  // Fills in what cards fetch (photos, favicons) and does the actions, all checked by safety.mjs first.
+  async function prepare(beats, t, notes) {
+    const marks = beats.flatMap((b) => b.marks);
+    // Safety first, before any fetching or acting.
+    for (const m of marks) {
+      if (m.kind === 'button' || m.action || m.kind === 'open' || m.kind === 'copy' || m.kind === 'type' || m.kind === 'handoff') {
+        // Anything with a button (a ticket too) is checked as a button.
+        const v = checkDrawAction({ kind: m.action ? 'button' : m.kind, url: m.url, text: m.text, action: m.action }, { allowActions: allowActions() });
+        if (v.level === BLOCK) throw new Error(`Blocked for safety: ${v.reason}`);
+      }
+    }
+    // Pictures and favicons are fetched all at once (each is a network round trip).
+    await Promise.all(marks.map(async (m) => {
+      if (m.kind === 'photo') {
+        try { Object.assign(m, await photoFor({ query: m.query, url: m.url })); } catch (e) { m.missing = true; notes.push(`No photo for ${m.query ?? 'that link'} (${e.message}); drew its frame and caption only.`); }
+      } else if (m.kind === 'sources' || m.sources?.length) {
+        m.sources = await Promise.all(m.sources.map(async (x) => ({ ...x, icon: checkDrawAction({ kind: 'favicon', url: x.url }).level === BLOCK ? null : await faviconFor(x.url).catch(() => null) })));
+      }
+    }));
+    for (const b of beats) for (const m of b.marks) {
+      if (m.kind === 'copy') { if (!(await toClipboard(m.text))) notes.push("Couldn't copy to the clipboard."); }
+      else if (m.kind === 'open') { await tools.find((x) => x.name === 'open').execute({ target: m.url }); }
+      else if (m.kind === 'handoff') onHandoff(m.task || m.text || m.label || 'a task');
+      else if (m.kind === 'type') {
+        if (!HANDS) throw new Error('Typing into apps is Mac only.');
+        const src = m.at.src, app = t === 'front' || t === 'screen' ? {} : { app: t };
+        const steps = src.text != null ? [{ do: 'fill', field: src.text, text: m.text }]
+          : src.id != null ? [{ do: 'click', id: m.at.live }, { do: 'type', text: m.text }]
+            : [{ do: 'click_at', x: m.at.rect[0] + m.at.rect[2] / 2, y: m.at.rect[1] + m.at.rect[3] / 2, global: true }, { do: 'type', text: m.text }];
+        await hands('act', JSON.stringify({ steps, ...app }));
+        if (lastShot) lastShot.used = true;
+      }
+    }
+  }
+  // opts.fade: seconds after it finishes that the drawing goes by itself (the welcome tour).
+  async function draw(args, ctx, opts = {}) {
+    const problems = checkDraw(args);
+    if (problems.length) throw new Error(problems.join('\n'));
+    const t = String(args.target || 'front'), spec = t === 'front' ? 'front' : t === 'screen' ? 'screen' : `app:${t}`;
+    const id = ctx.toolCallId, beats = args.beats ?? [], edits = args.edit ?? [], notes = [], said = [];
+    for (const e of edits) if (e.do !== 'clear' && !parts.has(e.part)) throw new Error(`There's no ${e.part} on screen now${parts.ids.length ? ` (there is: ${parts.describe()})` : ' (nothing is drawn)'}. Draw it again instead.`);
+    // A new drawing in a later request replaces the old one (cards too), unless it's editing what's there.
+    if (ink.turn !== turn && !edits.length && parts.ids.length) clearAllInk();
+    ink.turn = turn;
+    for (const e of edits) if (e.do === 'erase') parts.remove(e.part); else if (e.do === 'clear') parts.clear();
+    // One segment per beat: each is sent as soon as its places are found, so the first marks draw while the rest
+    // are still being looked up (each lookup is a helper round trip). after: it comes after a click or hover.
+    const segs = beats.map((b, i) => ({ from: i, to: i + 1, after: i > 0 && !!beats[i - 1].wait }));
+    if (!segs.length) segs.push({ from: 0, to: 0 });
+    const drawn = [];
+    // Where there's room for cards: the screen minus the front window; and what's on it, so names avoid covering words.
+    const hasCards = beats.some((b) => b.marks.some((m) => CARDS.includes(m.kind)));
+    const win = hasCards && HANDS ? (await hands('locate', 'front').catch(() => null))?.window?.bounds ?? null : null;
+    const busy = lastRead?.turn === turn ? lastRead.controls.filter((c) => !c.offscreen && c.bounds).slice(0, 300).map((c) => c.bounds) : [];
+    ink.active++;
+    // Lookups are shared until a click or hover (then the screen may have changed, and words are retried a moment).
+    let look = null;
+    try {
+      for (const [k, sg] of segs.entries()) {
+        let seg;
+        try {
+          if (!look || sg.after) look = lookups(spec, sg.after);
+          seg = await resolveTargets(beats.slice(sg.from, sg.to), look);
+          // Typing needs the original place (its words or id) to act on; resolveTargets keeps it.
+          seg.forEach((b, j) => b.marks.forEach((m, n) => { if (m.at) m.at.src = beats[sg.from + j].marks[n].at; }));
+          await prepare(seg, t, notes);
+        } catch (e) {
+          if (!k) throw e;
+          notes.push(`Stopped before beat ${sg.from + 1}: ${e.message}`);
+          break;
+        }
+        drawn.push(...parts.assign(seg));
+        for (const b of seg) for (const m of b.marks) if (m.action && m.part) buttons.set(m.part, m.action);
+        const out = seg.map((b, j) => ({ ...b, n: sg.from + j + 1, caption: plain(b.say), voiced: !!speak(b.say) }));
+        said.push(...out.map((b) => b.caption));
+        ui({ kind: 'agent', e: { type: 'draw', id, seg: k, beats: out, edits: k ? [] : edits, last: k === segs.length - 1, win, busy: k ? [] : busy, ...(opts.fade ? { fade: opts.fade } : {}) } });
+        // The first beat must show; later ones queue behind it on the overlay without holding this up.
+        if (!k) {
+          const started = await inkWait(`${id}:start:0`, 15_000, ctx?.signal);
+          if (started === 'stopped') return 'Stopped.';
+          if (started === 'timeout') throw new Error("The drawing didn't show (the overlay isn't responding).");
+        }
+        const w = out.at(-1)?.wait;
+        if (!w) continue;
+        const n = out.at(-1).n, r = await inkWait(`${id}:wait:${n}`, w === 'click' ? 120_000 : 60_000, ctx?.signal);
+        if (r === 'stopped') return 'Stopped.';
+        notes.push(`Beat ${n}: ${r === 'timeout' ? `no ${w} within ${w === 'click' ? 2 : 1} minute${w === 'click' ? 's' : ''}, so I stopped there` : `${userName} ${r}`}.`);
+        if (r === 'timeout') break;
+        // They clicked: the screen has changed under the old screenshot.
+        if (lastShot) lastShot.used = true;
+        await new Promise((res) => setTimeout(res, 350));
+      }
+    } finally { ink.active--; }
+    if (parts.ids.length) { ink.front = await frontKey(); watchStale(); }
+    const list = parts.describe(drawn);
+    return [drawn.length ? `Drew ${list}.` : edits.length ? 'Edited the drawing.' : 'Done.', ...notes, edits.length || drawn.length ? `On screen now: ${parts.describe() || 'nothing'}.` : ''].filter(Boolean).join(' ');
+  }
+  // From the overlay: a segment started drawing, a wait ended, a card was closed, a button was clicked.
+  const inkEvents = {
+    started: (id, seg) => ink.waits.get(`${id}:start:${seg}`)?.('started'),
+    waitDone: (id, beat, result) => ink.waits.get(`${id}:wait:${beat}`)?.(['clicked', 'hovered', 'skipped'].includes(result) ? result : 'skipped'),
+    closed: (part) => { parts.remove(String(part)); buttons.delete(String(part)); },
+    button: (part) => buttons.get(String(part)) ?? null,
+    // A request ended: if it drew nothing, the marks from before it are done with.
+    endRequest: () => { if (ink.turn !== turn && parts.screenCount) clearScreenInk(); },
+    stop: () => { for (const done of [...ink.waits.values()]) done('stopped'); if (parts.screenCount) clearScreenInk(true); },
+    // The user sent the whole drawing away (Esc): nothing is on screen any more.
+    cleared: () => { for (const done of [...ink.waits.values()]) done('stopped'); parts.clear(); buttons.clear(); },
+    describe: () => parts.describe(),
+    copy: (text) => toClipboard(text),
+    // A drawing the app makes itself (the welcome tour): the same checks and overlay as one from the model.
+    show: (beats, id, opts) => draw({ beats }, { toolCallId: id }, opts),
+  };
 
   const tools = [
     {
@@ -207,7 +414,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       },
       {
         name: 'read_window',
-        description: "List the buttons, links, fields, checkboxes and other controls in an app's front window (id, role, label, value), plus the text on screen and the text scrolled out of view above and below it, so you can read a whole page without scrolling or a screenshot. Needed before act_in_app steps that use ids. To point at or click something by its visible words you don't need this: use point_at or click_text with text. target: 'front', an app name, or 'browser'.",
+        description: "List the buttons, links, fields, checkboxes and other controls in an app's front window (id, role, label, value), plus the text on screen and the text scrolled out of view above and below it, so you can read a whole page without scrolling or a screenshot. Needed before act_in_app steps that use ids. To mark or click something by its visible words you don't need this: use draw or click_text with text. target: 'front', an app name, or 'browser'.",
         parameters: z.object({ target: z.string().optional() }),
         execute: async ({ target = 'front' }) => {
           const t = String(target || 'front');
@@ -218,62 +425,14 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
           });
           lastRead = { win: res.window.id, app: res.window.app, controls: res.controls, turn };
           const others = (all?.windows ?? []).filter((w) => w.app === res.window.app && w.id !== res.window.id).length;
-          const head = `${res.window.app}${res.window.title ? ` — ${res.window.title}` : ''}${others ? ` (front window; ${res.window.app} has ${others} more, which point_at with text also searches)` : ''}`;
+          const head = `${res.window.app}${res.window.title ? ` — ${res.window.title}` : ''}${others ? ` (front window; ${res.window.app} has ${others} more, which draw with text also searches)` : ''}`;
           if (!res.controls.length) return `${head}\n${res.note}`;
           return `${head}\n${controlList(res.controls, res.texts)}${res.elsewhere?.length ? `\nElsewhere on the page (scrolled out of view): ${res.elsewhere.join(' | ')}` : ''}`;
         },
       },
       {
-        name: 'point_at',
-        description: "Teach by showing: fly to something on screen and point at it while you explain one step. Use it to walk the user through how to do something (e.g. 'how do I add a layer mask'), one point_at per step, in order, with a short instruction each (under 12 words). Three ways to say where, best first: text, the exact words shown on screen (button and link labels, headings, version numbers, menu names; searches every window of the target app, or the whole screen with target 'screen', so no read_window is needed first); id from read_window, for controls without visible words; or x, y pixels from your latest screenshot, only when neither finds it. Set click true only if the user asked you to do it for them; otherwise just point and let them click. wait_for_user true pauses until they do the step (or 20 s), for multi-step lessons.",
-        parameters: z.object({
-          target: z.string().optional(),
-          id: z.number().int().optional(), text: z.string().min(1).max(80).optional(), x: z.number().optional(), y: z.number().optional(),
-          say: z.string().min(1).max(120),
-          step: z.number().int().optional(), of: z.number().int().optional(),
-          click: z.boolean().optional(), wait_for_user: z.boolean().optional(),
-        }),
-        executionMode: 'sequential',
-        execute: async ({ target = 'front', id, text: find, x, y, say: text, step, of: total, click, wait_for_user }, ctx) => {
-          const t = String(target || 'front'), spec = t === 'front' ? 'front' : t === 'screen' ? 'screen' : `app:${t}`;
-          let rect, label = '', at, liveId;
-          if (id != null) {
-            const c = (await liveControls(spec))(id);
-            if (c.offscreen) throw new Error(`"${c.label || c.role}" is further down the page. Use point_at with its text instead; that scrolls to it.`);
-            rect = c.bounds; label = c.label || c.role; liveId = c.id;
-          } else if (find) {
-            // "front" searches every window of the front app; text is often in a window behind the frontmost one.
-            const res = await hands('find-text', spec, find, 'scroll');
-            const m = pickTextMatch(res.matches, find);
-            if (!m) {
-              const near = (res.matches ?? []).slice(0, 3).map((x) => `"${x.text.replace(/\s+/g, ' ').slice(0, 50)}"`).join(', ');
-              throw new Error(`No button, label or heading reads "${find}"${near ? ` (it only appears inside longer text: ${near})` : ''}. Point at the exact words shown on screen; if you don't know them, take a screenshot first.`);
-            }
-            rect = m.bounds; label = m.text;
-            if (click) at = [rect[0] + rect[2] / 2, rect[1] + rect[3] / 2];
-          } else if (x != null && y != null) {
-            at = await shotPoint(x, y);
-            rect = [at[0] - 14, at[1] - 14, 28, 28];
-          } else throw new Error('Give an id from read_window, text shown on screen, or x and y from a screenshot.');
-          // The overlay flies there, points, shows the step and holds; this tool resolves once it's on screen.
-          const done = new Promise((resolve) => pointWaits.set(ctx.toolCallId, resolve));
-          ui({ kind: 'agent', e: { type: 'point', id: ctx.toolCallId, rect, say: text, step, of: total, label } });
-          await done;
-          if (click) {
-            if (!allowActions()) throw new Error(actionsOff);
-            if (id != null) await hands('act', JSON.stringify({ steps: [{ do: 'click', id: liveId }], ...(t === 'front' ? {} : { app: t }) }));
-            else await hands('act', JSON.stringify({ steps: [{ do: 'click_at', x: at[0], y: at[1], global: true }], ...(t === 'front' || t === 'screen' ? {} : { app: t }) }));
-            if (lastShot) lastShot.used = true;
-          } else if (wait_for_user) {
-            // Give them time to do it themselves before the next step.
-            await new Promise((r) => setTimeout(r, 6000));
-          }
-          return `Pointed at ${label || 'the spot'}${click ? ' and clicked it' : ''}.`;
-        },
-      },
-      {
         name: 'act_in_app',
-        description: "Do things in another app for the user: click, fill in forms, pick from dropdowns and date pickers, scroll, press keys. Steps run in order; put a whole task in one call. {do:'click_text', text} clicks a link, button or tab by its visible words (no read_window needed). {do:'fill', field, text} fills one text field: field is its label or placeholder as shown (or id), it replaces the text and checks it took; use one fill per field, never click a label and type. {do:'choose', field, option} picks an option in a dropdown, select menu, type-to-search box or picker: it opens it, types or scrolls through the list (hundreds of options, even lists that only load rows as they scroll) and picks; field is its label or id. Never scroll a dropdown list yourself. To go to a web address, use the open tool (instant), not the address bar. Many identical buttons or fields (a Reply under every post): add near, words from that item (author or first words of the post), to click_text or fill and it uses the one belonging to that item, scrolling to it. {do:'scroll', direction:'down'|'up'|'left'|'right', amount, text or id} scrolls the page, or the list or panel under that text or control; needed only for content that loads as you scroll: {do:'scroll', direction:'down', to_end:true} keeps going until the feed stops loading more, in one step; then read_window lists everything that loaded. Things already on the page don't need scrolling: click_text, fill and point_at find them anywhere on it and scroll there themselves. {do:'click', id}; {do:'key', key} e.g. 'return', 'tab', 'escape'; {do:'type', text} only when the cursor is already in a text field; {do:'click_at', x, y} pixels in your latest screenshot, last resort; {do:'wait', seconds}. Dates: fill the date field with the date as the page shows dates (e.g. 10/30/2026); if a calendar opens instead, choose the month and year, then click_text the day (its label often reads like 'Choose Friday, October 30th, 2026'). After the steps the result lists the window's controls and text as they are now (after scrolls too), with fresh ids and field values, so check them there instead of calling read_window again. Never submit payments, send messages or delete things unless the user clearly asked for exactly that; showing or pointing at a button is not a request to click it. Clicks on delete, pay, send or sign-out buttons always ask the user first, so when they asked you to click one, call act_in_app right away instead of asking in your reply; the app asks them.",
+        description: "Do things in another app for the user: click, fill in forms, pick from dropdowns and date pickers, scroll, press keys. Steps run in order; put a whole task in one call. {do:'click_text', text} clicks a link, button or tab by its visible words (no read_window needed). {do:'fill', field, text} fills one text field: field is its label or placeholder as shown (or id), it replaces the text and checks it took; use one fill per field, never click a label and type. {do:'choose', field, option} picks an option in a dropdown, select menu, type-to-search box or picker: it opens it, types or scrolls through the list (hundreds of options, even lists that only load rows as they scroll) and picks; field is its label or id. Never scroll a dropdown list yourself. To go to a web address, use the open tool (instant), not the address bar. Many identical buttons or fields (a Reply under every post): add near, words from that item (author or first words of the post), to click_text or fill and it uses the one belonging to that item, scrolling to it. {do:'scroll', direction:'down'|'up'|'left'|'right', amount, text or id} scrolls the page, or the list or panel under that text or control; needed only for content that loads as you scroll: {do:'scroll', direction:'down', to_end:true} keeps going until the feed stops loading more, in one step; then read_window lists everything that loaded. Things already on the page don't need scrolling: click_text, fill and draw find them anywhere on it and scroll there themselves. {do:'click', id}; {do:'key', key} e.g. 'return', 'tab', 'escape'; {do:'type', text} only when the cursor is already in a text field; {do:'click_at', x, y} pixels in your latest screenshot, last resort; {do:'wait', seconds}. Dates: fill the date field with the date as the page shows dates (e.g. 10/30/2026); if a calendar opens instead, choose the month and year, then click_text the day (its label often reads like 'Choose Friday, October 30th, 2026'). After the steps the result lists the window's controls and text as they are now (after scrolls too), with fresh ids and field values, so check them there instead of calling read_window again. Never submit payments, send messages or delete things unless the user clearly asked for exactly that; showing or pointing at a button is not a request to click it. Clicks on delete, pay, send or sign-out buttons always ask the user first, so when they asked you to click one, call act_in_app right away instead of asking in your reply; the app asks them.",
         parameters: z.object({
           target: z.string().optional(),
           steps: z.array(z.object({
@@ -349,6 +508,19 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         },
       },
     ] : []),
+    {
+      name: 'draw',
+      description: `Draw on the user's screen while you talk. Your Roamie turns into its cursor and draws with its tip, each beat's marks paced to its spoken line (also shown as a caption). One call holds a whole explanation or walkthrough.
+beats: [{say, marks, wait?}]. say: one short line, under 20 words, spoken while that beat's marks draw (don't repeat it in your reply). Keep 1 to 4 marks per beat, in the order you mention them.
+Places (at, to, tie), best first: {text: the exact words shown on screen} (exact bounds, scrolls to it; target 'screen' searches every app); {id} from read_window, for controls without words; {x, y, w, h} pixels in your latest screenshot, for icons and areas without words (give w and h, the thing's whole box, so the loop fits it).
+Which mark: one control they should click: target (with wait 'click' in a walkthrough); one thing to notice: ring (follows its shape; r sets the corner radius); a small spot or icon: point; a region or panel: frame; key words: underline (outdated ones: strike); right or wrong: check, cross; order of steps: num; a name beside something: label (text) or label on any mark; how two things relate: connect (at → to); an odd-shaped group: trace (points); scroll here: scroll (dir); one thing above all else: spotlight (sparingly); something to hover: hover with wait 'hover'; big words: write (text, size).
+Walkthroughs ("how do I…"): one beat per step, each a target on that step's control with label and wait 'click'; the next step is found after they click, on the screen as it is then.
+Explanations that a picture makes clearer go on cards beside the window (tie connects a card to what it explains): card (title, heading, text, items, sources), note (text, tone), list (title, items), clip (title, text), sources ([{name, url}]), photo (query: a thing with a Wikipedia page, or url; text = caption), graph (x_range, y_range, plots [{points, tone, label}], dots [{x, y, label}]) for numbers, timeline (events [{when, text}]) for dates, legend (keys [{tone, text}]), molecule (smiles, label) for chemistry, model (parts [{shape: box|sphere|cylinder|cone|torus, at [x,y,z], size [x,y,z], rot [deg x,y,z], tone, label}] within about -1 to 1, title) for objects and machines.
+Actions: type (text into the field at; needs actions allowed), copy (text to the clipboard), open (url), handoff (task), button (text + action {do: ask|open|copy, value}: a likely next step they can click), emote (name: hype, wave, upset, remind, motivate), sfx (name). tone: accent, teal, amber, coral, lilac, sky, lime, red, white.
+A drawing stays until the user clears it or the window changes; your next drawing replaces it. Every drawn piece gets an id (p1, p2 …) in the result. To change what's drawn ("make that red", "move it left", "never mind"): edit [{do: recolor|move|erase|clear, part, tone, dx, dy}] with no beats. Up to 12 beats, 40 marks each.`,
+      parameters: DrawArgs, executionMode: 'sequential', timeoutMs: 30 * 60_000,
+      execute: draw,
+    },
     {
       name: 'read_file', description: 'Read a text file. Paths may start with ~. Files with passwords or keys (.ssh, .env, auth.json, keychains) are off limits.',
       parameters: z.object({ path: z.string() }),
@@ -475,13 +647,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       },
     },
     {
-      name: 'remember_fact',
-      description: `Save a lasting fact about ${userName} worth knowing in every future conversation: preferences, their projects, channels and tools, people they mention, how they like to work. Not passing small talk, and not commitments (those go to remember_commitment). One short fact per call.`,
-      parameters: z.object({ fact: z.string().min(3).max(240) }),
-      execute: async ({ fact }) => { const f = await addFact(fact); return `Remembered (${f.id}).`; },
-    },
-    {
-      name: 'forget_fact', description: 'Delete a saved fact that is wrong or that the user asks you to forget. Ids are in the memory list in your instructions.',
+      name: 'forget_fact', description: 'Delete a saved fact that is wrong or that the user asks you to forget. Ids are in the memory section of the <live-state> block.',
       parameters: z.object({ id: z.string() }),
       execute: async ({ id }) => { const f = await forgetFact(id); if (!f) throw new Error(`No fact with id ${id}.`); return `Forgot: ${f.text}`; },
     },
@@ -514,5 +680,5 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     const r = await run(HANDS, ['front'], { timeout: 900 });
     try { return frontLine(JSON.parse(r.stdout.trim().split('\n').pop() || '{}'), userName); } catch { return ''; }
   }
-  return { tools, hands, whereNow, pointWaits, nextTurn: () => ++turn };
+  return { tools, hands, whereNow, ink: inkEvents, nextTurn: () => ++turn };
 }

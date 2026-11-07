@@ -31,7 +31,7 @@ voice, keeps track of what you said you'd do and nudges you when it's due.
 - **It remembers.** What you said you'd do, reminders down to the second, and what matters to you.
 - **It sees and points.** Reads any window and points at exactly where to click.
 - **It does the clicking.** Opens apps, sites and files, and clicks or types in other apps for you.
-- **Your subscriptions.** Claude, ChatGPT, Gemini, Grok, Kimi or API keys.
+- **Your subscriptions.** Sign in with Claude or ChatGPT, or use an API key (Gemini, Grok, Kimi Code and more).
 
 | Pick your Roamie | What you get                                            |
 | ---------------- | ------------------------------------------------------- |

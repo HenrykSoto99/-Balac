@@ -361,7 +361,7 @@
       }));
       $('key-providers').replaceChildren(...(state?.apikey ?? []).map((p) => {
         const busy = ai.keyBusy === p.id;
-        // One line each, so ten fit with the key field under them: the light says Connected (and the field's label).
+        // One line each, so fourteen fit with the key field under them: the light says Connected (and the field's label).
         const b = el('button', { className: `px prov${p.connected ? ' on' : ''}${busy ? ' busy' : ''}`, type: 'button', title: p.connected ? `${p.name}: connected` : '' },
           el('span', { textContent: p.name }), led(p.connected ? 'on' : busy ? 'busy' : ''));
         b.setAttribute('aria-label', `${p.name}${busy ? ', checking the key' : p.connected ? ', connected' : ''}`);
@@ -1103,8 +1103,9 @@
       replies: q.get('replies') === 'voice' ? 'voice' : 'text', fishKey: q.get('fish') === '1',
       keys: q.get('platform') === 'win32' ? { talk: ['control', 'option'], summon: 'Control+Shift+KeyS', snap: 'Control+Shift+KeyA' } : { talk: ['control', 'option'], summon: 'Control+Alt+KeyS', snap: 'Control+Alt+KeyA' }, connected: null,
       voiceModel: win ? { status: q.get('model') || 'missing', done: q.get('model') === 'downloading' ? 281601575 : 0, total: 670479942, error: q.get('model') === 'error' ? 'Download failed. Check your internet.' : null, size: '670 MB' } : null,
-      oauth: [['anthropic', 'Claude', 'Anthropic'], ['openai', 'ChatGPT', 'OpenAI'], ['moonshot', 'Kimi', 'Moonshot'], ['xai', 'Grok', 'xAI']].map(([id, name, company]) => ({ id, name, company, connected: false })),
-      apikey: [['anthropic', 'Anthropic'], ['xai', 'xAI'], ['moonshot', 'Moonshot'], ['glm', 'Z.AI'], ['minimax', 'MiniMax'], ['xiaomi', 'Xiaomi MiMo'], ['deepseek', 'DeepSeek'], ['sakana', 'Sakana'], ['openrouter', 'OpenRouter'], ['huggingface', 'Hugging Face']]
+      oauth: [['anthropic', 'Claude', 'Anthropic'], ['openai', 'ChatGPT', 'OpenAI']].map(([id, name, company]) => ({ id, name, company, connected: false })),
+      apikey: [['anthropic', 'Anthropic'], ['openai', 'OpenAI'], ['gemini', 'Gemini'], ['xai', 'xAI'], ['kimi-code', 'Kimi Code'], ['moonshot', 'Moonshot'], ['glm', 'Z.AI'], ['minimax', 'MiniMax'],
+        ['xiaomi', 'MiMo Plan'], ['xiaomi-credits', 'MiMo Credits'], ['deepseek', 'DeepSeek'], ['sakana', 'Sakana'], ['openrouter', 'OpenRouter'], ['huggingface', 'Hugging Face']]
         .map(([id, name]) => ({ id, name, connected: id === 'openrouter' && q.get('keys') === '1', link: id === 'xiaomi' ? null : `https://example.com/${id}` })),
     };
     let filesAsked = st.filesAsked;

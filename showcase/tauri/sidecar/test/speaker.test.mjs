@@ -34,7 +34,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   v.onAudio(new Uint8Array([1, 0, 2, 0]));
   assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, rate: 44100, pcm: Buffer.from([1, 0, 2, 0]).toString('base64') });
   v.onEnd();
-  assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, end: true });
+  assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, end: true, chars: 3 }, 'a whole reply says how much it said');
 }
 { // No credit → the free model.
   const { sp } = setup({ ok: true, credit: 0 });
@@ -50,7 +50,7 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   assert.equal(made.length, 2); assert.equal(made[1].model, 's2.1-pro-free');
   assert.deepEqual(made[1].said, ['One.', 'Two.']); assert.ok(made[1].ended);
   made[1].onAudio(new Uint8Array([0, 0])); made[1].onEnd();
-  assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, end: true }); assert.deepEqual(problems, []);
+  assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, end: true, chars: 9 }); assert.deepEqual(problems, []);
 }
 { // A bad key: no retry, one problem report, the reply ends (text stays).
   const { sp, out, problems } = setup({ ok: false, reason: 'key' });
@@ -159,3 +159,11 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   sp2.start(); assert.equal(made.at(-1).model, 'drama-3');
 }
 console.log('speaker tests: passed');
+{ // Voice cues aren't counted as spoken text.
+  const { sp, out } = setup();
+  sp.setKey('k');
+  const r = sp.start(); r.say('[warm] Hello there.'); r.end();
+  made.at(-1).onAudio(new Uint8Array([0, 0])); made.at(-1).onEnd();
+  assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, end: true, chars: 12 });
+  console.log('speech pacing tests: passed');
+}

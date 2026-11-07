@@ -532,7 +532,7 @@
 
     const hitAt = (x, y) => {
       for (let i = list.length - 1; i >= 0; i--) {
-        if (list[i].c.hidden) continue;
+        if (list[i].c.hidden || list[i].c.ghost?.()) continue;
         const m = list[i].c.mover;
         if (Math.hypot(x - m.x, y - m.y) < m.radius * 1.1) return list[i];
       }
@@ -552,7 +552,7 @@
         if (!pointer.active || nowMs - pointer.last > 250) setPointer(x, y);
         pointer.active = true; pointer.last = nowMs;
       } else if (x !== pointer.x || y !== pointer.y) setPointer(x, y);
-      return !!down || list.some((o) => o.c.mover.dragging || o.c.hit?.(x, y)) || !!hitAt(x, y) || !!R.panelHit?.(x, y);
+      return !!down || list.some((o) => o.c.mover.dragging || o.c.hit?.(x, y)) || !!hitAt(x, y) || !!R.panelHit?.(x, y) || !!R.inkHit?.(x, y);
     };
     // On the window, not the canvas: the canvas is only as big as what's drawn, and hit areas can reach past it.
     // Clicks on other page elements (the research card) are theirs.

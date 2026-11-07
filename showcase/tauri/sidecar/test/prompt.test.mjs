@@ -7,4 +7,7 @@ import { fileURLToPath } from 'node:url';
 const side = readFileSync(fileURLToPath(new URL('../sidekick.mjs', import.meta.url)), 'utf8');
 const quoted = side.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => /\$\{\s*["'`][^"'`]*\$\{/.test(l));
 assert.deepEqual(quoted.map(([n]) => n), [], 'a ${…} inside a quoted string in a template literal is sent as text');
+// Pointing is the draw tool now: the prompt never names the old tool.
+assert.ok(!/point_at/.test(side), 'no point_at left in the prompt');
+assert.match(side, /with draw/, 'the prompt says when to draw');
 console.log('prompt tests: passed');

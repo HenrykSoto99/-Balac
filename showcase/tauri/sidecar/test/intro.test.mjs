@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { QUESTIONS, opener, openNote, answerNote, answerTurn, wantsSkip, endsChat, questionIn, splitTurn, plain } from '../intro.mjs';
+import { QUESTIONS, opener, openNote, answerNote, answerTurn, wantsSkip, endsChat, questionIn, splitTurn, plain, stripNote } from '../intro.mjs';
 
 assert.equal(QUESTIONS, 4);
 assert.match(opener('Ken'), /^Hi Ken, I'm Roamie!.*four quick questions\. What are you working on these days\?$/);
@@ -7,13 +7,17 @@ assert.match(opener('Ken', 'Sarah'), /^Hi Ken, I'm Sarah! /, "each look says its
 assert.ok(!/[—–]| - /.test(opener('Ken')), 'no dashes in the opener');
 assert.match(openNote('Ken'), /word for word.*"\[wave\] Hi Ken/s);
 
-// Answers 1 and 2 get a follow-up question, 3 gets the fixed AI question, 4 saves facts and wraps up.
+// Answers 1 and 2 get a follow-up question, 3 gets the fixed AI question, 4 wraps up (a memory pass saves the facts).
 assert.match(answerNote(1, 'Ken'), /answer 1 of 4.*ONE easy question.*2 free questions left/s);
 assert.match(answerNote(1, 'Ken'), /relaxed get-to-know-you chat/, 'the rules ride with the first answer');
 assert.match(answerNote(2, 'Ken'), /1 free question left.*actual thing/s);
 assert.match(answerNote(3, 'Ken'), /last one.*AI helpers/s);
-assert.ok(!/remember_fact/.test(answerNote(3, 'Ken').replace(/except remember_fact/, '')), 'facts are saved only at the end');
-assert.match(answerNote(4, 'Ken'), /LAST answer.*remember_fact.*goal.*\[wave\]/s);
+for (let n = 1; n <= QUESTIONS; n++) assert.ok(!/remember_fact|tools? this chat, except/.test(answerNote(n, 'Ken')), `answer ${n}: no fact tool any more`);
+assert.match(answerNote(4, 'Ken'), /LAST answer.*Do not ask anything more.*\[wave\]/s);
+// The memory pass reads their words, not the app's notes; the opener note has none.
+assert.equal(stripNote(answerTurn(2, 'Ken', 'I make videos\n\nand courses')), 'I make videos\n\nand courses');
+assert.equal(stripNote(openNote('Ken')), '');
+assert.equal(stripNote('[Mon] what time is it'), '[Mon] what time is it', 'ordinary messages untouched');
 assert.match(answerTurn(2, 'Ken', 'I make videos'), /\n\nKen said: I make videos$/);
 
 for (const s of ['skip', 'Skip.', 'stop', 'stop asking', "let's skip", 'skip this', 'please skip', 'cancel', 'skip for now!']) assert.ok(wantsSkip(s), s);
@@ -41,3 +45,18 @@ assert.deepEqual(splitTurn('Thanks Ken! Passing your boards is a great place to 
 assert.equal(plain('[hype] [chuckling] Nice one! [break] Go.'), 'Nice one! Go.');
 assert.ok(endsChat('[warm] Sure, we can stop [chuckling].'), 'cues are not questions');
 console.log('intro tests: passed');
+// The welcome tour: plain draw beats that pass the draw tool's checks, with a medal only when there's a goal.
+{
+  const { tourBeats, goalFrom } = await import('../intro.mjs');
+  const { DrawArgs, checkDraw } = await import('../draw.mjs');
+  assert.equal(goalFrom([{ text: 'Is a YouTuber' }, { text: 'Wants to launch a course by March' }]), 'Wants to launch a course by March');
+  assert.equal(goalFrom([{ text: 'Likes coffee' }]), null);
+  const withGoal = tourBeats('Ken', 'Roamie', 'Wants to launch a course by March');
+  const without = tourBeats('Ken', 'Roamie', null, { mac: false });
+  for (const beats of [withGoal, without]) { assert.ok(DrawArgs.safeParse({ beats }).success, 'the tour fits the draw schema'); assert.deepEqual(checkDraw({ beats }), []); }
+  assert.equal(withGoal.at(-1).marks[0].kind, 'medal');
+  assert.ok(!without.some((b) => b.marks.some((m) => m.kind === 'medal')), 'no goal, no medal');
+  assert.ok(withGoal.slice(0, 3).every((b) => b.marks[0].kind === 'ticket' && b.marks[0].action?.do === 'ask'), 'each ticket has a button that asks');
+  assert.match(without[0].marks[0].action.value, /wallpaper/, 'no words-on-screen how-to off the Mac');
+  console.log('tour tests: passed');
+}

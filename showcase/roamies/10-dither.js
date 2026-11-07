@@ -46,6 +46,7 @@
       const forced = typeof location !== 'undefined' ? new URLSearchParams(location.search).get('act') : null;
       // Size: 'default', 'small' (half the body) or 'cursor' (a pixel arrow pointer). Text keeps its size either way.
       let form = (typeof location !== 'undefined' && new URLSearchParams(location.search).get('form')) || 'default', lastEnv = null;
+      let userForm = form;
       // Look: 'classic' (the goo blob, and the arrow at cursor size), 'jarvis' (roamies/jarvis.js: a globe of
       // points with a lit heart, and a HUD reticle at cursor size) or a character from roamies/people.js
       // ('anime', 'sarah', 'adrian'). Moves, sizes and everything else are shared.
@@ -252,7 +253,8 @@
           }
         }
         // Trail: a few fading dots behind a fast move, like an old mouse trail.
-        if (m.speed > 160) tail.forEach((q, i) => put(Math.round(q.x / P) - AX, Math.round(q.y / P) - AY, Math.max(1, L - 1 - i)));
+        // (Not while it draws: the pen's quick glides would leave the trail dotted across the screen.)
+        if (m.speed > 160 && !plug?.ghost?.()) tail.forEach((q, i) => put(Math.round(q.x / P) - AX, Math.round(q.y / P) - AY, Math.max(1, L - 1 - i)));
         ARROW.forEach((row, r) => {
           for (let c = 0; c < row.length; c++) {
             if (row[c] === 'o') { put(gx0 + c, gy0 + r, 0); continue; }
@@ -391,6 +393,62 @@
         const c = (u - 0.78) / 0.22; return { sx: 0, sy: 0.03, line: 0, flash: 0, dot: 1 - c };
       };
 
+      // Morph between its size and its cursor form (for drawings). The body has no in-between sizes, so the finished
+      // frame is scaled, squashed and turned around the body point (like the CRT effect), and the form swaps at the
+      // smallest moment. Each morph picks a style other than the last and jitters its timing, so no two look the same;
+      // LED sparks gather in (shrinking) or burst out (growing).
+      const MORPHS = ['swirl', 'squash', 'shake'], lerp = Roamie.lerp;
+      let mo = null, lastMorph = null;
+      const mEase = (u) => (u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
+      const mBack = (u) => 1 + 2.2 * (u - 1) ** 3 + 1.2 * (u - 1) ** 2;
+      const sparks = (inward, n, spread) => {
+        for (let i = 0; i < n; i++) {
+          const a = rand(0, Math.PI * 2), r = rand(spread * 0.6, spread * 1.3), sp = rand(0.7, 1.2) * r / 0.4, lvl = Math.max(1, L - Math.floor(rand(0, 3)));
+          if (inward) spawn(m.x + Math.cos(a) * r, m.y + Math.sin(a) * r, -Math.cos(a) * sp, -Math.sin(a) * sp, 0, lvl, 0, 2.6);
+          else spawn(m.x + Math.cos(a) * R * 0.3, m.y + Math.sin(a) * R * 0.3, Math.cos(a) * sp, Math.sin(a) * sp, 120, lvl, 0, 2);
+        }
+      };
+      const morphStep = (dt) => {
+        if (!mo) return;
+        if (pres.state !== 'shown' || mo.instant) { if (!mo.swapped) swapForm(mo.to); const r = mo.res; mo = null; r(); return; }
+        mo.t += dt;
+        if (!mo.swapped && mo.t >= mo.d1) {
+          mo.swapped = true; swapForm(mo.to); S(mo.toCursor ? 'pop' : 'expand');
+          if (!mo.toCursor) sparks(false, Math.round(rand(16, 26)), R * rand(1.8, 2.6));
+        }
+        if (mo.t >= mo.d1 + mo.d2) { const r = mo.res; mo = null; sq.kick(rand(8, 14)); face.set('happy', rand(0.7, 1.1)); r(); }
+      };
+      // { sx, sy, rot, lift } around the body point while morphing, else null.
+      const morphXform = () => {
+        if (!mo || mo.instant) return null;
+        const { style } = mo;
+        if (mo.t < mo.d1) {
+          const u = mo.t / mo.d1, e = u * u, k = lerp(1, mo.small, e);
+          if (style === 'swirl') return { sx: k, sy: k, rot: mo.turn * e, lift: 0 };
+          if (style === 'squash') { const q = Math.sin(Math.min(1, u / 0.45) * Math.PI); return { sx: k * (1 + 0.28 * q), sy: k * (1 - 0.32 * q), rot: 0, lift: u > 0.45 ? (u - 0.45) * 40 : 0 }; }
+          return { sx: k, sy: k, rot: Math.sin(u * Math.PI * 7) * 0.22 * (1 - u * 0.5), lift: 0 };
+        }
+        const u = clamp((mo.t - mo.d1) / mo.d2, 0, 1), sc = lerp(mo.start, 1, mBack(u)) + Math.sin(u * Math.PI) * mo.over * (1 - u);
+        if (style === 'squash') { const st = Math.sin(u * Math.PI) * 0.22; return { sx: sc * (1 - st * 0.6), sy: sc * (1 + st), rot: 0, lift: Math.sin(u * Math.PI) * mo.hop }; }
+        return { sx: sc, sy: sc, rot: style === 'swirl' ? -mo.turn * 0.35 * (1 - mEase(u)) : 0, lift: 0 };
+      };
+      const morph = (to) => new Promise((res) => {
+        const f = ['small', 'cursor'].includes(to) ? to : 'default';
+        if (mo) { const r = mo.res; if (!mo.swapped) swapForm(mo.to); mo = null; r(); }
+        if (f === form) { res(); return; }
+        const toCursor = f === 'cursor', style = MORPHS.filter((x) => x !== lastMorph)[Math.floor(Math.random() * (MORPHS.length - 1))];
+        lastMorph = style;
+        const small = rand(0.32, 0.45);
+        mo = {
+          to: f, toCursor, style, t: 0, res, swapped: false, instant: !!lastEnv?.reduced || pres.state !== 'shown',
+          d1: rand(0.26, 0.4), d2: rand(0.32, 0.46), small, turn: (Math.random() < 0.5 ? -1 : 1) * rand(0.5, 1.1) * Math.PI,
+          start: toCursor ? rand(0.35, 0.5) : small * rand(0.8, 1), over: rand(0.1, 0.22), hop: rand(10, 16),
+        };
+        if (mo.instant) return;
+        S(toCursor ? 'poof' : 'blip');
+        if (toCursor) sparks(true, Math.round(rand(14, 24)), R * rand(1.6, 2.4));
+      });
+
       // A drawn look: JARVIS's globe (or reticle at cursor size), or a character, with what it's doing passed in
       // for its motion and face.
       const drawLook = (bx, by, env) => {
@@ -452,8 +510,13 @@
         get busy() { return !!act; },
         appear, vanish,
         stopAct: () => { if (act) { act = null; nextAct = rand(3, 6); } },
+        get morphing() { return !!mo; },
         get presence() { return pres.state; }, get presU() { return pres.u; }, get form() { return form; },
         get look() { return look; },
+        // From the cursor form's arrow tip to the body point (the pen draws with the tip), and the size the user picked.
+        get tip() { return [AX * P, AY * P]; },
+        get userForm() { return userForm; },
+        morph: (to) => morph(to),
       };
       // Nothing moving on the body itself (no act, particles, squash or strong expression): a still picture of it
       // is all of it, so something else can draw it (the native follower, buddy.swift).
@@ -480,6 +543,7 @@
         if (!r || out.length < 2) return null;
         return { open: out[0], shut: out[1], w: r.x1 - r.x0, h: r.y1 - r.y0, ax: m.x - r.x0, ay: m.y - r.y0 };
       };
+      const swapForm = (f) => { form = f; if (lastEnv) self.resize(lastEnv); };
       const plug = o.plugin ? o.plugin(kit) : null;
       let pose = null;
 
@@ -492,7 +556,10 @@
         press: (x, y) => plug?.press?.(x, y),
         wheel: (dy) => plug?.wheel?.(dy),
         get form() { return form; },
-        setForm(f) { form = ['small', 'cursor'].includes(f) ? f : 'default'; if (lastEnv) this.resize(lastEnv); },
+        // The user's size. While a drawing holds it as its cursor, it changes back to this one when it's let go.
+        setForm(f) { userForm = ['small', 'cursor'].includes(f) ? f : 'default'; if (!plug?.ghost?.()) swapForm(userForm); },
+        ghost: () => !!plug?.ghost?.(),
+        morph,
         get look() { return look; },
         setLook(l) { look = pickLook(l); jst.spin = 0; jst.tail = null; },
         resize(env) {
@@ -518,6 +585,7 @@
           // Popping up beside the cursor: the agent layer keeps it moving with the cursor during the entrance.
           if (performing && pres.state === 'in' && pres.v !== 'drop' && m.drive) { m.drive(dt, env); pres.tx = m.x; pres.ty = m.y; }
           if (performing) presStep(dt); else m.update(dt, env);
+          morphStep(dt);
           sq.update(dt);
           let px = m.x, py = m.y;
           tail.forEach((s, i) => { spring(s, px, py, 70 - i * 14, 8, dt); px = s.x; py = s.y; });
@@ -751,7 +819,7 @@
           else if (pd) {
             // Four empty cells of margin for the glow, on a 4-cell lattice so the blur sits still as it moves;
             // the CRT effect stretches the picture (up to 1.3x) and glows around the body, so it gets more.
-            const a = 4 + (crtXform() ? Math.ceil((R * 1.6 + P * 8) / P) : 0);
+            const a = 4 + (crtXform() || mo ? Math.ceil((R * 1.6 + P * 8) / P) : 0);
             // The lattice starts at the body's cell while it follows, so the glow is worked out the same way each frame.
             rect = [Math.max(0, Math.floor((dx0 - a - tox) / a) * a + tox), Math.max(0, Math.floor((dy0 - a - toy) / a) * a + toy),
               Math.min(gw, Math.ceil((dx1 + 1 + a - tox) / a) * a + tox), Math.min(gh, Math.ceil((dy1 + 1 + a - toy) / a) * a + toy)];
@@ -761,7 +829,7 @@
           // A fingerprint of the picture: the lit cells, where the patch sits and the glide offset. NaN (never equal)
           // whenever something is also drawn outside the grid or the CRT effect is playing.
           let sig = NaN;
-          if (clear && pd && !performing && !crtXform() && (!plug || plug.quiet?.())) {
+          if (clear && pd && !performing && !crtXform() && !mo && (!plug || plug.quiet?.())) {
             let h = 2166136261 ^ (rect[0] * 73856093) ^ (rect[1] * 19349663) ^ (rect[2] * 83492791) ^ rect[3];
             for (let y = pd[1] * K; y < pd[3] * K; y++) for (let i = y * IW + pd[0] * K, e = y * IW + pd[2] * K; i < e; i++) h = Math.imul(h ^ u32[i], 16777619);
             const glide = !!m.drive && pres.state === 'shown';
@@ -789,10 +857,13 @@
           // Snapped to whole screen pixels: a part-pixel shift resamples the dots unevenly, so they'd shimmer.
           const dpr = env.dpr || 1;
           if (glide) ctx.translate(Math.round((bx - Math.round(bx / P) * P) * dpr) / dpr, Math.round((by - Math.round(by / P) * P) * dpr) / dpr);
-          const crt = crtXform();
+          const crt = crtXform(), mx = morphXform();
           if (crt) {
             ctx.save();
             ctx.translate(bx, by); ctx.scale(Math.max(crt.sx, 0.0001), crt.sy); ctx.translate(-bx, -by);
+          } else if (mx) {
+            ctx.save();
+            ctx.translate(bx, by - mx.lift); ctx.rotate(mx.rot); ctx.scale(Math.max(mx.sx, 0.0001), Math.max(mx.sy, 0.0001)); ctx.translate(-bx, -by);
           }
           if (!crt || crt.sx > 0.01) ctx.drawImage(off, sx, sy, sw, sh, X, Y, DW, DH);
           if (crt && crt.flash > 0.01 && crt.sx > 0.01) {
@@ -812,6 +883,7 @@
             ctx.drawImage(bloom, 0, 0, bw, bh, X, Y, DW, DH);
             ctx.restore();
           }
+          if (mx) ctx.restore();
           if (crt) {
             ctx.restore();
             const hot = `rgb(${PAL[L].join(',')})`, glow = `rgb(${PAL[L - 1].join(',')})`;

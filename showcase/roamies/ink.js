@@ -1,0 +1,1174 @@
+// Roamies drawing on screen: the Sidekick turns into its cursor and draws hand-drawn teal marks with its tip (the
+// same pen as the user's ⌃⌥ ink: teal, a dark edge so it reads on white, a soft glow), paced to its voice with a
+// caption at the bottom. Screen marks follow each thing's real shape; cards and diagrams go on calm space beside the
+// window and stay until closed. The sidecar (draw.mjs, tools.mjs) sends beats already checked and placed in global
+// screen points; this overlay draws what falls on its own monitor. No model-written code runs here.
+(() => {
+  const R = window.Roamie;
+  if (!R || typeof document === 'undefined') return;
+
+  // ---------------------------------------------------------------- look
+  const P = 4, MONO = '"Martian Mono", ui-monospace, monospace', DOTO = '"Doto", "Martian Mono", ui-monospace, monospace';
+  const ACC = '#78ffe2', HOT = '#e6fffa', MID = '#28c4b8', DEEP = '#0e5c60', EDGE = 'rgba(3,39,34,0.6)';
+  const GLASS = 'rgba(6,22,24,0.94)', TEXT = '#dcfff6', DIM = '#8ab8b0', INKDARK = '#032722';
+  const TONES = { accent: ACC, teal: '#78ffe2', amber: '#ffcf5c', coral: '#ff8a7a', lilac: '#b9a4ff', sky: '#7cc8ff', lime: '#b6f36b', red: '#ff6b6b', white: '#e8fffa' };
+  const LED = ['#051214', '#0e5c60', '#28c4b8', '#78ffe2', '#e6fffa'];
+  const B4 = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+  const tone = (t) => TONES[t] || ACC;
+  const now = () => performance.now() / 1000;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const ease = (u) => (u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
+  const back = (u) => 1 + 2.2 * (u - 1) ** 3 + 1.2 * (u - 1) ** 2;
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const mixHex = (a, b, k) => '#' + hex(a).map((v, i) => Math.round(v + (hex(b)[i] - v) * k).toString(16).padStart(2, '0')).join('');
+  const rgba = (h, a) => `rgba(${hex(h).join(',')},${a})`;
+  const sfx = (n) => R.sfx?.play(n);
+  const reducedMQ = matchMedia('(prefers-reduced-motion: reduce)');
+  const reduced = () => reducedMQ.matches;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, reduced() ? Math.min(ms, 60) : ms));
+  const frame = () => new Promise((r) => requestAnimationFrame(r));
+  // Global screen points → this overlay's px.
+  const loc = (x, y) => [x - (R.origin?.x ?? 0), y - (R.origin?.y ?? 0)];
+  const locRect = (r) => (r ? [...loc(r[0], r[1]), r[2], r[3]] : null);
+
+  // ---------------------------------------------------------------- geometry: shapes drawn the way a hand would
+  const dist = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const len = (pts) => pts.reduce((s, p, i) => (i ? s + dist(pts[i - 1], p) : 0), 0);
+  function dense(pts, step = 2) {
+    const out = [];
+    for (let i = 1; i < pts.length; i++) { const n = Math.max(1, Math.ceil(dist(pts[i - 1], pts[i]) / step)); for (let k = 0; k < n; k++) out.push([lerp(pts[i - 1][0], pts[i][0], k / n), lerp(pts[i - 1][1], pts[i][1], k / n)]); }
+    out.push(pts[pts.length - 1]);
+    // repeated points (where arcs meet) have no direction and pinch the pen into a spike
+    return out.filter((p, i) => !i || dist(p, out[i - 1]) > 0.3);
+  }
+  const at = (pts, u) => { const f = clamp(u, 0, 1) * (pts.length - 1), i = Math.floor(f), k = f - i, a = pts[i], b = pts[Math.min(i + 1, pts.length - 1)]; return [lerp(a[0], b[0], k), lerp(a[1], b[1], k)]; };
+  const arc = (cx, cy, rx, ry, a0, a1, n = 40) => Array.from({ length: n + 1 }, (_, k) => { const a = a0 + ((a1 - a0) * k) / n; return [cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]; });
+  function roundRect(x, y, w, h, r) {
+    r = clamp(r, 0, Math.min(w, h) / 2);
+    return [...arc(x + w - r, y + r, r, r, -Math.PI / 2, 0, 10), ...arc(x + w - r, y + h - r, r, r, 0, Math.PI / 2, 10), ...arc(x + r, y + h - r, r, r, Math.PI / 2, Math.PI, 10), ...arc(x + r, y + r, r, r, Math.PI, Math.PI * 1.5, 10)];
+  }
+  function stepped(x, y, w, h, c = 2 * P) {
+    const s = c / 2;
+    return [[x + c, y], [x + w - c, y], [x + w - c, y + s], [x + w - s, y + s], [x + w - s, y + c], [x + w, y + c], [x + w, y + h - c], [x + w - s, y + h - c], [x + w - s, y + h - s], [x + w - c, y + h - s], [x + w - c, y + h],
+      [x + c, y + h], [x + c, y + h - s], [x + s, y + h - s], [x + s, y + h - c], [x, y + h - c], [x, y + c], [x + s, y + c], [x + s, y + s], [x + c, y + s], [x + c, y]];
+  }
+  const steppedPath = (x, y, w, h, c) => { const p = new Path2D(); stepped(x, y, w, h, c).forEach((q, i) => (i ? p.lineTo(q[0], q[1]) : p.moveTo(q[0], q[1]))); return p; };
+  function catmull(pts, closed) {
+    const Q = closed ? [pts[pts.length - 1], ...pts, pts[0], pts[1]] : [pts[0], ...pts, pts[pts.length - 1]], out = [];
+    for (let i = 1; i < Q.length - 2; i++) for (let k = 0; k < 10; k++) {
+      const t = k / 10, [p0, p1, p2, p3] = [Q[i - 1], Q[i], Q[i + 1], Q[i + 2]];
+      out.push([0, 1].map((d) => 0.5 * (2 * p1[d] + (-p0[d] + p2[d]) * t + (2 * p0[d] - 5 * p1[d] + 4 * p2[d] - p3[d]) * t * t + (-p0[d] + 3 * p1[d] - 3 * p2[d] + p3[d]) * t * t * t)));
+    }
+    if (closed) out.push(out[0]);
+    return out;
+  }
+  // A wobble along a path: a few slow waves with random phases, so no two marks are the same.
+  const wobble = (amp) => { const w = [1, 2, 3].map((f) => [f, rnd(0, Math.PI * 2), amp / f ** 0.9 * rnd(0.6, 1.1)]); return (u) => w.reduce((s, [f, ph, a]) => s + a * Math.sin(u * Math.PI * 2 * f + ph), 0); };
+  // The fallback shape rule (the sidecar sends r from the thing's role): a pill for thin things, round for small square
+  // ones, a gently rounded box for anything bigger.
+  function shapeRadius(w, h, r) {
+    if (r != null) return r;
+    const short = Math.min(w, h), long = Math.max(w, h);
+    if (short <= 56) return short / 2;
+    if (long <= 120 && long < short * 1.4) return short / 2;
+    return clamp(short * 0.12, 8, 18);
+  }
+  // A loop round a box, hugging its shape: starts near the top left, goes round once and runs a little past its
+  // start, each side bowing a touch, the whole loop a hair off straight.
+  function loop(x, y, w, h, o = {}) {
+    const pad = o.pad ?? 6, bx = x - pad, by = y - pad, bw = w + 2 * pad, bh = h + 2 * pad, cx = bx + bw / 2, cy = by + bh / 2;
+    const r = Math.min(shapeRadius(w, h, o.r) + pad, bw / 2, bh / 2);
+    const rr = roundRect(bx, by, bw, bh, r), base = dense([...rr, rr[0]], 1.5);
+    let s0 = 0; const want = [bx + Math.min(bw * 0.28, 40), by]; base.forEach((p, i) => { if (dist(p, want) < dist(base[s0], want)) s0 = i; });
+    const ring = [...base.slice(s0), ...base.slice(1, s0 + 1)];
+    const over = o.over ?? rnd(0.08, 0.16), n = Math.ceil(ring.length * (1 + over));
+    const size = Math.min(bw, bh), wob = wobble(clamp(size * 0.035, 0.8, 2.6)), drift = rnd(2, Math.min(6, size * 0.12)) * (Math.random() < 0.7 ? 1 : -1);
+    const rot = rnd(-1.6, 1.6) * Math.PI / 180, sx = rnd(0.985, 1.025), sy = rnd(0.98, 1.03), c = Math.cos(rot), s = Math.sin(rot);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const p = ring[i % ring.length], q = ring[(i + 1) % ring.length], u = i / ring.length;
+      const tx = q[0] - p[0], ty = q[1] - p[1], tl = Math.hypot(tx, ty) || 1, nx = ty / tl, ny = -tx / tl;
+      const off = wob(u) + drift * clamp((u - 0.75) / 0.35, 0, 1);
+      const px = cx + (p[0] + nx * off - cx) * sx, py = cy + (p[1] + ny * off - cy) * sy, dx = px - cx, dy = py - cy;
+      out.push([cx + dx * c - dy * s, cy + dx * s + dy * c]);
+    }
+    return out;
+  }
+  // A stroke from a to b as a hand draws it: a slight bow, a touch of wobble, ends not quite where asked.
+  function handLine(a, b, o = {}) {
+    const d = dist(a, b), bow = (o.bow ?? rnd(-0.025, 0.025)) * d, wob = wobble(Math.min(1.2, d * 0.01)), nx = -(b[1] - a[1]) / (d || 1), ny = (b[0] - a[0]) / (d || 1);
+    const j = o.jitter ?? 2, A = [a[0] + rnd(-j, j), a[1] + rnd(-j / 2, j / 2)], B = [b[0] + rnd(-j, j), b[1] + rnd(-j / 2, j / 2)];
+    const n = Math.max(8, Math.ceil(d / 2));
+    return Array.from({ length: n + 1 }, (_, k) => { const u = k / n, off = Math.sin(u * Math.PI) * bow + wob(u); return [lerp(A[0], B[0], u) + nx * off, lerp(A[1], B[1], u) + ny * off]; });
+  }
+  const handPath = (pts, amp = 1.2) => { const d = dense(pts, 2), wob = wobble(amp); return d.map((p, i) => { const q = d[Math.min(i + 1, d.length - 1)], r0 = d[Math.max(i - 1, 0)], tx = q[0] - r0[0], ty = q[1] - r0[1], tl = Math.hypot(tx, ty) || 1, off = wob(i / d.length); return [p[0] + (ty / tl) * off, p[1] - (tx / tl) * off]; }); };
+  const boxOf = (pts) => { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const [x, y] of pts) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); } return [x0, y0, x1 - x0, y1 - y0]; };
+  const grow = (r, g) => [r[0] - g, r[1] - g, r[2] + 2 * g, r[3] + 2 * g];
+  const overlap = (a, b) => Math.max(0, Math.min(a[0] + a[2], b[0] + b[2]) - Math.max(a[0], b[0])) * Math.max(0, Math.min(a[1] + a[3], b[1] + b[3]) - Math.max(a[1], b[1]));
+  const inside = (r, x, y, pad = 0) => !!r && x >= r[0] - pad && x <= r[0] + r[2] + pad && y >= r[1] - pad && y <= r[1] + r[3] + pad;
+  const union = (a, b) => (!a ? b : !b ? a : (() => { const x0 = Math.min(a[0], b[0]), y0 = Math.min(a[1], b[1]); return [x0, y0, Math.max(a[0] + a[2], b[0] + b[2]) - x0, Math.max(a[1] + a[3], b[1] + b[3]) - y0]; })());
+  // The point on a box's edge facing p, a little outside it.
+  const edgeToward = (r, p, pad = 6) => {
+    const cx = r[0] + r[2] / 2, cy = r[1] + r[3] / 2, dx = p[0] - cx, dy = p[1] - cy, hw = r[2] / 2 + pad, hh = r[3] / 2 + pad;
+    const k = Math.min(hw / (Math.abs(dx) || 1e-6), hh / (Math.abs(dy) || 1e-6));
+    return [cx + dx * Math.min(1, k), cy + dy * Math.min(1, k)];
+  };
+
+  // ---------------------------------------------------------------- canvases: base (glass, edges, words) and lit (glowing ink)
+  // Full screen, but allocated only while something is drawn, and only the area round the marks is redrawn, and only
+  // while something on it animates.
+  const view = document.createElement('canvas'), litC = document.createElement('canvas'), meas = document.createElement('canvas').getContext('2d');
+  view.setAttribute('aria-hidden', 'true');
+  Object.assign(view.style, { position: 'fixed', left: '0', top: '0', width: '100vw', height: '100vh', pointerEvents: 'none', visibility: 'hidden', cursor: 'default' });
+  const V = view.getContext('2d'), Lc = litC.getContext('2d');
+  const hasFilter = 'filter' in V;
+  let W = innerWidth, H = innerHeight, DPR = 1, alloc = false;
+  const mount = () => { const st = document.getElementById('stage'); if (st?.parentNode) st.parentNode.insertBefore(view, st); else document.body.appendChild(view); };
+  if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount);
+  function allocate() {
+    W = innerWidth; H = innerHeight; DPR = Math.min(2, devicePixelRatio || 1);
+    for (const c of [view, litC]) { c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); }
+    alloc = true; view.style.visibility = ''; lastU = null;
+  }
+  const freeCanvas = () => { for (const c of [view, litC]) { c.width = c.height = 1; } alloc = false; view.style.visibility = 'hidden'; lastU = null; };
+  addEventListener('resize', () => { W = innerWidth; H = innerHeight; if (alloc) { allocate(); touch(); } });
+
+  const marks = [];
+  let raf = 0, until = 0, lastU = null;
+  // Something changed: draw for at least a little while (entrances, fades) and keep going while anything is live.
+  function touch(sec = 0.7) { until = Math.max(until, now() + sec); if (!raf) raf = requestAnimationFrame(render); }
+  function add(m) {
+    Object.assign(m, { p: m.p ?? 0, alpha: 1, dx: 0, dy: 0, born: now(), alive: true, z: m.z ?? 3, color: m.color ?? ACC });
+    marks.push(m); touch(); return m;
+  }
+  const markBox = (m) => { const b = typeof m.box === 'function' ? m.box() : m.box ?? (m.pts ? boxOf(m.pts) : null); return b ? [b[0] + m.dx, b[1] + m.dy, b[2], b[3]] : [0, 0, W, H]; };
+  const clampR = (r) => { const x0 = Math.max(0, Math.floor(r[0])), y0 = Math.max(0, Math.floor(r[1])), x1 = Math.min(W, Math.ceil(r[0] + r[2])), y1 = Math.min(H, Math.ceil(r[1] + r[3])); return [x0, y0, Math.max(0, x1 - x0), Math.max(0, y1 - y0)]; };
+  // Repaints one area: clears it on both layers, draws the marks that touch it, then the glow (the ink blurred under
+  // itself, like the user's pen: 0.75, radius ~6).
+  function paint(C, t) {
+    if (C[2] <= 0 || C[3] <= 0) return;
+    for (const c of [V, Lc]) { c.setTransform(DPR, 0, 0, DPR, 0, 0); c.clearRect(C[0], C[1], C[2], C[3]); c.save(); c.beginPath(); c.rect(C[0], C[1], C[2], C[3]); c.clip(); }
+    for (const m of [...marks].sort((a, b) => a.z - b.z)) {
+      if (overlap(grow(markBox(m), 28), C) <= 0) continue;
+      for (const c of [V, Lc]) { c.save(); c.globalAlpha = m.alpha; c.translate(m.dx, m.dy); }
+      try { m.draw(V, Lc, t); } catch (e) { console.error('ink', e); m.alive = false; }
+      for (const c of [V, Lc]) c.restore();
+    }
+    for (const c of [V, Lc]) c.restore();
+    const sx = C[0] * DPR, sy = C[1] * DPR, sw = C[2] * DPR, sh = C[3] * DPR;
+    V.save(); V.setTransform(1, 0, 0, 1, 0, 0);
+    if (hasFilter) { V.globalAlpha = 0.75; V.filter = `blur(${4 * DPR}px)`; V.drawImage(litC, sx, sy, sw, sh, sx, sy, sw, sh); V.filter = 'none'; V.globalAlpha = 1; }
+    else { V.shadowColor = rgba(ACC, 0.75); V.shadowBlur = 8 * DPR; }
+    V.drawImage(litC, sx, sy, sw, sh, sx, sy, sw, sh);
+    V.restore();
+  }
+  // While something is being drawn, everything drawn is repainted each frame. Once it settles, only the few things
+  // that keep moving (a waiting target's pulse, a turning model, bobbing chevrons) are, at 30 frames a second.
+  let lastLive = 0;
+  function render() {
+    raf = 0;
+    const t = now();
+    for (let i = marks.length - 1; i >= 0; i--) if (!marks[i].alive) marks.splice(i, 1);
+    if (!marks.length) { if (alloc) freeCanvas(); return; }
+    if (!alloc) allocate();
+    const full = t < until || !!drag || !lastU, live = full ? [] : marks.filter((m) => m.live?.(t));
+    if (full) {
+      let U = null;
+      for (const m of marks) U = union(U, grow(markBox(m), 28));
+      U = clampR(U);
+      paint(lastU ? clampR(union(U, lastU)) : U, t);
+      lastU = U;
+    } else if (live.length) {
+      if (t - lastLive >= 1 / 31) { lastLive = t; paint(clampR(live.reduce((u, m) => union(u, grow(markBox(m), 28)), null)), t); }
+    }
+    if (full || live.length) raf = requestAnimationFrame(render);
+  }
+  async function tween(dur, f) {
+    if (reduced() || dur <= 0) { f(1); touch(); return; }
+    const t0 = now();
+    for (;;) { const u = clamp((now() - t0) / dur, 0, 1); f(u); touch(); if (u >= 1) return; await frame(); }
+  }
+
+  // ---------------------------------------------------------------- the pen
+  // An even line with soft ends and a little pressure change along it, and a dark edge so it reads on white.
+  function outline(pts, w) {
+    const n = pts.length, Lf = [], Rt = [], hw = [], ph = rnd(0, 6);
+    for (let i = 0; i < n; i++) {
+      const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)], tx = b[0] - a[0], ty = b[1] - a[1], tl = Math.hypot(tx, ty) || 1, t = i / Math.max(1, n - 1);
+      const end = Math.min(1, t / 0.06, (1 - t) / 0.08), r = (w / 2) * (0.55 + 0.45 * Math.sqrt(clamp(end, 0, 1))) * (1 + 0.08 * Math.sin(t * 9 + ph));
+      hw.push(r); Lf.push([pts[i][0] - (ty / tl) * r, pts[i][1] + (tx / tl) * r]); Rt.push([pts[i][0] + (ty / tl) * r, pts[i][1] - (tx / tl) * r]);
+    }
+    return { Lf, Rt, hw };
+  }
+  const colorOf = (m, color) => { const rc = m.recolor; return rc && now() - rc < 0.5 ? mixHex(m.color0, color, (now() - rc) / 0.5) : color; };
+  function pen(base, lit, m, pts, p, color, o = {}) {
+    if (p <= 0 || !pts || pts.length < 2) return;
+    const key = o.key || 'o', w = o.w || 3.6;
+    const ol = (m.__ol ??= {})[key]?.src === pts ? m.__ol[key] : (m.__ol[key] = { src: pts, ...outline(pts, w) });
+    const k = Math.max(1, Math.round((pts.length - 1) * clamp(p, 0, 1)));
+    const body = new Path2D(); body.moveTo(ol.Lf[0][0], ol.Lf[0][1]);
+    for (let i = 1; i <= k; i++) body.lineTo(ol.Lf[i][0], ol.Lf[i][1]);
+    for (let i = k; i >= 0; i--) body.lineTo(ol.Rt[i][0], ol.Rt[i][1]);
+    body.closePath();
+    const c = colorOf(m, color);
+    base.save(); base.lineJoin = 'round'; base.lineWidth = 2.5; base.strokeStyle = EDGE; base.stroke(body); base.beginPath(); base.arc(pts[k][0], pts[k][1], ol.hw[k] + 1.2, 0, Math.PI * 2); base.fillStyle = EDGE; base.fill(); base.restore();
+    lit.save(); lit.fillStyle = c; lit.fill(body); lit.beginPath(); lit.arc(pts[k][0], pts[k][1], ol.hw[k], 0, Math.PI * 2); lit.arc(pts[0][0], pts[0][1], ol.hw[0], 0, Math.PI * 2); lit.fill(); lit.restore();
+  }
+  // Our chrome for cards and chips: stepped corners, dark glass, an accent edge, a glint along the top.
+  function chrome(c, x, y, w, h, o = {}) {
+    const path = steppedPath(x, y, w, h, o.corner ?? 2 * P), edge = o.edge || ACC;
+    c.save();
+    c.fillStyle = o.fill || GLASS; c.shadowColor = 'rgba(0,0,0,0.35)'; c.shadowBlur = 14; c.shadowOffsetY = 4; c.fill(path);
+    c.shadowColor = rgba(edge, 0.7); c.shadowBlur = 8; c.shadowOffsetY = 0; c.strokeStyle = edge; c.lineWidth = 1.5; c.globalAlpha *= 0.9; c.stroke(path);
+    c.globalAlpha *= 0.6; c.shadowBlur = 0; c.strokeStyle = '#ffffff'; c.lineWidth = 1; c.beginPath(); c.moveTo(x + 3 * P, y + 1.5); c.lineTo(x + Math.min(w * 0.45, 90), y + 1.5); c.stroke();
+    c.restore();
+  }
+  // Words typing themselves in; the last couple land white.
+  function typed(c, str, x, y, font, color, u, o = {}) {
+    str = String(str ?? '');
+    c.save(); c.font = font; c.textBaseline = o.baseline || 'alphabetic'; c.textAlign = 'left';
+    const full = c.measureText(str).width, x0 = o.anchor === 'middle' ? x - full / 2 : o.anchor === 'end' ? x - full : x;
+    const n = Math.floor(str.length * clamp(u, 0, 1));
+    if (o.rim) { c.lineWidth = o.rim; c.strokeStyle = EDGE; c.lineJoin = 'round'; c.strokeText(str.slice(0, n), x0, y); }
+    if (n >= str.length || o.land === false) { c.fillStyle = color; c.fillText(str.slice(0, n), x0, y); }
+    else { const head = str.slice(0, Math.max(0, n - 2)); c.fillStyle = color; c.fillText(head, x0, y); c.fillStyle = '#ffffff'; c.fillText(str.slice(head.length, n), x0 + c.measureText(head).width, y); }
+    c.restore();
+    return full;
+  }
+  const textW = (str, font) => { meas.font = font; return meas.measureText(String(str)).width; };
+  // Cut to fit maxW px with an ellipsis (by measured width, not a character count).
+  function ellipsize(str, maxW, font) {
+    str = String(str ?? '');
+    if (textW(str, font) <= maxW) return str;
+    let lo = 0, hi = str.length;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (textW(`${str.slice(0, mid).trimEnd()}…`, font) <= maxW) lo = mid; else hi = mid - 1; }
+    return `${str.slice(0, lo).trimEnd()}…`;
+  }
+  // Lines of at most w px. A word wider than a line (a link, a long name) is broken across lines; past max rows the
+  // last one ends in an ellipsis.
+  function wrapRows(str, w, font, max = Infinity) {
+    meas.font = font;
+    const fits = (t) => meas.measureText(t).width <= w, rows = [];
+    for (const para of String(str ?? '').split('\n')) {
+      let row = '';
+      for (let wd of para.split(/\s+/).filter(Boolean)) {
+        const tr = row ? `${row} ${wd}` : wd;
+        if (fits(tr)) { row = tr; continue; }
+        if (row) { rows.push(row); row = ''; }
+        while (!fits(wd)) { let k = wd.length - 1; while (k > 1 && !fits(wd.slice(0, k))) k--; rows.push(wd.slice(0, k)); wd = wd.slice(k); }
+        row = wd;
+      }
+      rows.push(row);
+    }
+    while (rows.length > 1 && !rows[rows.length - 1]) rows.pop();
+    if (rows.length > max) { const rest = rows.splice(max); rows[max - 1] = ellipsize(`${rows[max - 1]} ${rest.join(' ')}`, w, font); }
+    return rows;
+  }
+  // The card fonts load on first use; measuring before they arrive gave widths for the fallback font, and the text
+  // then grew past its card once the real one loaded. Everything waits for them once (never more than 1.5 s).
+  let fontsOk = null;
+  const fontsReady = () => (fontsOk ??= Promise.race([Promise.all([`500 13px ${MONO}`, `700 11px ${MONO}`, `800 16px ${DOTO}`].map((f) => document.fonts?.load(f))), sleep(1500)]).catch(() => {}));
+  function wrapped(c, rows, x, y, lh, font, color, u) {
+    let left = Math.floor(rows.reduce((s, r) => s + r.length + 1, 0) * clamp(u, 0, 1));
+    rows.forEach((r, i) => { const k = Math.min(r.length, left); left -= r.length + 1; if (k > 0) typed(c, r.slice(0, k), x, y + i * lh, font, color, 1); });
+  }
+
+  // ---------------------------------------------------------------- the cursor: the real Sidekick in cursor form
+  const agent = () => R.tiles?.find((t) => t.creature?.agent)?.creature?.agent ?? null;
+  const penApi = () => agent()?.pen ?? null;
+  const tipNow = () => penApi()?.held ? penApi().tip : [W * 0.8, H * 0.8];
+  const take = async () => { try { await penApi()?.take(); } catch (e) { console.error('ink pen', e); } };
+  const fly = (x, y) => penApi()?.move(x, y) ?? Promise.resolve();
+  const rest = (x, y) => penApi()?.rest(x, y) ?? Promise.resolve();
+  const tap = async (x, y) => { await (penApi()?.tap(x, y) ?? Promise.resolve()); burst(x, y); };
+  const park = (kind, x, y) => penApi()?.park(kind, x, y);
+  // Draw along points at a hand's pace; the cursor's tip leads the stroke.
+  // A hand's pace, a little brisk: about 900 px a second, never a blink, never a crawl.
+  const penDur = (pts) => clamp(len(pts) / 900, 0.25, 1.0);
+  async function trace(pts, dur, onP) {
+    const p = penApi();
+    if (reduced() || !p?.held) { onP(1); touch(); return; }
+    await p.trace(pts, dur, (u) => { onP(u); touch(); });
+  }
+  function burst(x, y, big) {
+    const rr = big ? 16 : 7;
+    add({ z: 9, p: 1, box: [x - 50, y - 50, 100, 100], draw(b, l, t) { const u = (t - this.born) / (big ? 0.45 : 0.35); if (u >= 1) { this.alive = false; return; } const r = rr + u * (big ? 30 : 14); l.save(); l.globalAlpha *= 1 - u; l.strokeStyle = u < 0.3 ? HOT : ACC; l.lineWidth = 2; l.beginPath(); l.arc(x, y, r, 0, Math.PI * 2); l.stroke(); l.restore(); }, live: () => true });
+  }
+
+  // ---------------------------------------------------------------- names: pixel tags on the calmest free spot
+  // A solid teal tag with a hard drop shadow; it lands in three pixel steps. Names, step numbers and buttons share it.
+  const CHIP = (k = 1) => `700 ${11 * k}px ${MONO}`;
+  const pillSize = (s) => [Math.round(textW(s, CHIP()) + 22), 23];
+  function chip(b, x, y, w, h, str, age, o = {}) {
+    const k = o.k || 1, cx = x + w / 2, cy = y + h / 2 + 0.5, type = (age - 0.08) / (0.12 + String(str).length * 0.025), fill = o.color || ACC;
+    const u = clamp(age / 0.2, 0, 1), drop = reduced() ? 0 : Math.round((1 - u) * 3) * 3;
+    b.save(); b.translate(0, -drop);
+    if (o.down) b.translate(0, 2);
+    b.fillStyle = mixHex(fill, '#000000', 0.62); b.fill(steppedPath(x, y + (o.down ? 1 : 3), w, h, P));
+    b.fillStyle = o.hover ? mixHex(fill, '#ffffff', 0.3) : fill; b.fill(steppedPath(x, y, w, h, P));
+    b.fillStyle = 'rgba(255,255,255,0.55)'; b.fillRect(x + P, y + 1, w - 2 * P, 1.5); b.fillStyle = 'rgba(3,39,34,0.25)'; b.fillRect(x + P, y + h - 2.5, w - 2 * P, 1.5);
+    typed(b, str, cx, cy, CHIP(k), INKDARK, type, { anchor: 'middle', baseline: 'middle', land: false });
+    b.restore();
+  }
+  // What's on screen (from the sidecar: controls read this request), so names avoid covering words.
+  let busyRects = [];
+  const pillsNow = () => marks.filter((m) => m.alive && m.pill).map((m) => [m.pill[0] + m.dx, m.pill[1] + m.dy, m.pill[2], m.pill[3]]);
+  // Things this beat is about to mark count as marked already, so a name never lands on the next thing to be circled.
+  let upcoming = [];
+  const markedNow = () => [...marks.filter((m) => m.alive && m.marked).map((m) => [m.marked[0] + m.dx, m.marked[1] + m.dy, m.marked[2], m.marked[3]]), ...upcoming];
+  const scr = () => { const S = R.safe ?? {}; return [(S.left ?? 0) + 4, (S.top ?? 0) + 4, W - (S.right ?? 0) - 4, H - (S.bottom ?? 0) - 4]; };
+  // Beside the marked box on the spot covering the least text and no other name or mark: above, below, right, left,
+  // then the same a little further out.
+  function nameSpot(box, str, size) {
+    const [w, h] = size ?? pillSize(str), [x, y, bw, bh] = box, g = 6, far = 3 * g + h, S = scr(), pills = pillsNow(), marked = markedNow();
+    const spots = [[x, y - h - g], [x, y + bh + g], [x + bw + g, y + bh / 2 - h / 2], [x - w - g, y + bh / 2 - h / 2], [x + bw - w, y - h - g], [x + bw - w, y + bh + g],
+      [x + bw + g, y - h - g], [x + bw + g, y + bh + g], [x - w - g, y - h - g], [x - w - g, y + bh + g], [x, y - h - far], [x, y + bh + far]];
+    let best = null, bestCost = Infinity;
+    spots.forEach((s, k) => {
+      const r = [s[0], s[1], w, h];
+      if (r[0] < S[0] || r[1] < S[1] || r[0] + w > S[2] || r[1] + h > S[3]) return;
+      if (pills.some((q) => overlap(grow(r, 3), q) > 0) || marked.some((q) => overlap(r, q) > 0)) return;
+      const cost = busyRects.reduce((a, q) => a + overlap(grow(r, 2), q), 0) / (w * h) + k * 0.01 + (k >= 10 ? 0.05 : 0);
+      if (cost < bestCost) { best = r; bestCost = cost; }
+    });
+    return best || [clamp(x, S[0], S[2] - w), clamp(y - h - g, S[1], S[3] - h), w, h];
+  }
+  function pillMark(part, r, str, screen = true) {
+    return add({ z: 6, part, screen, kind: 'pill', pill: r, box: r, draw(b, l, t) { chip(b, r[0], r[1], r[2], r[3], str, t - this.born, { color: this.color === ACC ? ACC : this.color }); } });
+  }
+  async function name(part, box, str, screen = true) {
+    if (!str) return null;
+    const r = nameSpot(box, str), [tx, ty] = tipNow();
+    if (Math.hypot(r[0] + r[2] - 8 - tx, r[1] + r[3] - 4 - ty) > 140) await fly(r[0] + r[2] - 8, r[1] + r[3] - 4);
+    sfx('pop');
+    return pillMark(part, r, str, screen);
+  }
+  // A small report in our chrome near the cursor: copied, opening, handed off.
+  function toast(str, sub, o = {}) {
+    const [x, y] = tipNow(), w = Math.min(420, Math.max(textW(str, `600 11px ${MONO}`), sub ? textW(sub, `400 11px ${MONO}`) : 0) + 50), h = sub ? 46 : 28;
+    // Clear of the cursor, and stacked under any toast still showing (several actions in one beat).
+    const S = scr(), live = marks.filter((m) => m.alive && m.kind === 'toast' && !m.leave);
+    const below = live.reduce((yy, m) => Math.max(yy, m.box[1] + m.box[3] - 20 + 6), y + 30);
+    const bx = clamp(x + 34, S[0] + 4, S[2] - w - 4), by = clamp(below, S[1] + 4, S[3] - h - 4);
+    const subText = sub ? ellipsize(String(sub).replace(/\s+/g, ' '), w - 44, `400 11px ${MONO}`) : '';
+    return add({ z: 8, p: 1, kind: 'toast', box: [bx - 4, by - 4, w + 8, h + 20], live: () => true, draw(b, l, t) {
+      const u = clamp((t - this.born) / 0.25, 0, 1), out = this.leave ? clamp((t - this.leave) / 0.3, 0, 1) : 0;
+      b.save(); b.globalAlpha *= 1 - out; b.translate(0, (1 - back(u)) * 10);
+      chrome(b, bx, by, w, h);
+      const cx = bx + 16, cy = by + 14;
+      if (o.spin) for (let k = 0; k < 8; k++) { const a = (k / 8) * Math.PI * 2, on = (Math.floor(t * 10) - k + 8) % 8 < 3; b.fillStyle = on ? ACC : DEEP; b.fillRect(Math.round(cx + Math.cos(a) * 6) - 1.5, Math.round(cy + Math.sin(a) * 6) - 1.5, 3, 3); }
+      else { b.fillStyle = ACC; [[-5, 0], [-2, 3], [1, 0], [4, -3], [7, -6]].forEach(([dx, dy]) => b.fillRect(cx + dx - 1.5, cy + dy - 1.5, 3, 3)); }
+      typed(b, ellipsize(str, w - 44, `600 11px ${MONO}`), bx + 32, by + 18, `600 11px ${MONO}`, TEXT, (t - this.born) / 0.4);
+      if (subText) typed(b, subText, bx + 32, by + 36, `400 11px ${MONO}`, DIM, (t - this.born - 0.2) / 0.6);
+      b.restore();
+      if (out >= 1) this.alive = false;
+    } });
+  }
+  const leaveAfter = async (m, ms) => { await sleep(ms); m.leave = now(); touch(0.5); };
+
+  // ---------------------------------------------------------------- screen marks
+  const strokeMark = (part, pts, color = ACC, extra = {}) => add({ z: 3, part, screen: true, pts, color, ...extra, draw(b, l, t) { pen(b, l, this, this.pts, this.p, this.color, { w: this.w }); this.more?.(b, l, t); } });
+  const drawStroke = (m, dur) => trace(m.pts, dur ?? penDur(m.pts), (e) => (m.p = e));
+  const rectOf = (m) => locRect(m.at?.rect);
+  const pathPts = (m) => (m.points?.length >= 2 ? m.points.map(([x, y]) => loc(x, y)) : (() => { const [x, y, w, h] = rectOf(m); return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]; })());
+  // The last mark the user is asked to click or hover, parked on by the cursor.
+  const SCREEN_MARKS = {
+    async point(m) {
+      const [x0, y0, w0, h0] = rectOf(m), x = x0 + w0 / 2, y = y0 + h0 / 2, r = rnd(12, 15);
+      const s = strokeMark(m.part, loop(x - r, y - r, 2 * r, 2 * r, { pad: 0, r, over: rnd(0.12, 0.2) }), tone(m.tone), { marked: [x - r - 3, y - r - 3, 2 * r + 6, 2 * r + 6], more(b, l) { if (this.p > 0.98) { l.fillStyle = colorOf(this, this.color); l.beginPath(); l.arc(x, y, 3.2, 0, Math.PI * 2); l.fill(); } } });
+      await drawStroke(s, 0.55); await name(m.part, s.marked, m.label); await rest(x + r, y + r);
+    },
+    target: (m) => pointer(m, false),
+    hover: (m) => pointer(m, true),
+    async ring(m) {
+      const [x, y, w, h] = rectOf(m), s = strokeMark(m.part, loop(x, y, w, h, { r: m.at.r }), tone(m.tone));
+      s.marked = boxOf(s.pts);
+      await drawStroke(s); await name(m.part, s.marked, m.label); await rest(x + w, y + h);
+    },
+    async frame(m) {
+      // An area: one pen line round it, closing on itself, then a faint tint.
+      const [x, y, w, h] = rectOf(m), pts = loop(x, y, w, h, { pad: 4, r: Math.min(12, m.at.r ?? shapeRadius(w, h)), over: rnd(0.02, 0.05) });
+      const s = strokeMark(m.part, pts, tone(m.tone), { z: 1, fa: 0, marked: [x - 4, y - 4, w + 8, h + 8] });
+      s.draw = function (b, l) { if (this.fa) { const path = new Path2D(); pts.forEach((q, i) => (i ? path.lineTo(q[0], q[1]) : path.moveTo(q[0], q[1]))); b.fillStyle = rgba(colorOf(this, this.color), 0.11 * this.fa); b.fill(path); } pen(b, l, this, pts, this.p, this.color); };
+      await drawStroke(s); sfx('scan'); await tween(0.2, (u) => (s.fa = u)); await name(m.part, s.marked, m.label);
+    },
+    async underline(m) { const [x, y, w, h] = rectOf(m), s = strokeMark(m.part, handLine([x - 2, y + h + 3], [x + w + 2, y + h + 3 + rnd(-1.5, 1.5)], { bow: rnd(0.01, 0.035) }), tone(m.tone), { w: 3.2 }); await drawStroke(s); await name(m.part, [x, y, w, h + 4], m.label); await rest(x + w, y + h); },
+    async strike(m) { const [x, y, w, h] = rectOf(m), s = strokeMark(m.part, handLine([x - 3, y + h / 2 + rnd(-1, 1)], [x + w + 3, y + h / 2 + rnd(-1.5, 1)]), tone(m.tone || 'coral'), { w: 3 }); await drawStroke(s); await name(m.part, [x, y, w, h], m.label); await rest(x + w, y + h / 2); },
+    check: (m) => { const [x, y] = glyphSpot(m); return glyph(m, [handLine([x - 9, y - 1], [x - 2, y + 7], { jitter: 1 }), handLine([x - 2, y + 7], [x + 11, y - 9], { jitter: 1, bow: 0.04 })], tone(m.tone || 'lime')); },
+    cross: (m) => { const [x, y] = glyphSpot(m); return glyph(m, [handLine([x - 8, y - 8], [x + 8, y + 8], { jitter: 1 }), handLine([x + 8, y - 8], [x - 8, y + 8], { jitter: 1 })], tone(m.tone || 'coral')); },
+    async connect(m) {
+      const A = rectOf(m), B = locRect(m.to.rect), ca = [B[0] + B[2] / 2, B[1] + B[3] / 2], cb = [A[0] + A[2] / 2, A[1] + A[3] / 2];
+      await arrow(m.part, edgeToward(A, ca), edgeToward(B, cb, 8), { tone: m.tone });
+      await name(m.part, B, m.label);
+    },
+    async trace(m) {
+      const p0 = pathPts(m), base = catmull(p0, true), pts = handPath(base, 1.4), tail = handPath(base.slice(0, 12), 1).map((q) => [q[0] + rnd(1, 3), q[1] - rnd(1, 3)]), all = [...pts, ...tail];
+      const s = strokeMark(m.part, all, tone(m.tone), { z: 1, fa: 0, marked: boxOf(pts) });
+      s.draw = function (b, l) { if (this.fa) { const path = new Path2D(); pts.forEach((q, i) => (i ? path.lineTo(q[0], q[1]) : path.moveTo(q[0], q[1]))); b.fillStyle = rgba(colorOf(this, this.color), 0.11 * this.fa); b.fill(path); } pen(b, l, this, all, this.p, this.color); };
+      await drawStroke(s); await tween(0.35, (u) => (s.fa = u)); await name(m.part, s.marked, m.label);
+    },
+    async num(m, ctx) {
+      const [x0, y0] = rectOf(m), x = x0 - 2, y = y0 - 2, n = m.n ?? ++ctx.num;
+      await tap(x, y); sfx('blip');
+      add({ z: 6, part: m.part, screen: true, p: 1, marked: [x - 12, y - 12, 24, 24], box: [x - 12, y - 14, 26, 28], draw(b, l, t) { chip(b, x - 11, y - 11, 22, 22, String(n), t - this.born, { color: this.color }); } });
+      await rest(x, y);
+    },
+    async label(m) { const box = rectOf(m), str = m.text || m.label, r = nameSpot(box, str); await fly(r[0] + r[2] - 8, r[1] + 19); sfx('pop'); pillMark(m.part, r, str); },
+    async write(m) {
+      const [x0, y0, w0, h0] = rectOf(m), str = m.text || m.label, S0 = scr(), size = clamp(Math.min(m.size ?? 30, ((S0[2] - S0[0] - 40) / Math.max(1, textW(str, `800 30px ${DOTO}`))) * 30), 12, 64), font = `800 ${size}px ${DOTO}`, w = textW(str, font);
+      const x = clamp(x0, scr()[0], scr()[2] - w), y = y0 + h0 + size * 1.05;
+      const s = add({ z: 4, part: m.part, screen: true, color: tone(m.tone), box: [x - 4, y - size, w + 8, size * 1.4], marked: [x, y - size, w, size * 1.2], draw(b) { typed(b, str, x, y, font, colorOf(this, this.color), this.p, { rim: 5 }); } });
+      await trace(handLine([x, y - size * 0.3], [x + w, y - size * 0.3], { jitter: 1 }), 0.4 + str.length * 0.06, (e) => (s.p = e)); await rest(x + w, y);
+    },
+    async scroll(m) {
+      const [x0, y0, w0, h0] = rectOf(m), x = x0 + w0 / 2, y = y0 + h0 / 2, sgn = m.dir === 'up' ? -1 : 1;
+      const cs = [0, 1].map((k) => { const yy = y + k * 13 * sgn; return handLine([x - 11, yy - 6 * sgn], [x, yy + 5 * sgn], { jitter: 0.6 }).concat(handLine([x, yy + 5 * sgn], [x + 11, yy - 6 * sgn], { jitter: 0.6 })); });
+      const s = add({ z: 4, part: m.part, screen: true, p: 0, p2: 0, color: tone(m.tone), box: [x - 20, y - 30, 40, 70], marked: [x - 14, y - 14, 28, 44], live: () => true, draw(b, l, t) { const bob = this.p2 >= 1 && !reduced() ? Math.sin(t * 4) * 3 * sgn : 0; l.save(); b.save(); l.translate(0, bob); b.translate(0, bob); pen(b, l, this, cs[0], this.p, this.color, { key: 'a' }); pen(b, l, this, cs[1], this.p2, this.color, { key: 'b' }); l.restore(); b.restore(); } });
+      await trace(cs[0], 0.3, (e) => (s.p = e)); await trace(cs[1], 0.3, (e) => (s.p2 = e));
+      await name(m.part, s.marked, m.label);
+    },
+    async spotlight(m) {
+      const [x, y, w, h] = rectOf(m), p = 8, g = (v) => Math.round(v / P) * P, hole = [g(x - p), g(y - p), g(w + 2 * p), g(h + 2 * p)];
+      add({ z: 0, part: m.part, screen: true, p: 1, box: () => [0, 0, W, H], draw(b, l, t) {
+        const u = clamp((t - this.born) / 0.5, 0, 1), BAND = 6, e = BAND * P;
+        b.fillStyle = `rgba(3,14,16,${0.62 * u})`;
+        const outer = new Path2D(); outer.rect(0, 0, W, H); outer.rect(hole[0] - e, hole[1] - e, hole[2] + 2 * e, hole[3] + 2 * e); b.fill(outer, 'evenodd');
+        // a dithered falloff round the opening (our pixels) instead of a blur
+        for (let gy = Math.floor((hole[1] - e) / P); gy < (hole[1] + hole[3] + e) / P; gy++) for (let gx = Math.floor((hole[0] - e) / P); gx < (hole[0] + hole[2] + e) / P; gx++) {
+          const cx = gx * P + 2, cy = gy * P + 2, dx = Math.max(hole[0] - cx, 0, cx - hole[0] - hole[2]), dy = Math.max(hole[1] - cy, 0, cy - hole[1] - hole[3]), d = Math.hypot(dx, dy) / P;
+          if (d === 0) continue;
+          if (d < BAND && (d / BAND) * 16 * u < B4[(((gy % 4) + 4) % 4) * 4 + (((gx % 4) + 4) % 4)] + 0.5) continue;
+          b.fillRect(gx * P, gy * P, P, P);
+        }
+      } });
+      sfx('focus'); await fly(x + w * 0.85, y + h + 10); await name(m.part, [x, y, w, h], m.label);
+    },
+    async highlight(m) {
+      const [x, y, w, h] = rectOf(m), band = handLine([x, y + h / 2], [x + w, y + h / 2 + rnd(-1.5, 1.5)], { jitter: 1 });
+      const s = add({ z: 0, part: m.part, screen: true, color: tone(m.tone || 'amber'), box: [x - 6, y - 6, w + 12, h + 12], draw(b) { const k = Math.max(2, Math.round(band.length * this.p)); b.save(); b.lineCap = 'butt'; b.lineJoin = 'round'; b.lineWidth = h; b.strokeStyle = rgba(colorOf(this, this.color), 0.4); b.beginPath(); band.slice(0, k).forEach((q, i) => (i ? b.lineTo(q[0], q[1]) : b.moveTo(q[0], q[1]))); b.stroke(); b.restore(); } });
+      await trace(band, 0.5, (e) => (s.p = e)); await name(m.part, [x, y, w, h], m.label);
+    },
+    line: (m) => free(m, handPath(pathPts(m))),
+    curve: (m) => free(m, handPath(catmull(pathPts(m), false), 1)),
+    async arrow(m) { const p = pathPts(m); await arrow(m.part, p[0], p[p.length - 1], { bend: 0.03, tone: m.tone, via: p.length > 2 ? p : null }); },
+    circle: (m) => { const [x, y, w, h] = rectOf(m), r = Math.max(w, h) / 2; return free(m, loop(x + w / 2 - r, y + h / 2 - r, 2 * r, 2 * r, { pad: 4, r })); },
+    rect: (m) => { const [x, y, w, h] = rectOf(m); return free(m, loop(x, y, w, h, { pad: 4, r: 6, over: rnd(0.03, 0.08) })); },
+  };
+  // Click here (target) or hover here: a loop round the control that breathes while it waits, with the cursor parked
+  // on it, tapping (click) or circling slowly (hover).
+  async function pointer(m, hov) {
+    const [x, y, w, h] = rectOf(m), pts = loop(x, y, w, h, { r: m.at.r, pad: 5 });
+    const s = add({ z: 3, part: m.part, screen: true, pts, color: tone(m.tone), marked: boxOf(pts), waiting: false, live() { return this.waiting; }, draw(b, l, t) {
+      if (this.p >= 1 && this.waiting && !hov && !reduced()) {
+        const u = 0.5 + 0.5 * Math.sin(t * 4), path = new Path2D(); pts.forEach((q, i) => (i ? path.lineTo(q[0], q[1]) : path.moveTo(q[0], q[1])));
+        b.fillStyle = rgba(colorOf(this, this.color), 0.06 + 0.07 * u); b.fill(path); l.save(); l.globalAlpha *= 0.85 + 0.15 * u; pen(b, l, this, pts, 1, this.color); l.restore(); return;
+      }
+      pen(b, l, this, pts, this.p, this.color, { w: hov ? 2.8 : 3.6 });
+    } });
+    await drawStroke(s); await name(m.part, s.marked, m.label);
+    const px = x + Math.min(w * 0.72, w - 10), py = y + h * 0.68;
+    await fly(px, py);
+    s.parkAt = [px, py, hov ? 'circle' : 'tap'];
+    return s;
+  }
+  // A tick or cross goes beside the thing on the spot covering the least (right, left, above…), its centre returned.
+  function glyphSpot(m) { const r = nameSpot(rectOf(m), '', [26, 24]); return [r[0] + 13, r[1] + 12]; }
+  function glyph(m, strokes, color) {
+    const all = strokes.flat(), s = add({ z: 3, part: m.part, screen: true, pts: all, color, ps: strokes.map(() => 0), marked: boxOf(all), draw(b, l) { strokes.forEach((q, i) => pen(b, l, this, q, this.ps[i], this.color, { key: 's' + i, w: 3.4 })); } });
+    return (async () => { for (const [i, q] of strokes.entries()) await trace(q, 0.22, (e) => (s.ps[i] = e)); sfx('tick'); await name(m.part, s.marked, m.label); await rest(...all[all.length - 1]); })();
+  }
+  async function free(m, pts) { const s = strokeMark(m.part, pts, tone(m.tone)); s.marked = boxOf(pts); await drawStroke(s); await name(m.part, s.marked, m.label); }
+  // A curved arrow, the head drawn as two quick strokes after the line.
+  async function arrow(part, a, b, o = {}) {
+    let curve;
+    if (o.via) curve = handPath(catmull(o.via, false), 0.8);
+    else {
+      const bend = (o.bend ?? 0.25) + rnd(-0.04, 0.04), mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, c = [mx - (b[1] - a[1]) * bend, my + (b[0] - a[0]) * bend];
+      curve = handPath(Array.from({ length: 41 }, (_, k) => { const t = k / 40; return [(1 - t) ** 2 * a[0] + 2 * (1 - t) * t * c[0] + t * t * b[0], (1 - t) ** 2 * a[1] + 2 * (1 - t) * t * c[1] + t * t * b[1]]; }), 0.8);
+    }
+    const end = curve[curve.length - 1], prev = curve[Math.max(0, curve.length - 8)], ang = Math.atan2(end[1] - prev[1], end[0] - prev[0]), hl = rnd(11, 15), sp = rnd(2.5, 2.8);
+    const head = handLine([end[0] + Math.cos(ang + sp) * hl, end[1] + Math.sin(ang + sp) * hl], end, { jitter: 0.5 }).concat(handLine(end, [end[0] + Math.cos(ang - sp) * hl, end[1] + Math.sin(ang - sp) * hl], { jitter: 0.5 }));
+    const s = strokeMark(part, curve, tone(o.tone), { screen: o.screen ?? true, hp: 0, box: () => boxOf([...curve, ...head]), more(bb, l) { if (this.hp) pen(bb, l, this, head, this.hp, this.color, { key: 'h' }); } });
+    await drawStroke(s); await trace(head, 0.22, (e) => (s.hp = e)); await rest(end[0], end[1]);
+    return s;
+  }
+
+  // ---------------------------------------------------------------- actions in the real app
+  const ACTIONS_DRAW = {
+    async type(m) {
+      // The sidecar has already typed it into the field (act_in_app's path); this shows where and what.
+      const [x, y, w, h] = rectOf(m); await tap(x + Math.min(w * 0.3, 40), y + h / 2); sfx('focus');
+      const str = String(m.text), font = `400 12px ${MONO}`, n0 = now();
+      for (let i = 0; i < Math.min(str.length, 24); i++) { sfx('key'); await sleep(35 + Math.random() * 35); }
+      add({ z: 4, part: m.part, screen: true, p: 1, box: [x - 4, y - 30, w + 8, h + 34], live: (t) => t - n0 < 3, draw(b, l, t) {
+        const age = t - n0; if (age > 3.2) return;
+        if (Math.floor(age * 2) % 2 === 0) { l.fillStyle = this.color; l.fillRect(x + 8, y + 5, 2, h - 10); }
+        const shown = ellipsize(`typed: ${str.replace(/\s+/g, ' ')}`, 360, font), tw = textW(shown, font) + 16;
+        b.globalAlpha *= clamp(1 - (age - 2.6) / 0.6, 0, 1); chrome(b, x, y - 28, tw, 22, { corner: P }); typed(b, shown, x + 8, y - 13, font, TEXT, age / 0.5);
+      } });
+      await rest(x + w, y + h);
+    },
+    async copy(m) { sfx('tick'); leaveAfter(toast('Copied to your clipboard', m.text), 1800); },
+    async open(m) { let h = m.url; try { h = new URL(m.url).hostname.replace(/^www\./, ''); } catch {} sfx('whoosh'); leaveAfter(toast(`Opening ${h}`, m.url, { spin: true }), 1800); },
+    async handoff(m) { sfx('toolstart'); leaveAfter(toast('Handed off', m.task || m.text || m.label || '', { spin: true }), 2200); },
+    async button(m) {
+      const k = 1.15, w = Math.round(textW(m.text, CHIP(k)) + 34), h = 32;
+      const r = m.at ? nameSpot(rectOf(m), m.text, [w, h]) : place(w, h, m.part);
+      await tap(r[0] + w - 14, r[1] + h - 8); sfx('pop');
+      add({ z: 6, part: m.part, screen: !!m.at, kind: 'button', pill: r, box: [r[0] - 2, r[1] - 4, w + 4, h + 10], hover: false, down: 0, draw(b, l, t) { chip(b, r[0], r[1], w, h, m.text, t - this.born, { k, color: this.color, hover: this.hover, down: now() - this.down < 0.15 }); },
+        hits() { return [{ rect: [r[0], r[1], w, h], kind: 'button', part: m.part }]; } });
+    },
+    async emote(m) {
+      const [x, y] = tipNow(); agent()?.act?.(m.name);
+      for (let k = 0; k < 9; k++) { const a = (k / 9) * Math.PI * 2 + rnd(-0.2, 0.2), r0 = rnd(30, 40), ln = rnd(10, 16), col = k % 3 ? ACC : tone('amber'); add({ z: 9, p: 1, box: [x - 90, y - 90, 180, 180], live: () => true, draw(b, l, t) { const u = (t - this.born) / 0.8; if (u > 1) { this.alive = false; return; } const r = r0 + u * 22; l.save(); l.globalAlpha *= 1 - u; l.strokeStyle = col; l.lineWidth = 3; l.lineCap = 'round'; l.beginPath(); l.moveTo(x + Math.cos(a) * r, y + Math.sin(a) * r); l.lineTo(x + Math.cos(a) * (r + ln), y + Math.sin(a) * (r + ln)); l.stroke(); l.restore(); } }); }
+      sfx(m.name === 'hype' ? 'hype' : 'pop'); await sleep(900);
+    },
+    async sfx(m) { sfx(m.name); },
+  };
+
+  // ---------------------------------------------------------------- cards and diagrams on calm space
+  // Beside the front window (sent as global bounds), else down the right edge; never on another card or a screen mark.
+  let winRect = null;
+  function place(w, h, part) {
+    const S = scr(), top = S[1] + 12, bot = S[3] - 64; // room for the caption
+    const taken = [...marks.filter((m) => m.alive && m.card).map((m) => grow(markBox(m), 10)), ...markedNow().map((r) => grow(r, 10)), ...pillsNow()];
+    const xs = [];
+    if (winRect) {
+      if (S[2] - (winRect[0] + winRect[2]) >= w + 28) xs.push(Math.min(S[2] - w - 12, winRect[0] + winRect[2] + 20));
+      if (winRect[0] - S[0] >= w + 28) xs.push(Math.max(S[0] + 12, winRect[0] - w - 20));
+    }
+    xs.push(S[2] - w - 16, S[0] + 16);
+    for (const x of xs) for (let y = top; y + h <= bot; y += 12) { const r = [x, y, w, h]; if (!taken.some((q) => overlap(r, q) > 0)) return r; }
+    return [S[2] - w - 16, top, w, h];
+  }
+  // A card opening: the cursor drags its corner out. Returns the card mark; draw(b, l, t, x, y) paints its insides.
+  async function card(m, w, h, inner, o = {}) {
+    const [x, y] = place(w, h, m.part), bar = o.bar === false ? 0 : 26;
+    const c = add({ z: 2, part: m.part, card: true, kind: m.kind, cw: 0, ch: 0, p: 0, done: 0, w, h, color: tone(m.tone), live: o.live, box: () => [x - 4, y - 4, w + 8, h + 14],
+      draw(b, l, t) {
+        if (this.cw < 4) return;
+        chrome(b, x, y, this.cw, this.ch, { edge: o.edge ? colorOf(this, this.color) : ACC });
+        if (this.p < 1) return;
+        if (bar) {
+          b.fillStyle = 'rgba(120,255,226,0.06)'; b.fillRect(x + 2, y + 2, w - 4, bar - 2);
+          b.fillStyle = DEEP; b.fillRect(x + 2, y + bar, w - 4, 1);
+          [0, 1].forEach((k) => { b.fillStyle = k ? DEEP : ACC; b.fillRect(x + 12 + k * 12, y + 11, 5, 5); });
+          if (o.title) typed(b, ellipsize(String(o.title).toLowerCase(), w - 90, `500 10px ${MONO}`), x + w / 2, y + 17, `500 10px ${MONO}`, DIM, (t - this.done) / 0.4, { anchor: 'middle' });
+          // close: a small pixel ×
+          const cx = x + w - 18, cy = y + 13, hot = this.hoverClose;
+          b.fillStyle = hot ? HOT : DIM; for (let k = -3; k <= 3; k++) { b.fillRect(cx + k - 1, cy + k - 1, 2, 2); b.fillRect(cx + k - 1, cy - k - 1, 2, 2); }
+        }
+        // A last guard: nothing inside a card is drawn outside it.
+        for (const c of [b, l]) { c.save(); c.beginPath(); c.rect(x + 2, y + bar + 1, w - 4, h - bar - 3); c.clip(); }
+        try { inner.call(this, b, l, t, x, y + bar, t - this.done); } finally { b.restore(); l.restore(); }
+      },
+      hits() {
+        const out = bar ? [{ rect: [x + w - 28, y + 2, 26, 22], kind: 'close', part: m.part }, { rect: [x, y, w - 30, bar], kind: 'drag', part: m.part }] : [{ rect: [x, y, w, Math.min(h, 24)], kind: 'drag', part: m.part }];
+        return [...(this.more?.() ?? []), ...out, { rect: [x, y, w, h], kind: 'card', part: m.part }];
+      },
+    });
+    await fly(x, y); sfx('expand');
+    await tween(0.45, (u) => { const e = ease(u); c.cw = w * e; c.ch = h * e; penApi()?.set?.(x + c.cw, y + c.ch); });
+    c.p = 1; c.done = now(); touch(1.5); syncClearAll();
+    if (m.tie?.rect) { const T = locRect(m.tie.rect), C = [x, y, w, h], tc = [T[0] + T[2] / 2, T[1] + T[3] / 2]; await arrow(m.part, edgeToward(T, [x + w / 2, y + h / 2], 6), edgeToward(C, tc, 6), { bend: -0.2, screen: false }); }
+    return c;
+  }
+  const BODY = `400 13px ${MONO}`, SMALL = `400 11px ${MONO}`;
+  // The tallest a card may be: the screen less its margins and the caption.
+  const maxCardH = () => Math.max(160, scr()[3] - scr()[1] - 100);
+  // A row of sources: favicon (or a dot) and name, each opening its link.
+  function sourcesRow(c, list, x, y, w, t) {
+    let cx = x; const hits = [];
+    c.font = `500 10px ${MONO}`; c.fillStyle = DIM; c.fillText('SOURCES', cx, y); cx += textW('SOURCES', c.font) + 12;
+    for (const s of list) {
+      const nw = textW(s.name, SMALL) + 26;
+      if (cx + nw > x + w) break;
+      if (s.img?.complete && s.img.naturalWidth) c.drawImage(s.img, cx, y - 10, 12, 12); else { c.fillStyle = MID; c.fillRect(cx + 3, y - 7, 6, 6); }
+      typed(c, s.name, cx + 16, y, SMALL, DIM, t / 0.4);
+      hits.push({ rect: [cx - 2, y - 13, nw, 18], kind: 'link', url: s.url });
+      cx += nw;
+    }
+    return hits;
+  }
+  const loadIcons = (list) => (list ?? []).map((s) => { const o = { ...s }; if (s.icon) { o.img = new Image(); o.img.onload = () => touch(); o.img.src = s.icon; } return o; });
+  const CARDS_DRAW = {
+    async card(m) {
+      const w = 340, HEAD = `800 22px ${DOTO}`, heads = m.heading ? wrapRows(m.heading, w - 40, HEAD, 2) : [], srcs = loadIcons(m.sources);
+      const head = heads.length ? heads.length * 26 + 14 : 0, room = Math.floor((maxCardH() - 58 - head - (srcs.length ? 30 : 0)) / 19);
+      const items = (m.items ?? []).map((it) => wrapRows(it, w - 64, BODY, 3));
+      const itemRows = items.reduce((s2, r) => s2 + r.length, 0), rows = m.text ? wrapRows(m.text, w - 40, BODY, Math.max(2, room - itemRows)) : [];
+      while (items.length && rows.length + items.reduce((s2, r) => s2 + r.length, 0) > room) items.pop();
+      const h = 26 + 18 + head + rows.length * 19 + items.reduce((s2, r) => s2 + r.length * 19 + 6, 0) + (srcs.length ? 30 : 0) + 14;
+      const ticks = items.map((_, i) => handLine([0, 0], [8, 0], { jitter: 0.3 }));
+      let hits = [];
+      const c = await card(m, w, h, function (b, l, t, x, y, age) {
+        let yy = y + 18;
+        heads.forEach((r, i) => typed(b, r, x + 20, yy + 18 + i * 26, HEAD, TEXT, (age - i * 0.3) / 0.6)); yy += head;
+        wrapped(b, rows, x + 20, yy + 6, 19, BODY, TEXT, (age - 0.2) / (0.4 + rows.join(' ').length * 0.012)); yy += rows.length * 19;
+        items.forEach((r, i) => { const a = age - 0.4 - i * 0.25; if (a <= 0) return; pen(b, l, this, ticks[i].map(([px, py]) => [px + x + 24, py + yy + 1]), clamp(a / 0.2, 0, 1), this.color, { key: 'k' + i, w: 2.6 }); wrapped(b, r, x + 40, yy + 6, 19, BODY, TEXT, a / 0.5); yy += r.length * 19 + 6; });
+        if (srcs.length) hits = sourcesRow(b, srcs, x + 20, y + h - 26 - 18, w - 40, age - 0.6);
+      }, { title: m.title || 'answer' });
+      c.more = () => hits.map((q) => ({ ...q, part: m.part }));
+    },
+    async note(m) {
+      const w = 210, rows = wrapRows(m.text, w - 28, `500 13px ${MONO}`, Math.floor((maxCardH() - 40) / 19)), h = 40 + rows.length * 19;
+      await card(m, w, h, function (b, l, t, x, y, age) { b.fillStyle = colorOf(this, this.color); b.fillRect(x + 8, y + 8, w - 16, 3); wrapped(b, rows, x + 14, y + 32, 19, `500 13px ${MONO}`, TEXT, age / (0.3 + m.text.length * 0.025)); }, { bar: false, edge: true });
+      sfx('page');
+    },
+    async list(m) {
+      const w = 280, TITLE = `800 20px ${DOTO}`, title = ellipsize(m.title || 'list', w - 36, TITLE);
+      const items = m.items.map((it) => wrapRows(it, w - 58, BODY, 2)), tops = [];
+      let yy = 50; for (const r of items) { tops.push(yy); yy += r.length * 19 + 11; }
+      const h = 26 + yy + 6, rings = items.map(() => loop(0, 0, 12, 12, { pad: 0, r: 6, over: 0.1 }));
+      await card(m, w, h, function (b, l, t, x, y, age) {
+        typed(b, title, x + 18, y + 30, TITLE, TEXT, age / 0.4);
+        items.forEach((r, i) => { const a = age - 0.3 - i * 0.26; if (a <= 0) return; pen(b, l, this, rings[i].map(([px, py]) => [px + x + 18, py + y + tops[i]]), clamp(a / 0.3, 0, 1), this.color, { key: 'r' + i, w: 2.4 }); wrapped(b, r, x + 40, y + tops[i] + 11, 19, BODY, TEXT, a / 0.4); });
+      }, { title: 'list' });
+      for (let i = 0; i < items.length; i++) { touch(0.5); await sleep(260); }
+    },
+    async clip(m) {
+      const w = 320, rows = wrapRows(m.text, w - 36, `400 12px ${MONO}`, 10), h = 26 + 62 + rows.length * 18, title = ellipsize(m.title, w - 36, `800 18px ${DOTO}`);
+      await card(m, w, h, function (b, l, t, x, y, age) { typed(b, title, x + 18, y + 30, `800 18px ${DOTO}`, TEXT, age / 0.5); wrapped(b, rows, x + 18, y + 56, 18, `400 12px ${MONO}`, DIM, (age - 0.3) / 1.2); }, { title: m.label || 'clipping' });
+    },
+    async sources(m) {
+      const srcs = loadIcons(m.sources), w = 360, h = 26 + 40; let hits = [];
+      const c = await card(m, w, h, function (b, l, t, x, y, age) { hits = sourcesRow(b, srcs, x + 18, y + 25, w - 36, age); }, { title: 'sources' });
+      c.more = () => hits.map((q) => ({ ...q, part: m.part }));
+    },
+    async photo(m) {
+      const w = 264, ph = 192, h = 26 + ph + 52, cells = [];
+      let ready = false;
+      if (m.src && !m.missing) {
+        const img = new Image();
+        img.onload = () => {
+          const gw = Math.floor((w - 24) / 3), gh = Math.floor(ph / 3), cv = document.createElement('canvas'); cv.width = gw; cv.height = gh;
+          const c2 = cv.getContext('2d', { willReadFrequently: true }), s = Math.max(gw / img.naturalWidth, gh / img.naturalHeight);
+          c2.drawImage(img, (gw - img.naturalWidth * s) / 2, (gh - img.naturalHeight * s) / 2, img.naturalWidth * s, img.naturalHeight * s);
+          const d = c2.getImageData(0, 0, gw, gh).data;
+          // Into the Sidekick's five LED levels with an ordered dither.
+          for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) { const i = (gy * gw + gx) * 4, lum = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) / 255, v = clamp(lum + (B4[(gy % 4) * 4 + (gx % 4)] / 16 - 0.5) * 0.22, 0, 0.999); cells.push([gx, gy, Math.floor(v * 5)]); }
+          ready = true; touch();
+        };
+        img.src = m.src;
+      }
+      const cap = m.text || m.title || m.query || '';
+      const c = await card(m, w, h, function (b, l, t, x, y, age) {
+        const u = clamp(age / 1, 0, 1);
+        if (ready) for (const [gx, gy, v] of cells) { if ((B4[(gy % 4) * 4 + (gx % 4)] + 0.5) / 16 > u * 1.05) continue; b.fillStyle = LED[v]; b.fillRect(x + 12 + gx * 3, y + 10 + gy * 3, 3, 3); }
+        else { b.fillStyle = 'rgba(14,92,96,0.25)'; b.fillRect(x + 12, y + 10, w - 24, ph - 12); typed(b, m.missing ? 'no picture found' : 'loading…', x + w / 2, y + ph / 2, SMALL, DIM, 1, { anchor: 'middle' }); }
+        typed(b, ellipsize(cap, w - 24, `800 16px ${DOTO}`), x + w / 2, y + ph + 22, `800 16px ${DOTO}`, TEXT, (age - 0.6) / 0.5, { anchor: 'middle' });
+        if (m.credit) typed(b, ellipsize(m.credit, w - 24, `400 10px ${MONO}`), x + w / 2, y + ph + 40, `400 10px ${MONO}`, DIM, (age - 0.8) / 0.4, { anchor: 'middle' });
+      }, { title: 'photo' });
+      sfx('scan');
+      return c;
+    },
+    async graph(m) {
+      const w = 360, h = 26 + 250, gx0 = 46, gy0 = 22, gw = w - gx0 - 22, gh = 168;
+      const all = [...(m.plots ?? []).flatMap((p) => p.points), ...(m.dots ?? []).map((d) => [d.x, d.y])];
+      const xr = m.x_range ?? [Math.min(...all.map((p) => p[0])), Math.max(...all.map((p) => p[0]))], yr = m.y_range ?? [Math.min(0, ...all.map((p) => p[1])), Math.max(...all.map((p) => p[1]))];
+      const sx = (v) => gx0 + ((v - xr[0]) / ((xr[1] - xr[0]) || 1)) * gw, sy = (v) => gy0 + gh - ((v - yr[0]) / ((yr[1] - yr[0]) || 1)) * gh;
+      const axes = handLine([gx0, gy0], [gx0, gy0 + gh], { jitter: 0.4, bow: 0.005 }).concat(handLine([gx0, gy0 + gh], [gx0 + gw, gy0 + gh], { jitter: 0.4, bow: 0.005 }));
+      const plots = (m.plots ?? []).map((p) => ({ ...p, pts: handPath([...p.points].sort((a, b) => a[0] - b[0]).map(([a, v]) => [sx(a), sy(v)]), 0.5), p: 0 }));
+      const dots = (m.dots ?? []).map((d) => ({ ...d, pts: loop(sx(d.x) - 5, sy(d.y) - 5, 10, 10, { pad: 0, r: 5 }), p: 0 }));
+      const fmt = (v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 100) / 10}k` : String(Math.round(v * 10) / 10));
+      const keys = plots.filter((p) => p.label).map((p) => [p.tone, p.label]);
+      let ax = 0;
+      const c = await card(m, w, h, function (b, l, t, x, y) {
+        const off = (pts) => pts.map(([px, py]) => [px + x, py + y]);
+        this.__off ??= { axes: off(axes), plots: plots.map((p) => off(p.pts)), dots: dots.map((d) => off(d.pts)) };
+        const O = this.__off;
+        pen(b, l, this, O.axes, ax, MID, { key: 'ax', w: 2.4 });
+        if (ax >= 1) {
+          b.font = `400 10px ${MONO}`; b.fillStyle = DIM;
+          for (let k = 0; k <= 4; k++) { const v = xr[0] + ((xr[1] - xr[0]) * k) / 4, v2 = yr[0] + ((yr[1] - yr[0]) * k) / 4; b.textAlign = 'center'; b.fillText(fmt(v), x + sx(v), y + gy0 + gh + 16); b.textAlign = 'right'; b.fillText(fmt(v2), x + gx0 - 8, y + sy(v2) + 3); }
+          b.textAlign = 'left';
+        }
+        plots.forEach((p, i) => pen(b, l, this, O.plots[i], p.p, tone(p.tone), { key: 'p' + i }));
+        dots.forEach((d, i) => { pen(b, l, this, O.dots[i], d.p, HOT, { key: 'd' + i, w: 2.6 }); if (d.p >= 1 && d.label) { const lab = ellipsize(d.label, 130, SMALL), lx = Math.min(x + sx(d.x) + 9, x + w - 12 - textW(lab, SMALL)); typed(b, lab, lx, y + sy(d.y) - 8, SMALL, TEXT, 1); } });
+        let kx = x + gx0; for (const [tn, words0] of keys) { const words = ellipsize(words0, 110, SMALL); if (kx + textW(words, SMALL) + 14 > x + w - 10) break; b.fillStyle = tone(tn); b.beginPath(); b.arc(kx + 4, y + gy0 + gh + 38, 4, 0, Math.PI * 2); b.fill(); typed(b, words, kx + 14, y + gy0 + gh + 42, SMALL, DIM, 1); kx += textW(words, SMALL) + 30; }
+      }, { title: m.title || 'graph' });
+      const [x, y] = [markBox(c)[0] + 4, markBox(c)[1] + 4 + 26];
+      await trace(axes.map(([px, py]) => [px + x, py + y]), 0.7, (e) => (ax = e));
+      for (const p of plots) await trace(p.pts.map(([px, py]) => [px + x, py + y]), 1.2, (e) => (p.p = e));
+      for (const d of dots) await trace(d.pts.map(([px, py]) => [px + x, py + y]), 0.3, (e) => (d.p = e));
+    },
+    async legend(m) {
+      // Keys flow onto more lines rather than past the edge.
+      const maxW = 420, at0 = []; let cx = 18, row = 0, widest = 0;
+      for (const k of m.keys) { const text = ellipsize(k.text, maxW - 54, SMALL), kw = textW(text, SMALL) + 32; if (cx > 18 && cx + kw > maxW - 4) { row++; cx = 18; } at0.push([cx, row, text]); cx += kw; widest = Math.max(widest, cx); }
+      const w = Math.min(maxW, widest + 4), h = 18 + (row + 1) * 22;
+      await card(m, w, h, function (b, l, t, x, y, age) { m.keys.forEach((k, i) => { const [kx, r, text] = at0[i], ky = y + 20 + r * 22; b.fillStyle = tone(k.tone); b.beginPath(); b.arc(x + kx + 4, ky - 4, 4, 0, Math.PI * 2); b.fill(); typed(b, text, x + kx + 14, ky, SMALL, DIM, age / 0.4); }); }, { bar: false });
+    },
+    async timeline(m) {
+      const ev = m.events, w = Math.max(360, ev.length * 84), h = 26 + 120, ty = 58;
+      const xs = ev.map((_, i) => 30 + ((w - 60) * i) / Math.max(1, ev.length - 1)), line = handLine([16, ty], [w - 16, ty], { jitter: 0.5, bow: 0.006 });
+      let lp = 0; const shown = [];
+      const c = await card(m, w, h, function (b, l, t, x, y) {
+        this.__line ??= line.map(([px, py]) => [px + x, py + y]);
+        pen(b, l, this, this.__line, lp, MID, { key: 'l', w: 2.6 });
+        ev.forEach((e, i) => {
+          const s = shown[i]; if (s == null) return; const a = t - s, up = i % 2 === 0, px = x + xs[i];
+          chip(b, px - 7, y + ty - 7, 14, 14, '', a, { color: this.color });
+          // Centred on its dot, but never past the card's edges.
+          const inCard = (str, font) => { const tw = textW(str, font); return clamp(px, x + 10 + tw / 2, x + w - 10 - tw / 2); };
+          const gap = ev.length > 1 ? (w - 60) / (ev.length - 1) : w - 40, when = `800 15px ${DOTO}`, words = ellipsize(e.text, Math.max(60, gap * 1.6), SMALL);
+          typed(b, e.when, inCard(e.when, when), y + ty + (up ? -18 : 34), when, TEXT, a / 0.3, { anchor: 'middle' });
+          typed(b, words, inCard(words, SMALL), y + ty + (up ? -36 : 50), SMALL, DIM, (a - 0.1) / 0.4, { anchor: 'middle' });
+        });
+      }, { title: m.title || 'timeline' });
+      const [x, y] = [markBox(c)[0] + 4, markBox(c)[1] + 4 + 26];
+      await trace(line.map(([px, py]) => [px + x, py + y]), 0.8, (e) => (lp = e));
+      for (let i = 0; i < ev.length; i++) { await tap(x + xs[i], y + ty); sfx('blip'); shown[i] = now(); touch(); await sleep(150); }
+    },
+    molecule: (m) => drawMolecule(m),
+    async model(m) {
+      const w = 320, h = 26 + 280, view3d = R.ink3d?.create(m.parts, w - 24, 250);
+      await card(m, w, h, function (b, l, t, x, y, age) {
+        if (!view3d) { typed(b, '3D isn’t available here', x + w / 2, y + 120, SMALL, DIM, 1, { anchor: 'middle' }); return; }
+        const u = clamp(age / 0.8, 0, 1), f = view3d.frame(reduced() ? 0 : t);
+        for (let i = 0; i < f.lv.length; i++) { const v = f.lv[i]; if (!v) continue; const gx = i % f.gw, gy = (i / f.gw) | 0; if ((B4[(gy % 4) * 4 + (gx % 4)] + 0.5) / 16 > u * 1.05) continue; b.fillStyle = LED[v]; b.fillRect(x + 12 + gx * 3, y + 6 + gy * 3, 3, 3); }
+        if (u >= 1) for (const lab of f.labels) { const lx = x + 12 + lab.x, ly = y + 6 + lab.y; b.fillStyle = ACC; b.fillRect(lx - 1.5, ly - 1.5, 3, 3); typed(b, lab.text, lx + 6, ly - 4, `600 10px ${MONO}`, TEXT, 1, { rim: 3 }); }
+      }, { title: m.title || m.label || 'model', live: () => !!view3d && !reduced() });
+      sfx('scan');
+    },
+    ticket: (m) => drawTicket(m),
+    medal: (m) => drawMedal(m),
+  };
+
+  // ---------------------------------------------------------------- molecules: a 2D layout from the parsed SMILES
+  // Ring templates (each small ring wants to be a regular polygon) plus springs on bonds and 120° angles, and a push
+  // between atoms that aren't bonded, relaxed for a few hundred steps from a zigzag start.
+  function layoutMolecule(mol) {
+    const n = mol.atoms.length, adj = Array.from({ length: n }, () => []);
+    for (const b of mol.bonds) { adj[b.a].push(b.b); adj[b.b].push(b.a); }
+    // Smallest ring through each bond (BFS without that bond), up to 8 atoms.
+    const rings = [], seen = new Set();
+    for (const b of mol.bonds) {
+      const prev = new Map([[b.a, -1]]), q = [b.a];
+      while (q.length) { const v = q.shift(); if (v === b.b) break; for (const u of adj[v]) { if ((v === b.a && u === b.b) || prev.has(u)) continue; prev.set(u, v); q.push(u); } }
+      if (!prev.has(b.b)) continue;
+      const ring = []; for (let v = b.b; v !== -1; v = prev.get(v)) ring.push(v);
+      if (ring.length > 8) continue;
+      const key = [...ring].sort((a, c) => a - c).join(',');
+      if (!seen.has(key)) { seen.add(key); rings.push(ring); }
+    }
+    const want = new Map(); const pk = (i, j) => (i < j ? `${i},${j}` : `${j},${i}`);
+    for (const b of mol.bonds) want.set(pk(b.a, b.b), 1);
+    // Bond angles: 120° (two or three neighbours), 90° when four crowd round one atom in 2D, and straight through an
+    // atom with a triple bond or two double bonds (O=C=O, nitriles).
+    const order = (v) => mol.bonds.filter((b) => b.a === v || b.b === v).map((b) => b.order);
+    const linear = (v) => adj[v].length === 2 && (order(v).includes(3) || order(v).filter((o) => o === 2).length === 2);
+    for (let v = 0; v < n; v++) for (let i = 0; i < adj[v].length; i++) for (let j = i + 1; j < adj[v].length; j++) if (!want.has(pk(adj[v][i], adj[v][j]))) want.set(pk(adj[v][i], adj[v][j]), linear(v) ? 2 : adj[v].length >= 4 ? Math.SQRT2 : Math.sqrt(3));
+    for (const r of rings) { const N = r.length; for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) { const k = Math.min(j - i, N - (j - i)); want.set(pk(r[i], r[j]), Math.sin((Math.PI * k) / N) / Math.sin(Math.PI / N)); } }
+    const pairs = [...want].map(([k, d]) => [...k.split(',').map(Number), d]);
+    // Which pairs have a wanted distance, as a table (looked up for every pair on every step of the relaxation).
+    const wanted = new Uint8Array(n * n);
+    for (const [i, j] of pairs) { wanted[i * n + j] = 1; wanted[j * n + i] = 1; }
+    // Start: walk the molecule depth-first. A ring reached through one of its atoms is laid down whole as a regular
+    // polygon pointing away from what's placed; chains zigzag, branches fan out away from their parent. Jittered on retries.
+    const ringsOf = Array.from({ length: n }, () => []);
+    rings.forEach((r, ri) => r.forEach((v) => ringsOf[v].push(ri)));
+    const start = (jit) => {
+      const pos = Array.from({ length: n }, () => null), done = new Set(), seenV = new Set();
+      const away = (v) => { let x = 0, y = 0; for (const u of adj[v]) if (pos[u]) { x += pos[v][0] - pos[u][0]; y += pos[v][1] - pos[u][1]; } const l = Math.hypot(x, y); return l > 1e-6 ? Math.atan2(y / l, x / l) : 0; };
+      const placeRing = (ri, a, dirA) => {
+        const R = rings[ri], N = R.length, rad = 1 / (2 * Math.sin(Math.PI / N)), i0 = R.indexOf(a), c = [pos[a][0] + Math.cos(dirA) * rad, pos[a][1] + Math.sin(dirA) * rad], a0 = dirA + Math.PI;
+        for (let k = 1; k < N; k++) { const v = R[(i0 + k) % N]; if (!pos[v]) pos[v] = [c[0] + Math.cos(a0 + (k * 2 * Math.PI) / N) * rad, c[1] + Math.sin(a0 + (k * 2 * Math.PI) / N) * rad]; }
+        done.add(ri);
+      };
+      // A ring fused onto one already laid down (two of its atoms placed, side by side): built on that shared edge,
+      // on the side away from the first ring.
+      const placeFused = (ri) => {
+        const R = rings[ri], N = R.length, ix = R.map((v, k) => (pos[v] ? k : -1)).filter((k) => k >= 0);
+        if (ix.length !== 2 || !((ix[1] - ix[0] === 1) || (ix[0] === 0 && ix[1] === N - 1))) return;
+        const [i0, i1] = ix[1] - ix[0] === 1 ? ix : [ix[1], ix[0]], A = pos[R[i0]], B = pos[R[i1]], M = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
+        let nx = -(B[1] - A[1]), ny = B[0] - A[0]; const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl;
+        const pull = [Math.cos(away(R[i0])) + Math.cos(away(R[i1])), Math.sin(away(R[i0])) + Math.sin(away(R[i1]))];
+        if (nx * pull[0] + ny * pull[1] < 0) { nx = -nx; ny = -ny; }
+        const ap = 1 / (2 * Math.tan(Math.PI / N)), rad = 1 / (2 * Math.sin(Math.PI / N)), c = [M[0] + nx * ap, M[1] + ny * ap];
+        // Walk round from B away from A, so the polygon closes back on A.
+        const aB = Math.atan2(B[1] - c[1], B[0] - c[0]), aA = Math.atan2(A[1] - c[1], A[0] - c[0]);
+        const dirn = Math.sin(aA - aB) > 0 ? -1 : 1;
+        for (let k = 1; k < N - 1; k++) { const v = R[(i1 + k) % N]; if (!pos[v]) { const a = aB + (dirn * k * 2 * Math.PI) / N; pos[v] = [c[0] + Math.cos(a) * rad, c[1] + Math.sin(a) * rad]; } }
+        done.add(ri);
+      };
+      const visit = (v, depth) => {
+        seenV.add(v);
+        for (const ri of ringsOf[v]) if (!done.has(ri) && rings[ri].filter((x) => pos[x]).length === 1) placeRing(ri, v, away(v) + rnd(-jit, jit));
+        for (let again = true; again;) { again = false; for (let ri = 0; ri < rings.length; ri++) if (!done.has(ri) && rings[ri].filter((x) => pos[x]).length === 2) { const before = done.size; placeFused(ri); if (done.size > before) again = true; } }
+        const kids = adj[v].filter((u) => !pos[u]), base = away(v), m = kids.length;
+        const offs = m === 1 ? [(depth % 2 ? 1 : -1) * Math.PI / 3] : m === 2 ? [-Math.PI / 3, Math.PI / 3] : kids.map((_, k) => -Math.PI / 2 + (k * Math.PI) / Math.max(1, m - 1));
+        kids.forEach((u, k) => { const a = base + offs[k] + rnd(-jit, jit); pos[u] = [pos[v][0] + Math.cos(a), pos[v][1] + Math.sin(a)]; });
+        for (const u of adj[v]) if (!seenV.has(u)) visit(u, depth + 1);
+      };
+      for (let s0 = 0; s0 < n; s0++) if (!pos[s0]) { pos[s0] = [s0 * 4, 0]; visit(s0, 0); }
+      return pos;
+    };
+    const relax = (pos) => {
+      for (let it = 0; it < 400; it++) {
+        const step = 0.12 * (1 - it / 420);
+        for (const [i, j, d] of pairs) { const dx = pos[j][0] - pos[i][0], dy = pos[j][1] - pos[i][1], l = Math.hypot(dx, dy) || 1e-3, f = ((l - d) / l) * step; pos[i][0] += dx * f; pos[i][1] += dy * f; pos[j][0] -= dx * f; pos[j][1] -= dy * f; }
+        for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) { if (wanted[i * n + j]) continue; const dx = pos[j][0] - pos[i][0], dy = pos[j][1] - pos[i][1], l2 = dx * dx + dy * dy; if (l2 > 9) continue; const l = Math.sqrt(l2) || 1e-3, f = (step * 0.6) / (l2 + 0.1); pos[i][0] -= (dx / l) * f; pos[i][1] -= (dy / l) * f; pos[j][0] += (dx / l) * f; pos[j][1] += (dy / l) * f; }
+      }
+      // How far it is from every wanted distance, plus atoms crowding each other: the lowest wins.
+      let stress = 0;
+      for (const [i, j, d] of pairs) stress += (Math.hypot(pos[j][0] - pos[i][0], pos[j][1] - pos[i][1]) - d) ** 2;
+      for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) if (!wanted[i * n + j] && Math.hypot(pos[j][0] - pos[i][0], pos[j][1] - pos[i][1]) < 0.8) stress += 1;
+      // Bonds crossing each other (a ring folded into a bowtie) are never right.
+      const side = (a, b, c) => (c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0]), B = mol.bonds;
+      for (let a = 0; a < B.length; a++) for (let c = a + 1; c < B.length; c++) {
+        const P = B[a], Q = B[c];
+        if (P.a === Q.a || P.a === Q.b || P.b === Q.a || P.b === Q.b) continue;
+        if (side(pos[Q.a], pos[Q.b], pos[P.a]) * side(pos[Q.a], pos[Q.b], pos[P.b]) < 0 && side(pos[P.a], pos[P.b], pos[Q.a]) * side(pos[P.a], pos[P.b], pos[Q.b]) < 0) stress += 25;
+      }
+      return stress;
+    };
+    // A few tries from different starts: one can fold a ring the wrong way round, another won't.
+    let pos = null, best = Infinity;
+    // Good enough (no crossings, every distance close) ends the tries early.
+    for (let k = 0; k < (n > 60 ? 3 : 10) && best > Math.max(0.05, pairs.length * 0.01); k++) { const p = start(k ? 0.6 : 0); const st = relax(p); if (st < best) { best = st; pos = p; } }
+    return { pos, rings };
+  }
+  const ATOM_TONE = { O: 'coral', N: 'sky', S: 'amber', P: 'lilac', F: 'lime', Cl: 'lime', Br: 'coral', I: 'lilac' };
+  async function drawMolecule(m) {
+    const mol = m.mol, { pos, rings } = layoutMolecule(mol), w = 320, h = 26 + 270, bw = w - 48, bh = 214;
+    const bx = boxOf(pos), s = Math.min(bw / Math.max(bx[2], 1), bh / Math.max(bx[3], 1), 34);
+    const P2 = pos.map(([x, y]) => [24 + (x - bx[0]) * s + (bw - bx[2] * s) / 2, 18 + (y - bx[1]) * s + (bh - bx[3] * s) / 2]);
+    // Carbons are the skeleton's corners (unlabelled, as chemists draw them); everything else is named with its hydrogens.
+    const label = (a) => `${a.el}${a.h ? `H${a.h > 1 ? a.h : ''}` : ''}${a.charge ? `${Math.abs(a.charge) > 1 ? Math.abs(a.charge) : ''}${a.charge > 0 ? '+' : '−'}` : ''}`;
+    const labels = mol.atoms.map((a, i) => (a.el === 'C' && !a.charge && (mol.bonds.some((b) => b.a === i || b.b === i)) ? '' : label(a)));
+    const ringOf = (b) => rings.find((r) => r.includes(b.a) && r.includes(b.b));
+    // Each bond as hand strokes, cut short where an atom is labelled; double and triple bonds lean into their ring.
+    const strokes = [], bondOf = [];
+    for (const b of mol.bonds) {
+      let A = P2[b.a], B = P2[b.b];
+      const d = dist(A, B) || 1, ux = (B[0] - A[0]) / d, uy = (B[1] - A[1]) / d, cutA = labels[b.a] ? 9 : 0, cutB = labels[b.b] ? 9 : 0;
+      A = [A[0] + ux * cutA, A[1] + uy * cutA]; B = [B[0] - ux * cutB, B[1] - uy * cutB];
+      const nx = -uy, ny = ux, r = ringOf(b), c = r ? r.reduce((acc, i) => [acc[0] + P2[i][0] / r.length, acc[1] + P2[i][1] / r.length], [0, 0]) : null;
+      const side = c && ((c[0] - (A[0] + B[0]) / 2) * nx + (c[1] - (A[1] + B[1]) / 2) * ny) < 0 ? -1 : 1;
+      strokes.push(handLine(A, B, { jitter: 0.4, bow: rnd(-0.03, 0.03) })); bondOf.push(b);
+      const off = (k, sh = 0.18) => { const o = 4.5 * k * (r ? side : 1); return handLine([A[0] + nx * o + ux * d * sh * (r ? 1 : 0), A[1] + ny * o + uy * d * sh * (r ? 1 : 0)], [B[0] + nx * o - ux * d * sh * (r ? 1 : 0), B[1] + ny * o - uy * d * sh * (r ? 1 : 0)], { jitter: 0.3 }); };
+      if (b.order === 2) { strokes.push(off(1)); bondOf.push(null); }
+      if (b.order === 3) { strokes.push(off(1), off(-1)); bondOf.push(null, null); }
+    }
+    // Aromatic rings: a circle inside.
+    for (const r of rings) {
+      if (!r.every((i, k) => mol.bonds.some((b) => b.order === 1.5 && ((b.a === i && b.b === r[(k + 1) % r.length]) || (b.b === i && b.a === r[(k + 1) % r.length]))))) continue;
+      const c = r.reduce((acc, i) => [acc[0] + P2[i][0] / r.length, acc[1] + P2[i][1] / r.length], [0, 0]), rad = Math.min(...r.map((i) => dist(P2[i], c))) * 0.58;
+      strokes.push(loop(c[0] - rad, c[1] - rad, 2 * rad, 2 * rad, { pad: 0, r: rad, over: 0.08 })); bondOf.push(null);
+    }
+    const ps = strokes.map(() => 0), born = [];
+    const cap = m.label || m.text || '';
+    const c = await card(m, w, h, function (b, l, t, x, y, age) {
+      this.__s ??= strokes.map((q) => q.map(([px, py]) => [px + x, py + y]));
+      this.__s.forEach((q, i) => pen(b, l, this, q, ps[i], this.color, { key: 'b' + i, w: 2.6 }));
+      labels.forEach((lab, i) => {
+        if (!lab || born[i] == null) return;
+        const [px, py] = [P2[i][0] + x, P2[i][1] + y], a = mol.atoms[i];
+        typed(b, lab, px, py + 4, `700 13px ${MONO}`, tone(ATOM_TONE[a.el] || 'white'), (t - born[i]) / 0.25, { anchor: 'middle', rim: 4, land: false });
+      });
+      if (cap) typed(b, ellipsize(cap, w - 24, `800 16px ${DOTO}`), x + w / 2, y + h - 26 - 14, `800 16px ${DOTO}`, TEXT, (age - 0.5) / 0.5, { anchor: 'middle' });
+    }, { title: 'molecule' });
+    const [x, y] = [markBox(c)[0] + 4, markBox(c)[1] + 4 + 26];
+    // Bonds are short and close together: the pen hops straight to each one instead of gliding there.
+    const fast = strokes.length > 18;
+    for (const [i, q] of strokes.entries()) {
+      const pts = q.map(([px, py]) => [px + x, py + y]);
+      penApi()?.set?.(pts[0][0], pts[0][1]);
+      if (fast && i % 3) { ps[i] = 1; const b = bondOf[i]; if (b) for (const v of [b.a, b.b]) if (labels[v] && born[v] == null) born[v] = now(); touch(); continue; }
+      await trace(pts, fast ? 0.12 : 0.2, (e) => (ps[i] = e));
+      const b = bondOf[i];
+      if (b) for (const v of [b.a, b.b]) if (labels[v] && born[v] == null) { born[v] = now(); sfx('blip'); }
+    }
+    for (let i = 0; i < ps.length; i++) ps[i] = 1;
+    labels.forEach((lab, i) => { if (lab && born[i] == null) born[i] = now(); });
+    touch(1);
+  }
+
+  // ---------------------------------------------------------------- the welcome tour: job tickets and a goal medal
+  async function drawTicket(m) {
+    const w = 270, rows = m.text ? wrapRows(m.text, w - 40, `400 12px ${MONO}`, 3) : [], btn = m.action ? 36 : 0, h = 64 + rows.length * 17 + btn + 14;
+    const k = 1.05, btnText = ellipsize(m.label || 'Try it', w - 80, CHIP(k)), realBw = Math.round(textW(btnText, CHIP(k)) + 34), title = ellipsize(m.title, w - 36 - (m.n != null ? 34 : 0), `800 18px ${DOTO}`);
+    let hover = false, down = 0, br = null;
+    const c = await card(m, w, h, function (b, l, t, x, y, age) {
+      // a ticket: notches on both sides, a dashed tear line, a big number
+      b.fillStyle = 'rgba(3,14,16,1)'; for (const sx of [x - 1, x + w - 9]) b.fillRect(sx, y + 36, 10, 10);
+      b.fillStyle = DEEP; for (let dx = x + 14; dx < x + w - 14; dx += 8) b.fillRect(dx, y + 41, 4, 1);
+      typed(b, title, x + 18, y + 26, `800 18px ${DOTO}`, TEXT, age / 0.4);
+      if (m.n != null) typed(b, String(m.n).padStart(2, '0'), x + w - 18, y + 26, `800 18px ${DOTO}`, MID, 1, { anchor: 'end' });
+      wrapped(b, rows, x + 18, y + 64, 17, `400 12px ${MONO}`, DIM, (age - 0.2) / 0.8);
+      if (m.action) { br = [x + 18, y + h - btn - 10, realBw, 30]; chip(b, br[0], br[1], br[2], br[3], btnText, age - 0.5, { k, color: this.color, hover, down: now() - down < 0.15 }); }
+    }, { bar: false, edge: true });
+    c.more = () => (br ? [{ rect: br, kind: 'button', part: m.part }] : []);
+    c.setHover = (v) => { hover = v; }; c.press = () => { down = now(); };
+    sfx('page');
+  }
+  async function drawMedal(m) {
+    const w = 230, h = 250, ring = loop(0, 0, 120, 120, { pad: 0, r: 60, over: 0.12 }), star = (() => { const pts = []; for (let i = 0; i <= 10; i++) { const a = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? 16 : 36; pts.push([Math.cos(a) * r, Math.sin(a) * r]); } return handPath(pts, 0.6); })();
+    let rp = 0, sp = 0;
+    const rows = wrapRows(m.text, w - 40, `600 12px ${MONO}`, 3);
+    const c = await card(m, w, h, function (b, l, t, x, y, age) {
+      const cx = x + w / 2, cy = y + 86;
+      // ribbon
+      b.fillStyle = DEEP; b.beginPath(); b.moveTo(cx - 34, y + 6); b.lineTo(cx - 8, y + 40); b.lineTo(cx - 20, y + 44); b.closePath(); b.fill(); b.beginPath(); b.moveTo(cx + 34, y + 6); b.lineTo(cx + 8, y + 40); b.lineTo(cx + 20, y + 44); b.closePath(); b.fill();
+      this.__r ??= ring.map(([px, py]) => [px + cx - 60, py + cy - 60]); this.__st ??= star.map(([px, py]) => [px + cx, py + cy]);
+      pen(b, l, this, this.__r, rp, tone('amber'), { key: 'r' }); pen(b, l, this, this.__st, sp, tone('amber'), { key: 's', w: 3 });
+      typed(b, ellipsize((m.title || 'your goal').toUpperCase(), w - 30, `600 10px ${MONO}`), cx, y + 168, `600 10px ${MONO}`, DIM, (age - 0.6) / 0.4, { anchor: 'middle' });
+      wrapped(b, rows.map((r) => r), x + 20, y + 190, 17, `600 12px ${MONO}`, TEXT, (age - 0.8) / 0.8);
+      if (sp >= 1 && !reduced()) { const g = (Math.sin(t * 2) + 1) / 2; l.fillStyle = rgba(tone('amber'), 0.25 * g); l.fillRect(cx - 2, cy - 48, 4, 4); }
+    }, { bar: false, edge: true, live: () => sp >= 1 });
+    c.color = tone('amber');
+    const [x, y] = [markBox(c)[0] + 4, markBox(c)[1] + 4], cx = x + w / 2, cy = y + 86;
+    await trace(ring.map(([px, py]) => [px + cx - 60, py + cy - 60]), 0.9, (e) => (rp = e));
+    await trace(star.map(([px, py]) => [px + cx, py + cy]), 0.8, (e) => (sp = e));
+    sfx('hype'); burst(cx, cy, true);
+  }
+
+  // ---------------------------------------------------------------- edits on what's drawn (part ids p1, p2 …)
+  const partMarks = (id) => marks.filter((m) => m.alive && m.part === id);
+  const partBox = (ms) => ms.reduce((u, m) => union(u, markBox(m)), null);
+  async function edit(e) {
+    if (e.do === 'clear') { sfx('dematerialize'); const live = marks.filter((m) => m.alive && (m.part || m.card)); await tween(0.35, (u) => live.forEach((m) => (m.alpha = 1 - u))); live.forEach((m) => (m.alive = false)); return; }
+    const ms = partMarks(e.part);
+    if (!ms.length) return;
+    const box = partBox(ms);
+    if (e.do === 'recolor') { if (box) await tap(box[0] + box[2] * 0.5, box[1]); for (const m of ms) { m.color0 = colorOf(m, m.color); m.color = tone(e.tone); m.recolor = now(); } sfx('blip'); touch(0.6); await sleep(550); for (const m of ms) m.recolor = null; }
+    else if (e.do === 'move') {
+      const dx = e.dx ?? 0, dy = e.dy ?? 0, start = ms.map((m) => [m.dx, m.dy]);
+      if (box) await fly(box[0] + box[2] / 2, box[1] + box[3] / 2);
+      sfx('whoosh');
+      await tween(0.6, (u) => { const k = ease(u); ms.forEach((m, i) => { m.dx = start[i][0] + dx * k; m.dy = start[i][1] + dy * k; }); if (box) penApi()?.set?.(box[0] + box[2] / 2 + dx * k, box[1] + box[3] / 2 + dy * k); });
+    } else if (e.do === 'erase') {
+      sfx('dematerialize');
+      // Strokes are taken back the way they were drawn (backwards); everything else fades.
+      for (const m of [...ms].reverse()) {
+        if (m.pts && m.p > 0) { const pts = m.pts, p0 = m.p; await fly(...at(pts, p0)); await tween(0.45, (u) => { m.p = p0 * (1 - u); }); }
+        else await tween(0.3, (u) => (m.alpha = 1 - u));
+        m.alive = false;
+      }
+      touch();
+    }
+  }
+  const fadeOut = async (ms, sec = 0.35) => { ms.forEach((m) => (m.leaving = true)); syncClearAll(); await tween(sec, (u) => ms.forEach((m) => (m.alpha = Math.min(m.alpha, 1 - u)))); ms.forEach((m) => (m.alive = false)); touch(); syncClearAll(); };
+  // Clear all: once two or more cards are open, one chip at the bottom clears the whole drawing (no closing them one
+  // by one). It sits just above where the caption shows.
+  let clearAll = null;
+  function syncClearAll() {
+    const n = new Set(marks.filter((m) => m.alive && m.card && !m.leaving).map((m) => m.part)).size;
+    if (n >= 2) {
+      const str = `Clear all · ${n}`, k = 1, w = Math.round(textW(str, CHIP(k)) + 26), h = 26;
+      if (clearAll?.alive && clearAll.str === str) return;
+      if (clearAll) clearAll.alive = false;
+      const r = () => [Math.round(W / 2 - w / 2), Math.round(H - (R.safe?.bottom ?? 0) - 18 - 34 - 12 - h), w, h];
+      clearAll = add({ z: 7, kind: 'clearall', str, box: () => grow(r(), 4), hover: false, draw(b, l, t) { const q = r(); chip(b, q[0], q[1], q[2], q[3], str, t - this.born, { color: this.hover ? HOT : DIM, hover: this.hover }); },
+        hits() { return [{ rect: r(), kind: 'clearall' }]; } });
+    } else if (clearAll) { clearAll.alive = false; clearAll = null; touch(); }
+  }
+  function clearEverything() {
+    stop();
+    for (const id of new Set(marks.filter((m) => m.alive && m.part).map((m) => m.part))) R.ink.send?.({ type: 'ink_closed', part: id });
+    R.ink.send?.({ type: 'ink_cleared' });
+    sfx('dematerialize');
+    fadeOut(marks.filter((m) => m.alive));
+  }
+
+  // ---------------------------------------------------------------- speech: the caption at the bottom
+  const cap = document.createElement('div');
+  cap.setAttribute('role', 'status'); cap.setAttribute('aria-live', 'polite');
+  Object.assign(cap.style, { position: 'fixed', left: '50%', bottom: '18px', transform: 'translateX(-50%)', maxWidth: 'min(720px, 80vw)', padding: '8px 16px', font: `500 13px ${MONO}`, color: TEXT, background: GLASS, border: `1.5px solid ${ACC}`, boxShadow: `0 0 12px ${rgba(ACC, 0.45)}`, borderRadius: '2px', opacity: '0', transition: 'opacity .2s', pointerEvents: 'none', textAlign: 'center', zIndex: '5' });
+  const mountCap = () => document.body.appendChild(cap);
+  if (document.body) mountCap(); else document.addEventListener('DOMContentLoaded', mountCap);
+  const caption = { show(text) { cap.style.bottom = `${(R.safe?.bottom ?? 0) + 18}px`; cap.textContent = text; cap.style.opacity = text ? '1' : '0'; }, hide() { cap.style.opacity = '0'; } };
+
+  // ---------------------------------------------------------------- pacing: each line on the voice clock
+  // Spoken lines: the marks are released across the line from when its audio starts (voice-out.js learns how many
+  // characters a second the voice says); text only, about 2.6 words a second.
+  const cps = () => R.voiceOut?.cps?.() ?? 15;
+  async function voiceStart() {
+    const t0 = now();
+    while (now() - t0 < 2.5) { if (R.voiceOut?.playing()) return now(); await sleep(50); }
+    return now();
+  }
+  const until_ = async (t, gen) => { while (now() < t && gen === G.gen) await sleep(Math.min(100, (t - now()) * 1000)); };
+
+  // ---------------------------------------------------------------- the player
+  const G = { gen: 0, q: [], playing: false, held: false, wait: null, ptr: null, idle: [] };
+  const PEN_FREE = new Set(['sfx', 'copy', 'open', 'handoff']);
+  const onScreen = (r) => !!r && r[0] + r[2] > 0 && r[1] + r[3] > 0 && r[0] < W && r[1] < H;
+  async function runMark(m, ctx) {
+    const f = SCREEN_MARKS[m.kind] ?? ACTIONS_DRAW[m.kind] ?? CARDS_DRAW[m.kind];
+    if (!f) return null;
+    await fontsReady();
+    if (SCREEN_MARKS[m.kind] && !m.at && !m.points) return null;
+    // Not on this overlay's screen (the shell moved the overlay to the first marked thing's screen): skipped, rather
+    // than the cursor flying off the edge to draw where nobody sees it.
+    if (SCREEN_MARKS[m.kind] && m.at && !onScreen(rectOf(m))) { console.warn('ink: off this screen', m.kind); return null; }
+    return f(m, ctx);
+  }
+  async function runBeat(b, e, clock, gen) {
+    const voiced = b.voiced && clock.T != null, chars = String(b.caption ?? '').length;
+    const t0 = voiced ? Math.max(now(), clock.T + clock.before / cps()) : now();
+    const dur = voiced ? Math.max(1.2, chars / cps()) : Math.max(1.6, String(b.caption ?? '').split(/\s+/).filter(Boolean).length / 2.6);
+    clock.before += chars + 1;
+    // Behind the voice (the previous beat's marks took longer than its line): draw this one faster to catch up.
+    const late = now() - t0;
+    if (penApi()) penApi().speed = late > 0.4 ? clamp(1 + late / 2, 1, 2.5) : 1;
+    await until_(t0, gen);
+    if (gen !== G.gen) return;
+    caption.show(b.caption);
+    upcoming = b.marks.filter((m) => m.at?.rect && SCREEN_MARKS[m.kind]).map((m) => grow(rectOf(m), 4));
+    const ctx = { num: 0 }, made = [];
+    for (const [i, m] of b.marks.entries()) {
+      await until_(t0 + (dur * 0.8 * i) / Math.max(1, b.marks.length), gen);
+      if (gen !== G.gen) return;
+      // Its own place stops counting as upcoming: its name goes right beside it.
+      const own = m.at?.rect ? grow(rectOf(m), 4) : null;
+      if (own) upcoming = upcoming.filter((r) => r.join() !== own.join());
+      try { made.push(await runMark(m, ctx)); } catch (err) { console.error('ink mark', m.kind, err); }
+      if (gen !== G.gen) return;
+    }
+    upcoming = [];
+    await until_(t0 + dur, gen);
+    if (gen !== G.gen || !b.wait) return;
+    const result = await waitFor(b, made, gen);
+    G.clock = null;
+    if (gen !== G.gen) return;
+    R.ink.send?.({ type: 'draw_wait_done', id: e.id, beat: b.n, result });
+    // That step is done: its screen marks go (the screen has changed under them), and the sidecar forgets them.
+    if (result === 'clicked' || result === 'hovered') {
+      sfx('done');
+      const gone = marks.filter((m) => m.alive && m.screen && b.marks.some((q) => q.part && q.part === m.part));
+      for (const id of new Set(gone.map((m) => m.part))) R.ink.send?.({ type: 'ink_closed', part: id });
+      fadeOut(gone, 0.3);
+    }
+  }
+  // Waits for a click on (or hover over) the marked thing; the shell reports presses while armed (ink_wait).
+  function waitFor(b, made, gen) {
+    const m = b.marks.find((q) => (q.kind === 'target' || q.kind === 'hover') && q.at) ?? b.marks.find((q) => q.at);
+    const rect = grow(rectOf(m), 10), mark = made.find((q) => q?.parkAt);
+    if (mark) { mark.waiting = true; park(mark.parkAt[2], mark.parkAt[0], mark.parkAt[1]); touch(); }
+    return new Promise((resolve) => {
+      let hoverAt = 0;
+      const done = (r) => { clearTimeout(timer); clearInterval(tick); G.wait = null; if (b.wait === 'click') R.ink.invoke?.('ink_wait', { on: false }); if (mark) mark.waiting = false; park(null); resolve(r); };
+      const timer = setTimeout(() => done('timeout'), (b.wait === 'click' ? 125 : 65) * 1000);
+      const tick = setInterval(() => { if (gen !== G.gen) done('skipped'); }, 200);
+      G.wait = {
+        click: (x, y) => { if (b.wait === 'click' && inside(rect, x, y)) done('clicked'); },
+        ptr: (x, y) => { if (b.wait !== 'hover') return; if (inside(rect, x, y)) { hoverAt ||= now(); if (now() - hoverAt > 0.5) done('hovered'); } else hoverAt = 0; },
+      };
+      if (b.wait === 'click') R.ink.invoke?.('ink_wait', { on: true });
+    });
+  }
+  async function runSeg(e, gen) {
+    R.ink.send?.({ type: 'draw_started', id: e.id, seg: e.seg });
+    if (e.fade) for (const b of e.beats ?? []) for (const m of b.marks) if (m.part) drawnBy.set(m.part, e.id);
+    if (e.win) winRect = locRect(e.win);
+    if (e.busy?.length) busyRects = e.busy.map(locRect);
+    for (const ed of e.edits ?? []) { if (gen !== G.gen) return; if (ed.do !== 'clear') { await take(); G.held = true; } await edit(ed); }
+    const needsPen = (e.beats ?? []).some((b) => b.marks.some((m) => !PEN_FREE.has(m.kind)));
+    if (needsPen) { await take(); G.held = true; }
+    // One voice clock for a whole drawing (its beats arrive one at a time), started again after each click or hover,
+    // when the next line is only spoken once its beat is sent.
+    const voiced = (e.beats ?? []).some((b) => b.voiced);
+    let clock = G.clock?.id === e.id ? G.clock : null;
+    if (!clock) clock = G.clock = { id: e.id, T: voiced ? await voiceStart() : null, before: 0 };
+    else if (clock.T == null && voiced) clock.T = await voiceStart();
+    for (const b of e.beats ?? []) { if (gen !== G.gen) return; await runBeat(b, e, clock, gen); }
+  }
+  async function pump() {
+    if (G.playing) return;
+    G.playing = true;
+    try {
+      while (G.q.length) {
+        const e = G.q.shift(), gen = G.gen;
+        try { await runSeg(e, gen); } catch (err) { console.error('ink', err); }
+        if (gen !== G.gen) continue;
+        if (e.last && e.fade) fadeLater(e.id, e.fade);
+        if (e.last && !G.q.length) {
+          await sleep(900);
+          if (!G.q.length && gen === G.gen) { caption.hide(); if (G.held) { G.held = false; await penApi()?.release(); } }
+        } else if (!G.q.length) caption.hide();
+      }
+    } finally { G.playing = false; if (!G.q.length) for (const f of G.idle.splice(0)) f(); }
+  }
+  // A drawing that goes by itself (the welcome tour): faded `sec` after it finishes, waiting while the pointer rests
+  // on one of its pieces (they may be about to click a button).
+  const drawnBy = new Map(); // part → drawing id, for drawings that fade by themselves
+  function fadeLater(id, sec) {
+    const mine = () => marks.filter((m) => m.alive && drawnBy.get(m.part) === id);
+    const tick = () => {
+      const ms = mine();
+      if (!ms.length) return;
+      if (G.ptr && ms.some((m) => inside(markBox(m), G.ptr[0], G.ptr[1]))) { setTimeout(tick, 3000); return; }
+      for (const p of new Set(ms.map((m) => m.part))) R.ink.send?.({ type: 'ink_closed', part: p });
+      fadeOut(ms, 0.8);
+    };
+    setTimeout(tick, sec * 1000);
+  }
+  function stop() {
+    G.gen++; G.q.length = 0; caption.hide();
+    G.wait = null; R.ink.invoke?.('ink_wait', { on: false });
+    if (G.held) { G.held = false; penApi()?.release(); }
+    for (const f of G.idle.splice(0)) f();
+  }
+
+  // ---------------------------------------------------------------- hit areas: buttons, card close, card drag, links
+  let drag = null, hovered = null;
+  const hitAt = (x, y) => {
+    for (const m of [...marks].sort((a, b) => b.z - a.z)) {
+      if (!m.alive || !m.hits || m.alpha < 0.5) continue;
+      for (const h of m.hits()) { const r = [h.rect[0] + m.dx, h.rect[1] + m.dy, h.rect[2], h.rect[3]]; if (inside(r, x, y)) return { ...h, m }; }
+    }
+    return null;
+  };
+  const setHover = (h) => {
+    const m = h?.m ?? null;
+    if (hovered && hovered !== m) { hovered.hover = false; hovered.hoverClose = false; hovered.setHover?.(false); }
+    if (m) { m.hover = h.kind === 'button' || h.kind === 'link' || h.kind === 'clearall'; m.hoverClose = h.kind === 'close'; m.setHover?.(h.kind === 'button'); }
+    if (hovered !== m || m) touch(0.2);
+    hovered = m;
+    document.documentElement.style.cursor = h && (h.kind === 'button' || h.kind === 'close' || h.kind === 'link' || h.kind === 'clearall') ? 'pointer' : h?.kind === 'drag' ? 'grab' : 'default';
+  };
+  const ours = (e) => !!hitAt(e.clientX, e.clientY) || !!drag;
+  addEventListener('pointerdown', (e) => {
+    const h = hitAt(e.clientX, e.clientY);
+    if (!h) return;
+    e.stopPropagation(); e.preventDefault();
+    if (h.kind === 'close') { sfx('tick'); R.ink.send?.({ type: 'ink_closed', part: h.part }); fadeOut(partMarks(h.part)); }
+    else if (h.kind === 'button') { h.m.down = now(); h.m.press?.(); sfx('pip'); touch(0.3); R.ink.send?.({ type: 'ink_action', part: h.part }); }
+    else if (h.kind === 'link') { sfx('pip'); R.ink.send?.({ type: 'open_link', url: h.url }); }
+    else if (h.kind === 'clearall') clearEverything();
+    else if (h.kind === 'drag' || h.kind === 'card') { drag = { part: h.part, x: e.clientX, y: e.clientY, ms: partMarks(h.part), start: partMarks(h.part).map((m) => [m.dx, m.dy]) }; sfx('grab'); touch(); }
+  }, true);
+  addEventListener('pointermove', (e) => {
+    if (drag) { const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.ms.forEach((m, i) => { m.dx = drag.start[i][0] + dx; m.dy = drag.start[i][1] + dy; }); touch(0.2); return; }
+    setHover(hitAt(e.clientX, e.clientY));
+  }, true);
+  addEventListener('pointerup', (e) => { if (drag) { drag = null; e.stopPropagation(); touch(0.2); } }, true);
+  addEventListener('wheel', (e) => { if (ours(e)) e.stopPropagation(); }, true);
+
+  // ---------------------------------------------------------------- the host's way in (host.js)
+  R.inkHit = (x, y) => !!drag || !!hitAt(x, y);
+  R.ink = {
+    send: null, invoke: null,
+    // A segment of a drawing from the sidecar: { id, seg, beats, edits, last, win, busy }.
+    play(e) { G.q.push(e); pump(); },
+    // { screen: true } clears the screen marks (cards stay); otherwise everything. stop: also ends what's playing.
+    clear(e = {}) {
+      if (e.stop || !e.screen) stop();
+      const gone = marks.filter((m) => m.alive && (e.screen ? m.screen : true));
+      fadeOut(gone);
+    },
+    // Another window came to the front, or that window moved or closed: the drawing no longer sits on what it was
+    // about, so all of it fades (cards too).
+    stale() { stop(); fadeOut(marks.filter((m) => m.alive), 0.6); },
+    click(x, y) { G.wait?.click(x, y); },
+    ptr(x, y) { G.ptr = [x, y]; G.wait?.ptr(x, y); },
+    get busy() { return G.playing || marks.length > 0; },
+    get playing() { return G.playing; },
+    // Resolves once nothing is being drawn (at once if nothing is).
+    whenIdle: () => (G.playing || G.q.length ? new Promise((r) => G.idle.push(r)) : Promise.resolve()),
+  };
+})();

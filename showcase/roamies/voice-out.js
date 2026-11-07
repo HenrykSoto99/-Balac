@@ -5,6 +5,9 @@
   const R = window.Roamie;
   const LEAD = 0.12; // cushion before a reply's first chunk, so the next chunk is never late
   let ac = null, out = null, meter = null, buf = null, id = null, endAt = 0, live = [], lv = 0;
+  // How fast the voice talks (characters a second), learned from each whole reply: its audio length against how much
+  // text it said. Drawings pace their marks to it (ink.js).
+  let rate = 15, secs = 0;
 
   const ctx = () => {
     if (!ac) {
@@ -36,13 +39,13 @@
 
   const play = (m) => {
     const a = ctx();
-    if (m.id !== id) { stop(); id = m.id; }
+    if (m.id !== id) { stop(); id = m.id; secs = 0; }
     const b = pcm(m.pcm, m.rate || 44100), s = a.createBufferSource();
     s.buffer = b; s.connect(out);
     const now = a.currentTime;
     if (!live.length) { out.gain.cancelScheduledValues(now); out.gain.setValueAtTime(1, now); }
     const at = Math.max(endAt, now + LEAD);
-    s.start(at); endAt = at + b.duration;
+    s.start(at); endAt = at + b.duration; secs += b.duration;
     live.push(s);
     s.onended = () => { live = live.filter((x) => x !== s); };
   };
@@ -50,10 +53,14 @@
   R.voiceOut = {
     handle(m) {
       if (m.stop) return stop();
-      if (m.end) return; // the last chunk is already scheduled
+      if (m.end) { // the last chunk is already scheduled
+        if (m.id === id && m.chars > 20 && secs > 1) rate = Math.min(30, Math.max(8, rate * 0.6 + (m.chars / secs) * 0.4));
+        return;
+      }
       if (m.pcm) play(m);
     },
     playing: () => !!ac && live.length > 0 && ac.currentTime < endAt + 0.05,
+    cps: () => rate,
     // Smoothed RMS, roughly 0 (quiet) to 1 (loud speech).
     level() {
       if (!this.playing()) return (lv = 0);

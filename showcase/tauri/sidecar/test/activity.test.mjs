@@ -11,6 +11,14 @@ assert.deepEqual(describe('take_screenshot', { target: 'Safari' }), ['Looking at
 assert.deepEqual(describe('open', { target: 'https://github.com/x' }), ['Opening github.com', 'Opened github.com']);
 assert.deepEqual(describe('list_files', { dir: 'C:\\Users\\ken\\Desktop\\' }), ['Looking in Desktop', 'Looked in Desktop']);
 assert.equal(describe('plan_steps', {}), null);
+assert.deepEqual(describe('draw', { beats: [{ say: 'Here', marks: [] }] }), ['Drawing on your screen', 'Drew on your screen']);
+assert.deepEqual(describe('draw', { edit: [{ do: 'clear' }] }), ['Changing the drawing', 'Changed the drawing']);
+assert.equal(describe('point_at', {}), null, 'the old pointing tool is gone');
+{
+  const a = createActivity();
+  a.handoff('Book the flights to Rome for next Friday morning, window seats, and the hotel');
+  assert.equal(a.recent[0].text, 'Handed off: Book the flights to Rome for next Friday morning, window se…');
+}
 assert.equal(describe('fetch_url', { url: 'not a url' })[1], 'Read a page');
 
 // The recent list: newest first, capped; failures say so; "doing" is the tool still running.
@@ -27,9 +35,9 @@ assert.equal(a.recent[0].text, 'Searched the web');
 a.start('2', 'read_file', { path: '/a/b.txt' }); a.end('2', true);
 assert.equal(a.recent[0].text, "Couldn't finish: read b.txt");
 assert.equal(a.recent[0].kind, 'bad');
-a.start('3', 'remember_fact', {}); a.end('3', false);
+a.start('3', 'forget_fact', {}); a.end('3', false);
 assert.equal(a.recent.length, 3);
-assert.deepEqual(a.recent.map((r) => r.text), ['Saved to memory', "Couldn't finish: read b.txt", 'Searched the web']);
+assert.deepEqual(a.recent.map((r) => r.text), ['Forgot it', "Couldn't finish: read b.txt", 'Searched the web']);
 assert.equal(a.start('4', 'plan_steps', {}), null);
 a.start('5', 'web_search', {}); a.stopped(); assert.equal(a.doing(), null);
 console.log('activity tests: passed');

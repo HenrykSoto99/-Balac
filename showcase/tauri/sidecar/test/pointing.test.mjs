@@ -1,4 +1,4 @@
-// Screenshot pixels → screen points for point_at / click_at. Run: npm test
+// Screenshot pixels → screen points for draw / click_at. Run: npm test
 import assert from 'node:assert/strict';
 import { shotMap, toScreen, parseSipsSize } from '../pointing.mjs';
 

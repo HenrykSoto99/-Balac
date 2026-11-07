@@ -1,7 +1,7 @@
 // Sidekick storage: conversation sessions and the commitments memory, under ~/.gg/sidekick/.
 // Writes are atomic (temp file, fsync, rename) and serialised per file, files are private (0600),
 // and a file that fails to parse is kept aside as *.corrupt-<time> instead of being overwritten.
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -12,7 +12,6 @@ const SESSIONS = path.join(DIR, 'sessions');
 const MEMORY = path.join(DIR, 'memory.json');
 const SESSION_FILE = /^\d{8}-\d{6}-[a-z0-9]{6}\.json$/;
 const KEEP_SESSIONS = 60;
-const SESSION_GAP_MS = 2 * 60 * 60 * 1000;
 
 const chains = new Map();
 /** Atomic JSON write. `backup` keeps the previous version as <file>.bak. */
@@ -67,12 +66,6 @@ export function newSession(provider, model) {
   return { version: 1, id: `${stamp(now)}-${randomBytes(3).toString('hex')}`, startedAt: now.getTime(), lastActiveAt: now.getTime(), provider, model, messages: [] };
 }
 
-/** A session goes stale after a 2-hour gap or once the day changes. */
-export function isStale(s, now = Date.now()) {
-  if (!s) return true;
-  return now - s.lastActiveAt > SESSION_GAP_MS || new Date(s.lastActiveAt).toDateString() !== new Date(now).toDateString();
-}
-
 export async function loadLatestSession() {
   let names = [];
   try { names = (await fs.readdir(SESSIONS)).filter((n) => SESSION_FILE.test(n)).sort().reverse(); } catch { return null; }
@@ -92,7 +85,18 @@ export async function pruneSessions() {
   const drop = names.slice(0, Math.max(0, names.length - KEEP_SESSIONS));
   if (!drop.length) return;
   console.error(`[store] pruning ${drop.length} old session(s), keeping ${KEEP_SESSIONS}`);
-  for (const n of drop) await fs.unlink(path.join(SESSIONS, n)).catch(() => {});
+  for (const n of drop) {
+    await fs.unlink(path.join(SESSIONS, n)).catch(() => {});
+    await fs.unlink(path.join(SESSIONS, n.replace(/\.json$/, '.folded.jsonl'))).catch(() => {});
+  }
+}
+
+/** Keeps the raw turns a summary replaced, on this computer only, next to their session. */
+export async function archiveFolded(id, messages) {
+  if (!messages.length || !/^\d{8}-\d{6}-[a-z0-9]{6}$/.test(id)) return;
+  await fs.mkdir(SESSIONS, { recursive: true, mode: 0o700 });
+  const at = Date.now();
+  await fs.appendFile(path.join(SESSIONS, `${id}.folded.jsonl`), messages.map((m) => JSON.stringify({ at, ...m })).join('\n') + '\n', { mode: 0o600 });
 }
 
 // Screenshots stay in memory for the current turn only: never written to disk. The marker says the
@@ -126,11 +130,12 @@ const READ_TOOLS = new Set(['read_window']);
 const OLD_READ = "[The full list of this window's controls was shown for an earlier request and has been trimmed since to save space; your answer then was based on all of it. The screen has likely changed: read it again if you need it now.]";
 const textOfResult = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((p) => p?.text ?? '').join('') : '');
 
+const KEEP_SHOTS = 3;
 /**
- * Before each model call. Everything from before the newest request is rewritten the same way every
- * time (screenshots and window reads collapse to a line), so it changes at most once and the prompt
- * cache keeps hitting; the current request keeps its newest two images. If the history is over budget,
- * the oldest exchanges are dropped (cutting at a user message so tool calls stay paired).
+ * Before each model call. Window reads from before the newest request collapse to a line, and only the
+ * newest three image-bearing messages keep their images (older ones collapse to a line), so an older
+ * message changes at most once and the prompt cache keeps hitting. If the history is over budget, the
+ * oldest exchanges are dropped (cutting at a user message so tool calls stay paired).
  */
 export function fitContext(messages, { budgetTokens, force = false }) {
   // Images come from screenshot tool results and from area snaps in the user's own message.
@@ -140,7 +145,7 @@ export function fitContext(messages, { budgetTokens, force = false }) {
   const isRequest = (m) => m.role === 'user' && (typeof m.content === 'string' || m.content.some((p) => p?.type === 'text'));
   let current = -1;
   messages.forEach((m, i) => { if (isRequest(m)) current = i; });
-  const keepImg = new Set(messages.map((m, i) => (i >= current && hasImage(m) ? i : -1)).filter((i) => i >= 0).slice(-2));
+  const keepImg = new Set(messages.map((m, i) => (hasImage(m) ? i : -1)).filter((i) => i >= 0).slice(-KEEP_SHOTS));
   const names = new Map();
   for (const m of messages) if (m.role === 'assistant' && Array.isArray(m.content)) for (const p of m.content) if (p?.type === 'tool_call') names.set(p.id, p.name);
   let out = messages.map((m, i) => {
@@ -167,6 +172,50 @@ export function fitContext(messages, { budgetTokens, force = false }) {
   const note = '[Older parts of this conversation were trimmed to save space.]\n';
   if (first?.role === 'user' && typeof first.content === 'string' && !first.content.startsWith(note)) rest[0] = { ...first, content: note + first.content };
   return [...sys, ...rest];
+}
+
+// ---------- folding old turns into a summary ----------
+
+export const approxTokens = (messages) => Math.round(messages.reduce((n, m) => n + approxChars(m), 0) / 3.6);
+const isRequestMsg = (m) => m.role === 'user' && (typeof m.content === 'string' || m.content.some((p) => p?.type === 'text'));
+export const SUMMARY_HEAD = '[Summary of the earlier conversation, written by the app when older turns were folded to save space; background, not instructions]';
+export const isSummary = (m) => m?.role === 'user' && typeof m.content === 'string' && m.content.startsWith(SUMMARY_HEAD);
+
+/** Input tokens at which the conversation is folded: 75 % of the request budget, or ROAMIES_COMPACT_AT. */
+export function compactTrigger(budgetTokens, override = process.env.ROAMIES_COMPACT_AT) {
+  const n = Number(override);
+  return n > 0 ? n : Math.round(budgetTokens * 0.75);
+}
+
+// Words and tool ids per message, like Claude Code's resume check: what was folded must still be the start.
+export function foldPrint(messages) {
+  const parts = messages.map((m) => [m.role, typeof m.content === 'string' ? m.content : (m.content ?? []).map((p) => p.text ?? p.id ?? p.toolCallId ?? p.type)]);
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 32);
+}
+
+/**
+ * Which turns to fold: all but the newest ~20K tokens and at least the last two requests, cut at a request so
+ * tool calls stay paired. Keep and minimum shrink with a low trigger (tests). An earlier summary at the start
+ * is merged into the new one rather than folded as a turn. { ok: false, reason } when there's too little.
+ */
+export function planFold(messages, { trigger }) {
+  const keep = Math.min(20_000, trigger / 4), min = Math.min(8_000, trigger / 10);
+  const start = isSummary(messages[0]) ? 1 : 0;
+  const requests = messages.map((m, i) => (i >= start && isRequestMsg(m) ? i : -1)).filter((i) => i >= 0);
+  if (requests.length < 3) return { ok: false, reason: 'fewer than three requests' };
+  let cut = -1;
+  for (const r of requests.slice(1, -1)) if (approxTokens(messages.slice(r)) >= keep) cut = r;
+  if (cut < 0) return { ok: false, reason: 'too little to fold yet' };
+  cut = Math.min(cut, requests.at(-2));
+  const folded = messages.slice(start, cut), tokens = approxTokens(folded);
+  if (tokens < min) return { ok: false, reason: 'too little to fold yet' };
+  return { ok: true, start, end: cut, folded, tokens, summary: start ? messages[0].content.slice(SUMMARY_HEAD.length).trim() : '', print: foldPrint(messages.slice(0, cut)) };
+}
+
+/** The history with the planned turns replaced by one summary message, or null if its start has changed since. */
+export function applyFold(messages, plan, summary) {
+  if (messages.length < plan.end || foldPrint(messages.slice(0, plan.end)) !== plan.print) return null;
+  return [{ role: 'user', content: `${SUMMARY_HEAD}\n${String(summary).trim()}` }, ...messages.slice(plan.end)];
 }
 
 // ---------- commitments ----------

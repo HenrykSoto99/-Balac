@@ -17,7 +17,7 @@
   // What's open in the panel itself: a key field (provider id or 'fish'), the row action waiting for its
   // Confirm, and how far down the long lists it shows (a page at a time) and what the memory search holds.
   const PAGE = 10, MORE = 20;
-  const ui = { key: null, arm: null, facts: PAGE, commits: PAGE, q: '' };
+  const ui = { key: null, kind: {}, arm: null, facts: PAGE, commits: PAGE, q: '' };
   let armTimer = 0;
   const disarm = () => { clearTimeout(armTimer); if (ui.arm) { ui.arm = null; return true; } return false; };
 
@@ -258,7 +258,7 @@
   function memory() {
     const f = state.facts, c = state.commitments;
     return [
-      group('What I remember', "What you've told me.", f.length,
+      group('What I remember', null, f.length,
         f.length > PAGE ? el('div', { className: 'find' }, el('span', { className: 'px field' },
           el('input', { type: 'search', id: 'find-facts', value: ui.q, placeholder: `Search ${f.length} memories`, 'aria-label': 'Search what I remember', autocomplete: 'off', spellcheck: false,
             on: { input: (e) => { ui.q = e.target.value; ui.facts = PAGE; factList(); }, keydown: (e) => { if (e.key === 'Escape' && ui.q) { e.preventDefault(); e.stopPropagation(); e.target.value = ui.q = ''; factList(); } } } }))) : null,
@@ -266,7 +266,7 @@
         el('div', { className: 'spread' },
           btn('Get to know me', () => act('intro', true), { k: 'intro', disabled: state.intro }),
           f.length ? armed('Forget everything', `Forget all ${f.length}`, 'forget-all', 'forgetall:yes', `Forget all ${f.length} things I remember`) : null)),
-      group('Commitments', "I'll remind you when they're due.", c.length,
+      group('Commitments', null, c.length,
         c.length
           ? el('ul', { className: 'list' }, c.slice(0, ui.commits).map((x) => el('li', { className: 'item' },
             el('span', { className: 'mark', 'aria-hidden': 'true' }),
@@ -302,12 +302,21 @@
   }
 
   // ---------------------------------------------------------------- Settings
-  // A masked key field that opens in place. id: a provider, or 'fish'.
-  function keyForm(id, label, onsave) {
-    const input = el('input', { type: 'password', id: `key-${id}`, autocomplete: 'off', spellcheck: false, placeholder: `${label} key`, 'aria-label': `${label} API key`, maxLength: 1000 });
-    const save = () => { const v = input.value.trim(); if (!v) return input.focus(); onsave(v); input.value = ''; ui.key = null; render(); };
+  // A masked key field that opens in place. id: a provider, or 'fish'. kinds: the kinds of key it takes
+  // (Kimi and Xiaomi: a plan key or a pay-per-token key), picked above the field; onsave gets the kind's id.
+  function keyForm(id, label, onsave, kinds = null) {
+    const kind = kinds?.find((x) => x.id === ui.kind[id]) ?? kinds?.[0];
+    const name = kind?.label ?? label;
+    const input = el('input', { type: 'password', id: `key-${id}`, autocomplete: 'off', spellcheck: false, placeholder: `${name} key`, 'aria-label': `${name} API key`, maxLength: 1000 });
+    const save = () => { const v = input.value.trim(); if (!v) return input.focus(); onsave(v, kind?.id); input.value = ''; ui.key = null; render(); };
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); else if (e.key === 'Escape') { e.stopPropagation(); ui.key = null; render(`addkey:${id}`); } });
-    return el('div', { className: 'keyform', hidden: ui.key !== id }, el('span', { className: 'px field' }, input), btn('Save', save, { k: `save:${id}` }));
+    const row = el('div', { className: 'keyform', hidden: ui.key !== id }, el('span', { className: 'px field' }, input), btn('Save', save, { k: `save:${id}` }));
+    if (!kinds) return row;
+    row.hidden = false;
+    return el('div', { className: 'keykinds', hidden: ui.key !== id },
+      picks(`${label} key type`, kinds.map((x) => [x.id, x.label]), kind.id, (v) => { ui.kind[id] = v; render(`kind-${id}:${v}`); }, `kind-${id}`,
+        Object.fromEntries(kinds.map((x) => [x.id, x.billing]))),
+      row);
   }
 
   const signIn = (p) => link('Sign in', () => act(`login:${p.id}`), { k: `login:${p.id}`, aria: `Sign in to ${p.label}`, disabled: !!state.loggingIn });
@@ -332,7 +341,7 @@
               : state.loggingIn === p.id ? el('span', { className: 'waiting', textContent: 'Signing in…' })
               : p.method === 'oauth' ? (p.key ? el('span', { className: 'links' }, signIn(p), addKey(p)) : signIn(p))
               : addKey(p)),
-          p.on || !(p.method === 'key' || p.key) ? null : keyForm(p.id, p.label, (key) => send({ type: 'panel_key', provider: p.id, key })),
+          p.on || !(p.method === 'key' || p.key) ? null : keyForm(p.id, p.label, (key, kind) => send({ type: 'panel_key', provider: p.id, kind, key }), p.kinds),
         ]).flat())),
     ];
   }
@@ -579,8 +588,11 @@
       model: { provider: 'anthropic', id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', providerLabel: 'Anthropic' },
       providers: [
         { id: 'anthropic', label: 'Anthropic', on: true, method: 'oauth', models: [{ id: 'claude-haiku-5-5', name: 'Claude Haiku 5.5' }, { id: 'claude-sonnet-5', name: 'Claude Sonnet 5' }] },
-        { id: 'openai', label: 'OpenAI', on: false, method: 'oauth', models: [] },
-        { id: 'gemini', label: 'Google Gemini', on: false, method: 'oauth', models: [] },
+        { id: 'openai', label: 'OpenAI', on: false, method: 'oauth', key: true, models: [] },
+        { id: 'gemini', label: 'Gemini', on: false, method: 'key', models: [] },
+        { id: 'moonshot', label: 'Kimi (Moonshot)', on: false, method: 'key', models: [], kinds: [
+          { id: 'kimi-code', label: 'Kimi Code', billing: 'Uses your Kimi Code plan. Create the key in the Kimi Code Console.' },
+          { id: 'moonshot', label: 'Moonshot', billing: 'Pay-per-token from platform.moonshot.ai.' }] },
         { id: 'openrouter', label: 'OpenRouter', on: false, method: 'key', models: [] },
       ],
       loggingIn: null,

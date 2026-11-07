@@ -71,6 +71,8 @@ fn hide_console(cmd: &mut Command) -> &mut Command {
 
 /// The voice helper is drawing the cursor-form sidekick (buddy.swift), so the page needs far fewer cursor updates.
 static BUDDY_ON: AtomicBool = AtomicBool::new(false);
+/// A drawing is waiting for the user to click a marked control: the cursor loop watches the left button meanwhile.
+static INK_WAIT: AtomicBool = AtomicBool::new(false);
 
 fn is_overlay(label: &str) -> bool {
     label.starts_with("overlay-")
@@ -84,7 +86,7 @@ fn to_sidecar(app: &AppHandle, msg: &Value) {
 
 fn to_overlays(app: &AppHandle, msg: &Value) {
     if let Some([x, y, w, h]) = point_target(msg) {
-        // Teach mode: go to the screen the control is on, even if the cursor is elsewhere.
+        // A drawing: go to the screen the marked thing is on, even if the cursor is elsewhere.
         move_sidekick_to(app, x + w / 2.0, y + h / 2.0);
     } else if starts_interaction(msg) {
         follow_cursor(app);
@@ -120,6 +122,37 @@ fn esc_watch(app: AppHandle, window: WebviewWindow, on: bool) {
     let label = window.label().to_owned();
     let app2 = app.clone();
     let _ = app.run_on_main_thread(move || set_esc(&app2, &label, on));
+}
+
+/// A drawing's step waits for a click (on), or stopped waiting: the cursor loop reports left-button presses meanwhile.
+#[tauri::command]
+fn ink_wait(on: bool) {
+    INK_WAIT.store(on, Ordering::Relaxed);
+}
+
+/// Whether the left mouse button is down right now, anywhere on screen. Polling the button state needs no extra
+/// permission (unlike an event tap), and only runs while a drawing waits for a click.
+#[cfg(target_os = "macos")]
+fn left_button_down() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
+    }
+    // kCGEventSourceStateCombinedSessionState, kCGMouseButtonLeft
+    unsafe { CGEventSourceButtonState(0, 0) }
+}
+#[cfg(target_os = "windows")]
+fn left_button_down() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(key: i32) -> i16;
+    }
+    // VK_LBUTTON; the high bit is set while it's held.
+    unsafe { (GetAsyncKeyState(0x01) as u16 & 0x8000) != 0 }
+}
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn left_button_down() -> bool {
+    false
 }
 
 /// Cursor entered or left something clickable: flip click-through.
@@ -712,7 +745,7 @@ fn shows_answer(msg: &Value) -> bool {
         Some("summon" | "say" | "ask" | "list") => true,
         Some("agent") => match msg.pointer("/e/type").and_then(Value::as_str) {
             Some("tool") => msg.pointer("/e/anim").is_some_and(|a| !a.is_null()),
-            Some("text" | "emote" | "point" | "act_start" | "trail" | "done" | "error") => true,
+            Some("text" | "emote" | "draw" | "act_start" | "trail" | "done" | "error") => true,
             _ => false,
         },
         _ => false,
@@ -736,13 +769,18 @@ fn cursor_from_raw(x: f64, y: f64, primary_scale: f64) -> (f64, f64) {
     }
 }
 
-/// A teach-mode step's control bounds [x, y, w, h], in global screen points.
+/// The first thing a drawing marks on the real screen, [x, y, w, h] in global screen points.
 fn point_target(msg: &Value) -> Option<[f64; 4]> {
-    if msg.get("kind").and_then(Value::as_str) != Some("agent") || msg.pointer("/e/type").and_then(Value::as_str) != Some("point") {
+    if msg.get("kind").and_then(Value::as_str) != Some("agent") || msg.pointer("/e/type").and_then(Value::as_str) != Some("draw") {
         return None;
     }
-    let r = msg.pointer("/e/rect")?.as_array()?;
-    let v: Vec<f64> = r.iter().filter_map(Value::as_f64).collect();
+    let beats = msg.pointer("/e/beats")?.as_array()?;
+    let rect = beats
+        .iter()
+        .filter_map(|b| b.get("marks")?.as_array())
+        .flatten()
+        .find_map(|m| m.pointer("/at/rect")?.as_array().cloned())?;
+    let v: Vec<f64> = rect.iter().filter_map(Value::as_f64).collect();
     (v.len() == 4).then(|| [v[0], v[1], v[2], v[3]])
 }
 
@@ -886,6 +924,7 @@ fn pump_cursor(app: AppHandle) {
     let mut next = start;
     let mut sent: std::collections::HashMap<String, (f64, f64)> = std::collections::HashMap::new();
     let mut last_raw = (f64::NAN, f64::NAN);
+    let mut was_down = false;
     thread::spawn(move || loop {
         // A steady 8 ms beat (sleep alone drifts and bunches samples up).
         next += Duration::from_millis(8);
@@ -896,6 +935,33 @@ fn pump_cursor(app: AppHandle) {
             next = now;
         }
         n = n.wrapping_add(1);
+        // A drawing waits for a click: report each press (where, when) to the overlays, which check it hit the mark.
+        if INK_WAIT.load(Ordering::Relaxed) {
+            let down = left_button_down();
+            if down && !was_down {
+                if let Ok(raw) = app.cursor_position() {
+                    let cur = cursor_from_raw(raw.x, raw.y, primary_scale);
+                    let t = start.elapsed().as_secs_f64() * 1000.0;
+                    for (label, w) in app.webview_windows() {
+                        if !is_overlay(&label) {
+                            continue;
+                        }
+                        let (Ok(pos), Ok(scale)) = (w.inner_position(), w.scale_factor()) else { continue };
+                        #[cfg(target_os = "macos")]
+                        let (x, y) = {
+                            let o = pos.to_logical::<f64>(scale);
+                            (cur.0 - o.x, cur.1 - o.y)
+                        };
+                        #[cfg(not(target_os = "macos"))]
+                        let (x, y) = ((cur.0 - pos.x as f64) / scale, (cur.1 - pos.y as f64) / scale);
+                        let _ = w.eval(format!("window.__roamieClick&&__roamieClick({x:.1},{y:.1},{t:.1})"));
+                    }
+                }
+            }
+            was_down = down;
+        } else {
+            was_down = false;
+        }
         // The voice helper draws the following sidekick itself: the page only needs the cursor for its own bookkeeping.
         if BUDDY_ON.load(Ordering::Relaxed) && n % 4 != 1 {
             continue;
@@ -1188,7 +1254,7 @@ fn main() {
         .manage(TalkChord(Mutex::new(vec!["control".into(), "option".into()])))
         .manage(VoiceModel(Mutex::new(None)))
         .manage(PermGuide(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![buddy, set_hot, sidecar_send, set_typing, perm_status, perm_request, perm_guide, screen_check, open_settings, onboarding_finish, guide_close, panel_hide, esc_watch, relaunch, focus_guide, drag_window])
+        .invoke_handler(tauri::generate_handler![buddy, ink_wait, set_hot, sidecar_send, set_typing, perm_status, perm_request, perm_guide, screen_check, open_settings, onboarding_finish, guide_close, panel_hide, esc_watch, relaunch, focus_guide, drag_window])
         .on_menu_event(|app, e| match e.id.as_ref() {
             "quit" => app.exit(0),
             "restart" => spawn_sidecar(app),

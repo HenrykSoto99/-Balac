@@ -1,6 +1,6 @@
 // The safety rules: what runs on its own, what needs a yes, what never runs. Run: npm test
 import assert from 'node:assert/strict';
-import { ASK, BLOCK, SAFE, checkLink, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isYes, splitCommand } from '../safety.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkLink, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isYes, splitCommand } from '../safety.mjs';
 
 const HOME = '/Users/ken';
 const failures = [];
@@ -236,4 +236,28 @@ console.log('sed print tests: all passed');
   assert.equal(classifyCommand('mkdir -p /tmp/x && cd /tmp/x && for i in 1 2; do echo $i > n$i.txt; done && ls -1', HOME, fresh).level, SAFE, 'mkdir, cd, loop');
   assert.equal(classifyCommand('mkdir -p ~/.ssh && cd ~/.ssh && for i in 1 2; do echo $i > n$i.txt; done', HOME, fresh).level, BLOCK, 'mkdir into a secret folder');
   console.log('file loop tests: all passed');
+}
+
+// Drawing: links open like links in a reply, pictures fetch like fetch_url, typing needs actions allowed, buttons only ask, open or copy.
+{
+  const on = { allowActions: true }, off = { allowActions: false };
+  const lv = (a, o = off) => checkDrawAction(a, o).level;
+  assert.equal(lv({ kind: 'open', url: 'https://example.com/x' }), SAFE, 'open a web page');
+  assert.equal(lv({ kind: 'open', url: 'file:///etc/passwd' }), BLOCK, 'open a file link');
+  assert.equal(lv({ kind: 'open', url: 'javascript:alert(1)' }), BLOCK, 'open a script link');
+  assert.equal(lv({ kind: 'photo', url: 'https://upload.wikimedia.org/a.jpg' }), SAFE, 'public picture');
+  assert.equal(lv({ kind: 'photo', url: 'http://192.168.1.1/cam.jpg' }), BLOCK, 'picture on the local network');
+  assert.equal(lv({ kind: 'favicon', url: 'http://localhost/favicon.ico' }), BLOCK, 'favicon from this computer');
+  assert.equal(lv({ kind: 'type', text: 'hello' }, off), BLOCK, 'typing with actions off');
+  assert.equal(lv({ kind: 'type', text: 'hello' }, on), SAFE, 'typing with actions on');
+  assert.equal(lv({ kind: 'type', text: '' }, on), BLOCK, 'typing nothing');
+  assert.equal(lv({ kind: 'copy', text: 'npm i' }), SAFE, 'copy');
+  assert.equal(lv({ kind: 'copy', text: 'x'.repeat(10_001) }), BLOCK, 'copy too much');
+  assert.equal(lv({ kind: 'button', action: { do: 'ask', value: 'Show me the next step' } }), SAFE, 'ask button');
+  assert.equal(lv({ kind: 'button', action: { do: 'open', value: 'https://example.com' } }), SAFE, 'link button');
+  assert.equal(lv({ kind: 'button', action: { do: 'open', value: 'vscode://run' } }), BLOCK, 'app-link button');
+  assert.equal(lv({ kind: 'button', action: { do: 'run', value: 'rm -rf ~' } }), BLOCK, 'run button');
+  assert.equal(lv({ kind: 'handoff' }), SAFE, 'hand off');
+  assert.equal(lv({ kind: 'delete' }), BLOCK, 'unknown action');
+  console.log('draw action tests: all passed');
 }

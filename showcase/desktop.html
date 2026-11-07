@@ -6,6 +6,8 @@
 <style>
   /* Bubble and research-card text (the setup guide's body font). */
   @font-face { font-family: "Martian Mono"; src: url("onboarding/fonts/martian-mono.woff2") format("woff2"); font-weight: 100 800; font-display: swap; }
+  /* Headings on drawn cards and tickets. */
+  @font-face { font-family: "Doto"; src: url("onboarding/fonts/doto.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
   /* Sized and moved by core.js to cover just what's drawn. */
   canvas { position: fixed; left: 0; top: 0; display: block; cursor: grab; touch-action: none; transform-origin: 0 0; will-change: transform; }
@@ -27,6 +29,9 @@
 <script src="roamies/10-dither.js"></script>
 <script src="roamies/12-sidekick.js"></script>
 <script>Roamie.bootDesktop(document.getElementById("stage")); document.fonts.load('500 13px "Martian Mono"');</script>
+<script src="roamies/ink3d.js"></script>
+<script src="roamies/ink.js"></script>
+<script>document.fonts.load('800 16px "Doto"');</script>
 <script src="roamies/host.js"></script>
 </body>
 </html>

@@ -195,9 +195,9 @@ h2 { margin: 0; font: 700 13px/1.35 var(--mono); font-stretch: 87.5%; color: var
 
 /* ---------- providers ---------- */
 .providers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
-/* Four sign-ins and the two reply choices: two wide cards a row, room for "Downloading Claude Code… 40%". */
+/* The two sign-ins and the two reply choices: two wide cards a row, room for "Downloading Claude Code… 40%". */
 .providers.two { grid-template-columns: repeat(2, 1fr); }
-/* Ten API-key providers: smaller cards, three a row. */
+/* Fourteen kinds of API key: smaller cards, three a row. */
 .providers.keys { gap: 6px; margin-bottom: 10px; }
 .providers.keys .prov { align-items: center; padding: 8px 10px; font-size: 13px; white-space: nowrap; }
 .providers.keys .prov .led { margin-top: 0; }

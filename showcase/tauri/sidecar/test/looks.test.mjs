@@ -1,14 +1,20 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_VOICE } from '../fish.mjs';
 
 // Every look the app offers has a drawing and its voice; the setup guide offers the same looks.
 const src = (p) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8');
 const side = src('../sidekick.mjs'), guide = src('../../../onboarding/onboarding.js');
-const looks = [...side.slice(side.indexOf('const LOOKS = ['), side.indexOf('];', side.indexOf('const LOOKS = ['))).matchAll(/\['(\w+)', '([^']+)', (null|'(\w+)')\]/g)];
+const looks = [...side.slice(side.indexOf('const LOOKS = ['), side.indexOf('];', side.indexOf('const LOOKS = ['))).matchAll(/\['(\w+)', '([^']+)', (DEFAULT_VOICE|'(\w+)')\]/g)];
 assert.deepEqual(looks.map((m) => m[1]), ['classic', 'jarvis', 'anime', 'sarah', 'adrian']);
 const voices = Object.fromEntries(looks.map((m) => [m[1], m[4] ?? null]));
+assert.equal(voices.classic, null, 'Roamie uses DEFAULT_VOICE');
+assert.equal(DEFAULT_VOICE, '2680da81de8348a68e1f4dbaa79272f1');
 assert.equal(voices.jarvis, 'e13fa398a7f445a685316a3de6089ce7');
+// Regression: Roamie spoke with JARVIS's voice (the default was JARVIS's ID).
+assert.equal(new Set([DEFAULT_VOICE, ...Object.values(voices).filter(Boolean)]).size, 5, 'every look has its own voice');
+assert.ok(!/config\.fishVoice/.test(side), 'a saved fishVoice (the old JARVIS default) is never used');
 assert.equal(voices.anime, 'd8f3b4c1199f4568a767ec54112d2b17');
 assert.equal(voices.sarah, '933563129e564b19a115bedd57b7406a');
 assert.equal(voices.adrian, 'bf322df2096a46f18c579d0baa36f41d');

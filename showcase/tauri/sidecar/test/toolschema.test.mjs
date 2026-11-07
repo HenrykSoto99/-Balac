@@ -18,6 +18,10 @@ const walk = (name, node, at) => {
 };
 for (const t of tools) walk(t.name, resolveToolSchema(t), '');
 assert.deepEqual(formats, [], 'no tool uses a string format');
+// draw replaced point_at, on every platform (pixels from a screenshot work everywhere).
+assert.ok(tools.some((t) => t.name === 'draw') && !tools.some((t) => t.name === 'point_at'), 'draw, not point_at');
+const drawSchema = JSON.stringify(resolveToolSchema(tools.find((t) => t.name === 'draw')));
+assert.ok(!/"(oneOf|anyOf|allOf)"/.test(drawSchema), 'draw is one flat object schema (no unions some providers reject)');
 console.log('tool schema ok');
 
 // act_in_app that only types a web address into a browser's bar becomes a direct open.

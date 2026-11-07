@@ -77,7 +77,15 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
       end() { if (done || ended) return; ended = true; v.end(); },
       abort() { if (done) return; done = true; v?.abort(); if (current === me) current = null; },
     };
-    const finish = () => { if (done) return; done = true; emit({ kind: 'speech', id, end: true }); if (current === me) current = null; };
+    // A reply that played to its end also says how much it said (without the voice cues), so the overlay can learn
+    // how fast the voice talks and pace drawings to it.
+    const finish = (whole = false) => {
+      if (done) return;
+      done = true;
+      const chars = whole && heard ? said.join(' ').replace(/\[[^\]]*\]\s*/g, '').length : 0;
+      emit({ kind: 'speech', id, end: true, ...(chars ? { chars } : {}) });
+      if (current === me) current = null;
+    };
     const connect = (m) => {
       tries++;
       v = new FishVoiceImpl({
@@ -87,7 +95,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
           if (!heard) { heard = true; if (m !== model) model = m; log('speech_first_audio', { id, model: m, ms: Date.now() - t0 }); }
           emit({ kind: 'speech', id, rate: RATE, pcm: Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64') });
         },
-        onEnd: () => finish(),
+        onEnd: () => finish(true),
         onError: async (err) => {
           if (done) return;
           log('speech_error', { id, model: m, heard: err.heard, message: err.message });

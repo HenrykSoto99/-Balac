@@ -349,3 +349,30 @@ export function checkLink(url) {
 
 /** A yes from the user, typed or spoken. */
 export const isYes = (text) => /^\s*(y|yes|yeah|yep|yup|ok|okay|sure|go|go ahead|do it|run it|allow|confirm)\b/i.test(String(text ?? ''));
+
+// ---------- drawing on screen ----------
+
+/** What a draw call may do beyond drawing. kind: 'open' (a page in the browser, like a link in a reply), 'photo' and
+ *  'favicon' (fetched for a card, like fetch_url), 'type' (into a field, like act_in_app: only with actions allowed;
+ *  the macOS helper still refuses the HANDS_OFF apps), 'copy' (to the clipboard), 'button' (a next-step button:
+ *  ask sends its words as a new request, open and copy follow the rules above). */
+export function checkDrawAction({ kind, url, text, action } = {}, { allowActions = false } = {}) {
+  switch (kind) {
+    case 'open': return checkLink(url);
+    case 'photo': case 'favicon': return checkUrl(url);
+    case 'type':
+      if (!allowActions) return verdict(BLOCK, 'Typing into apps is switched off (Allow File Edits & Commands).');
+      if (!String(text ?? '').length || String(text).length > 2000) return verdict(BLOCK, 'Nothing (or far too much) to type.');
+      return verdict(SAFE);
+    case 'copy': return String(text ?? '').length && String(text).length <= 10_000 ? verdict(SAFE) : verdict(BLOCK, 'Nothing (or far too much) to copy.');
+    case 'button': {
+      const a = action ?? {};
+      if (a.do === 'ask') return String(a.value ?? '').trim() ? verdict(SAFE) : verdict(BLOCK, 'A button needs words to ask.');
+      if (a.do === 'open') return checkLink(a.value);
+      if (a.do === 'copy') return checkDrawAction({ kind: 'copy', text: a.value });
+      return verdict(BLOCK, 'A button can only ask, open a link or copy.');
+    }
+    case 'handoff': return verdict(SAFE);
+    default: return verdict(BLOCK, `${kind} isn't something a drawing can do.`);
+  }
+}

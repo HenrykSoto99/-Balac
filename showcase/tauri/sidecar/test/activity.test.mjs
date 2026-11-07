@@ -40,4 +40,14 @@ assert.equal(a.recent.length, 3);
 assert.deepEqual(a.recent.map((r) => r.text), ['Forgot it', "Couldn't finish: read b.txt", 'Searched the web']);
 assert.equal(a.start('4', 'plan_steps', {}), null);
 a.start('5', 'web_search', {}); a.stopped(); assert.equal(a.doing(), null);
+// Regression: a screenshot cut off by Stop never reported back, so its tag stayed up on every later request.
+{
+  const b = createActivity();
+  b.start('s1', 'take_screenshot', { target: 'CapCut' }); b.start('p1', 'plan_steps', {}); b.start('r1', 'read_window', {});
+  b.end('r1', false);
+  assert.equal(b.doing(), 'Looking at CapCut', 'a tool with no line never hides the one still running');
+  assert.deepEqual(b.stopped(), ['s1', 'p1'], 'the ones that never finished, so their tags can be ended');
+  assert.equal(b.doing(), null);
+  assert.deepEqual(b.stopped(), [], 'nothing left after');
+}
 console.log('activity tests: passed');

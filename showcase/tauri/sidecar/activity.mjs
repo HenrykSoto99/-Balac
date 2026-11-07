@@ -44,10 +44,12 @@ export function createActivity({ max = 12, now = () => Date.now() } = {}) {
     asked(text) { add('ask', short(text, 80)); },
     // A drawing handed part of the work on: said in the list like anything else it did.
     handoff(task) { add('did', `Handed off: ${short(task, 60)}`); },
-    start(id, name, args) { const d = describe(name, args); if (d) running.set(id, d); return d?.[0] ?? null; },
+    // Every tool is tracked, even ones with no line, so stopped() can say which never finished.
+    start(id, name, args) { const d = describe(name, args); running.set(id, d); return d?.[0] ?? null; },
     end(id, isError) { const d = running.get(id); running.delete(id); if (d) add(isError ? 'bad' : 'did', isError ? `Couldn't finish: ${d[1].charAt(0).toLowerCase()}${d[1].slice(1)}` : d[1]); },
     // What it's doing right now (the newest tool still running), or null.
-    doing() { return [...running.values()].at(-1)?.[0] ?? null; },
-    stopped() { running.clear(); },
+    doing() { return [...running.values()].filter(Boolean).at(-1)?.[0] ?? null; },
+    // The request ended: the ids of tools that never reported back (it was cancelled mid-call).
+    stopped() { const left = [...running.keys()]; running.clear(); return left; },
   };
 }

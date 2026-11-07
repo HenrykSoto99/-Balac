@@ -771,7 +771,10 @@ async function prompt(text, image = null, note = '') {
       ui({ kind: 'agent', e: { type: 'error', message: msg } });
     }
   } finally {
-    busy = false; activity.stopped(); turnVoice = null;
+    busy = false; turnVoice = null;
+    // A tool cut off by Stop never reports back: end its tag too, or the Sidekick kept showing it ("looking at
+    // CapCut") on every later request, with their own tags queued behind it.
+    for (const id of activity.stopped()) ui({ kind: 'agent', e: { type: 'tool_end', id, isError: true } });
     syncSession();
     // No usage reported: estimate what the last call sent.
     if (!lastInput && session) lastInput = { session: session.id, tokens: approxTokens(session.messages) + Math.round(system().length / 3.6), measured: false };

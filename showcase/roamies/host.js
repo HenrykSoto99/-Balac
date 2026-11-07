@@ -142,6 +142,9 @@
     if (!a) return;
     switch (e.type) {
       case 'start':
+        // A new request: no tool of an earlier one is still running, whatever was missed (a cut-off call). Its tag
+        // ends instead of staying up, with this request's tags queued behind it.
+        for (const j of [current, ...jobs]) if (j && j.result === undefined) { j.result = false; j.h?.done(true); }
         responding = true;
         heard = null;
         research = false; fromWeb = false; spoken = '';

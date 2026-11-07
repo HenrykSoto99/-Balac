@@ -69,6 +69,10 @@ jobs:
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-gain
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-snap
 
+      - name: Test the macOS hands helper
+        if: runner.os == 'macOS'
+        run: src-tauri/binaries/roamies-hands-"$(rustc -vV | sed -n 's/^host: //p')" --self-test
+
       # --release reuses the voice helper build.sh just made instead of compiling Parakeet again.
       - name: Test the Windows voice helper
         if: runner.os == 'Windows'

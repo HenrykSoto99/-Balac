@@ -61,7 +61,7 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
 {
   fs.writeFileSync(log, '');
   const sent = [], spoken = [], other = [];
-  let clicks = 0;
+  let clicks = 0, hold = false;
   const made = createTools({
     allowActions: () => true, ask: async () => false, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test',
     speak: (t) => { spoken.push(t); return true; },
@@ -72,7 +72,7 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
       setImmediate(() => {
         made.ink.started(m.e.id, m.e.seg);
         const last = m.e.beats.at(-1);
-        if (last?.wait) setTimeout(() => { clicks++; made.ink.waitDone(m.e.id, last.n, 'clicked'); }, 5);
+        if (last?.wait && !hold) setTimeout(() => { clicks++; made.ink.waitDone(m.e.id, last.n, 'clicked'); }, 5);
       });
     },
   });
@@ -126,6 +126,21 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   fs.writeFileSync(log, '');
   await draw.execute({ beats: [{ say: 'Your email goes here.', marks: [{ kind: 'type', at: { text: 'Email' }, text: 'a@b.com' }] }] }, { toolCallId: 'd4' });
   assert.deepEqual(JSON.parse(calls().find((c) => c[0] === 'act')[1]).steps, [{ do: 'fill', field: 'Email', text: 'a@b.com' }]);
+  // Regression: talking over a walkthrough that waits for a click left its caption up, still waiting.
+  made.nextTurn(); hold = true;
+  const talk = new AbortController();
+  const cut = draw.execute({ beats: [step('Click the Scale box.', 'Scale'), step('Then type 130.', 'Scale')] }, { toolCallId: 'd9', signal: talk.signal });
+  while (!sent.some((e) => e.id === 'd9')) await new Promise((r) => setTimeout(r, 5));
+  await new Promise((r) => setTimeout(r, 20));
+  talk.abort();
+  assert.equal(await cut, 'Stopped.');
+  assert.deepEqual(other.at(-1), { type: 'ink_clear', screen: true, stop: true }, 'the overlay stops too');
+  hold = false;
+  // Cut off before it got to waiting: it stops at once instead of waiting out the timeout.
+  const early = new AbortController(); early.abort();
+  const t0 = Date.now();
+  assert.equal(await draw.execute({ beats: [step('Click Scale.', 'Scale')] }, { toolCallId: 'd10', signal: early.signal }), 'Stopped.');
+  assert.ok(Date.now() - t0 < 5000, 'no wait for the timeout');
   console.log('draw tool tests: passed');
 }
 

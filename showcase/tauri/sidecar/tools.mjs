@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
-import { parseSipsSize, readProblem, rematch, sameBounds, shotMap, shotProblem, toScreen } from './pointing.mjs';
+import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, toScreen } from './pointing.mjs';
 import { ASK, BLOCK, checkDrawAction, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isRiskyClick, isYes } from './safety.mjs';
 import { CARDS, DrawArgs, checkDraw, createParts, faviconFor, photoFor, pickTextMatch, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
@@ -171,9 +171,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       const res = await hands('capture', file, spec, '1568');
       const size = Array.isArray(res.pixels) && res.pixels.length === 2 ? res.pixels : await fitImage(file);
       const bounds = res.window?.bounds ?? res.bounds;
-      lastShot = size && bounds ? { ...shotMap(bounds, ...size), bounds, win: res.window?.id ?? null, turn } : null;
+      // area: what the picture covers when it's more than the window (its child windows too); bounds still tell
+      // whether the window moved.
+      const area = res.area ?? bounds;
+      // A picture that isn't the shape of the area it's said to show would point in the wrong place: refuse to point.
+      lastShot = !size || !bounds ? null : shotFits(area, ...size) ? { ...shotMap(area, ...size), bounds, win: res.window?.id ?? null, turn } : { unmapped: true, turn };
       const what = res.window ? `the ${res.window.app} window${res.window.title ? ` "${res.window.title}"` : ''}` : 'the whole screen';
-      const dims = size ? ` (${size[0]}×${size[1]} px; for draw or click_at give x, y in this image's pixels)` : '';
+      const dims = lastShot?.unmapped ? ` (it doesn't line up with the window on screen, so don't point or click by its pixels; use visible words)` : size ? ` (${size[0]}×${size[1]} px; for draw or click_at give x, y in this image's pixels)` : '';
       return { content: [{ type: 'text', text: `Screenshot of ${what}${dims}.` }, await imageBlock(file, 'image/jpeg')] };
     } else if (process.platform === 'win32') {
       // DPI-aware (or scaled displays capture only the top-left part), shrunk to Claude's 1568 px cap, and the
@@ -225,6 +229,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
   const inkWait = (key, ms, signal) => new Promise((resolve) => {
     const done = (v) => { clearTimeout(t); signal?.removeEventListener('abort', stop); ink.waits.delete(key); resolve(v); };
     const t = setTimeout(() => done('timeout'), ms), stop = () => done('stopped');
+    // Already cut off before getting here: the abort event has fired, so it would wait the whole time.
+    if (signal?.aborted) return stop();
     signal?.addEventListener('abort', stop, { once: true });
     ink.waits.set(key, done);
   });
@@ -354,6 +360,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     const segs = beats.map((b, i) => ({ from: i, to: i + 1, after: i > 0 && !!beats[i - 1].wait }));
     if (!segs.length) segs.push({ from: 0, to: 0 });
     const drawn = [];
+    // Cut off (they spoke over it): the overlay stops too, or it keeps the caption up waiting for a click.
+    const stopped = () => { if (ctx?.signal?.aborted && parts.screenCount) clearScreenInk(true); return 'Stopped.'; };
     // Where there's room for cards: the screen minus the front window; and what's on it, so names avoid covering words.
     const hasCards = beats.some((b) => b.marks.some((m) => CARDS.includes(m.kind)));
     const win = hasCards && HANDS ? (await hands('locate', 'front').catch(() => null))?.window?.bounds ?? null : null;
@@ -385,13 +393,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         // The first beat must show; later ones queue behind it on the overlay without holding this up.
         if (!k) {
           const started = await inkWait(`${id}:start:0`, 15_000, ctx?.signal);
-          if (started === 'stopped') return 'Stopped.';
+          if (started === 'stopped') return stopped();
           if (started === 'timeout') throw new Error("The drawing didn't show (the overlay isn't responding).");
         }
         const w = out.at(-1)?.wait;
         if (!w) continue;
         const n = out.at(-1).n, r = await inkWait(`${id}:wait:${n}`, w === 'click' ? 120_000 : 60_000, ctx?.signal);
-        if (r === 'stopped') return 'Stopped.';
+        if (r === 'stopped') return stopped();
         notes.push(`Beat ${n}: ${r === 'timeout' ? `no ${w} within ${w === 'click' ? 2 : 1} minute${w === 'click' ? 's' : ''}, so I stopped there` : `${userName} ${r}`}.`);
         if (r === 'timeout') break;
         // They clicked: the screen has changed under the old screenshot.

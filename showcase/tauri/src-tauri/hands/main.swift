@@ -68,16 +68,35 @@ func resolve(_ target: String) -> Win? {
     if BG, let w { bgPid = w.pid }
     return w
 }
+/// An app's window to use, from its windows front to back: the frontmost one, passing over small untitled ones
+/// floating above a much bigger window (CapCut's EditPilot button). Capturing one of those gave the big window's
+/// picture with the button's bounds, so drawings landed squeezed into the button's corner.
+func mainWindow(_ wins: [Win]) -> Win? {
+    let big = wins.map { $0.w * $0.h }.max() ?? 0
+    return wins.first { !$0.title.isEmpty || $0.w * $0.h >= big * 0.05 } ?? wins.first
+}
+
+/// What a window capture really shows, when it isn't just the window: macOS adds the window's child windows
+/// (CapCut's EditPilot button hangs past its corner), so the picture covers both. nil: the window alone.
+func shotArea(_ w: Win, _ all: [Win], _ px: [Int]) -> CGRect? {
+    let own = CGRect(x: w.x, y: w.y, width: w.w, height: w.h)
+    let group = all.filter { $0.pid == w.pid && $0.id != w.id }.map { CGRect(x: $0.x, y: $0.y, width: $0.w, height: $0.h) }
+        .filter { $0.intersects(own) }.reduce(own) { $0.union($1) }
+    guard group != own, px.count == 2, px[1] > 0 else { return nil }
+    let ratio = Double(px[0]) / Double(px[1]), off = { (r: CGRect) in abs(r.width / r.height - ratio) }
+    return off(group) < off(own) ? group : nil
+}
+
 func resolveWin(_ target: String) -> Win? {
     let all = windows()
     if target == "front" {
-        if let f = NSWorkspace.shared.frontmostApplication, !isRoamies(f.processIdentifier), let w = all.first(where: { $0.pid == f.processIdentifier }) { return w }
+        if let f = NSWorkspace.shared.frontmostApplication, !isRoamies(f.processIdentifier), let w = mainWindow(all.filter { $0.pid == f.processIdentifier }) { return w }
         return all.first
     }
     if target.hasPrefix("window:"), let id = Int(target.dropFirst(7)) { return all.first { $0.id == id } }
     if target.hasPrefix("app:") {
         let name = String(target.dropFirst(4))
-        if let w = all.first(where: { appMatches($0.app, name) }) { return w }
+        if let w = mainWindow(all.filter { appMatches($0.app, name) }) { return w }
         // Running but no visible window (hidden or minimised): bring it forward and look again.
         if let app = NSWorkspace.shared.runningApplications.first(where: { appMatches($0.localizedName ?? "", name) }) {
             app.unhide()
@@ -264,6 +283,15 @@ func walk(_ app: AXUIElement, _ w: Win? = nil, limit: Int = 260) -> [(AXUIElemen
 /// exact matches, then whole words, then contains; on screen in this window; smallest first (the text, not its container).
 func findText(_ app: AXUIElement, _ w: Win, _ query: String) -> [[String: Any]] { findTextEls(app, w, query).map { $0.1 } }
 
+/// How text (lowercased, trimmed) holds the query: 0 the whole text, 1 a whole word or phrase in it, 2 only inside other
+/// words. Joined by . : _ / @ or \ isn't a word of its own: "speed" in a clip called "MTLSVideoP:speed.mp4" is part of a
+/// name. (\b fails when the text starts or ends with a symbol, like "$1,250".)
+func matchScore(_ low: String, _ q: String) -> Int {
+    if low == q { return 0 }
+    let pat = "(?<![\\p{L}\\p{N}_./:@\\\\])\(NSRegularExpression.escapedPattern(for: q))(?![\\p{L}\\p{N}_])(?![./:@\\\\][\\p{L}\\p{N}])"
+    return low.range(of: pat, options: .regularExpression) != nil ? 1 : 2
+}
+
 func findTextEls(_ app: AXUIElement, _ w: Win, _ query: String, hidden: Bool = false, limit: Int = 8) -> [(AXUIElement, [String: Any])] {
     guard let root = axWindow(app, w) else { return [] }
     let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -279,7 +307,7 @@ func findTextEls(_ app: AXUIElement, _ w: Win, _ query: String, hidden: Bool = f
         if let t = texts.first(where: { $0.lowercased().contains(q) }), let f = frameOf(a[5], a[6]), f.width > 1, f.height > 1, hidden || win.intersects(f) {
             let low = t.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             // A whole word: no letter or digit right before or after. (\\b fails when the text starts or ends with a symbol, like "$1,250".)
-            let score = low == q ? 0 : low.range(of: "(?<![\\p{L}\\p{N}])\(NSRegularExpression.escapedPattern(for: q))(?![\\p{L}\\p{N}])", options: .regularExpression) != nil ? 1 : 2
+            let score = matchScore(low, q)
             let role = strOf(a[7]) ?? ""
             hits.append((score, inWebPage(el), f.width * f.height, el, ["text": String(t.prefix(80)), "match": ["exact", "word", "partial"][score], "role": ROLE_NAME[role] ?? role.replacingOccurrences(of: "AX", with: "").lowercased(),
                                                      "bounds": [Int(f.minX), Int(f.minY), Int(f.width), Int(f.height)]]))
@@ -392,6 +420,13 @@ func isEditable(_ e: AXUIElement?) -> Bool {
     if FIELD_ROLES.contains(axRole(e)) { return true }
     var settable: DarwinBoolean = false
     return AXUIElementIsAttributeSettable(e, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
+}
+
+/// Whether a type step may go ahead. Typing outside a text field fires page shortcuts, so normally the focused
+/// thing must be editable. Some apps (CapCut) don't show their fields to accessibility at all and report only the
+/// window as focused: there, right after a click at a spot, the typing goes into what was clicked.
+func mayType(editable: Bool, focusRole: String?, clickedSpot: Bool) -> Bool {
+    editable || (clickedSpot && (focusRole == nil || ["AXWindow", "AXApplication"].contains(focusRole!)))
 }
 
 /// Puts the cursor in a field, replaces its text and reads back what it shows. Never types unless the field
@@ -583,6 +618,10 @@ func scrollAt(_ p: CGPoint, dy: Int32, dx: Int32) {
     Thread.sleep(forTimeInterval: 0.03)
     if let e = CGEvent(scrollWheelEvent2Source: src, units: .line, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) { e.flags = []; sendScroll(e) }
 }
+
+/// What click_text may click: the words as a whole label or a whole word in one, never inside other words
+/// ("Follow" must not click "Following", "Speed" not a clip called "MTLSVideoP:speed.mp4").
+func clickMatch(_ m: [String: Any]) -> Bool { (m["match"] as? String) != "partial" }
 
 /// A whole label or heading, not the same words buried in a paragraph.
 func wholeMatch(_ m: [String: Any], _ q: String) -> Bool {
@@ -1188,6 +1227,33 @@ let args = Array(CommandLine.arguments.dropFirst())
 guard let cmd = args.first else { fail("no command") }
 
 switch cmd {
+// --self-test checks which of an app's windows is used and when typing may go ahead, with made-up cases; exits 1 on a failure.
+case "--self-test":
+    var bad = 0
+    func check(_ name: String, _ ok: Bool) { print("\(ok ? "ok" : "FAIL") \(name)"); if !ok { bad += 1 } }
+    let win = { (id: Int, title: String, w: Double, h: Double) in Win(id: id, pid: 1, app: "App", title: title, x: 0, y: 0, w: w, h: h) }
+    check("a small untitled button over the main window is passed over", mainWindow([win(1, "", 183, 88), win(2, "CapCut", 1800, 1066)])?.id == 2)
+    check("even when the main window is untitled", mainWindow([win(1, "", 183, 88), win(2, "", 1800, 1066)])?.id == 2)
+    check("a titled small window in front is kept", mainWindow([win(1, "Export", 300, 200), win(2, "Doc", 1800, 1066)])?.id == 1)
+    check("a sizeable untitled window in front is kept", mainWindow([win(1, "", 900, 600), win(2, "Doc", 1800, 1066)])?.id == 1)
+    check("an app with only a small window still has it", mainWindow([win(1, "", 183, 88)])?.id == 1)
+    let main = Win(id: 2, pid: 1, app: "CapCut", title: "CapCut", x: 0, y: 39, w: 1800, h: 1066), badge = Win(id: 1, pid: 1, app: "CapCut", title: "", x: 1625, y: 1029, w: 183, h: 88)
+    check("a capture that also shows a child window maps over both", shotArea(main, [badge, main], [1568, 935]) == CGRect(x: 0, y: 39, width: 1808, height: 1078))
+    check("a capture of the window alone maps over the window", shotArea(main, [badge, main], [1568, 929]) == nil)
+    // Regression: CapCut's Scale box is invisible to accessibility, so typing after clicking it was refused every time.
+    check("typing after a click in an app that hides its fields", mayType(editable: false, focusRole: "AXWindow", clickedSpot: true))
+    check("no typing in such an app without a click first", !mayType(editable: false, focusRole: "AXWindow", clickedSpot: false))
+    check("no typing on a web page outside a field, even after a click", !mayType(editable: false, focusRole: "AXWebArea", clickedSpot: true))
+    check("typing in a real text field", mayType(editable: true, focusRole: "AXTextField", clickedSpot: false))
+    // Regression: click_text "Speed" (a tab CapCut hides from accessibility) clicked a clip named "MTLSVideoP:speed.mp4".
+    check("a word inside a file name isn't a word match", matchScore("mtlsvideop:speed.mp4", "speed") == 2)
+    check("so click_text won't click it", !clickMatch(["match": ["exact", "word", "partial"][matchScore("mtlsvideop:speed.mp4", "speed")]]))
+    check("inside a longer word isn't clickable", !clickMatch(["match": ["exact", "word", "partial"][matchScore("following", "follow")]]))
+    check("the whole label matches", matchScore("speed", "speed") == 0)
+    check("a whole word in a label matches", matchScore("save changes", "save") == 1 && matchScore("speed:", "speed") == 1 && matchScore("next \u{2192}", "next") == 1)
+    check("an amount with symbols matches", matchScore("total $1,250", "$1,250") == 1)
+    exit(bad == 0 ? 0 : 1)
+
 case "trusted":
     let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: args.contains("--prompt")] as CFDictionary
     out(["ok": true, "trusted": AXIsProcessTrustedWithOptions(opts)])
@@ -1275,7 +1341,10 @@ case "capture":
     guard let w = resolve(target) else { fail("No matching window is open\(target.hasPrefix("app:") ? " for \(target.dropFirst(4))" : "").") }
     guard run("/usr/sbin/screencapture", ["-x", "-o", "-t", "jpg", "-l", String(w.id), file]) == 0 else { fail("Window capture failed. Roamies may need Screen Recording permission.") }
     var o: [String: Any] = ["ok": true, "file": file, "window": winInfo(w)]
-    if let px = shrink() { o["pixels"] = px }
+    if let px = shrink() {
+        o["pixels"] = px
+        if let r = shotArea(w, windows(), px) { o["area"] = [Int(r.minX), Int(r.minY), Int(r.width), Int(r.height)] }
+    }
     makeThumb()
     out(o)
 
@@ -1386,6 +1455,7 @@ case "act":
     let reacts: Set<String> = ["click", "click_text", "press_button", "key", "click_at", "choose"]
     let tailWait = steps.count >= 2 && (steps.last?["do"] as? String) == "wait" && reacts.contains(steps[steps.count - 2]["do"] as? String ?? "")
     var sigBefore: String?
+    var clickedSpot = false
     for (i, s) in steps.enumerated() {
         let what = s["do"] as? String ?? ""
         usedRealCursor = false
@@ -1397,6 +1467,9 @@ case "act":
             }
         }
         if tailWait, i == steps.count - 2 { sigBefore = pageSig() }
+        // A click at a spot only vouches for the typing that follows it (keys like cmd+a and waits in between are fine);
+        // any step that moves focus elsewhere ends it.
+        if !["click_at", "key", "wait", "type"].contains(what) { clickedSpot = false }
         // An earlier step may have switched apps (a click, cmd+tab, Spotlight); check before every action.
         if what != "wait", let front = NSWorkspace.shared.frontmostApplication, let name = handsOff(front.processIdentifier) {
             out(["ok": false, "error": "Blocked for safety: \(name) came to the front, and I never type or click in it.", "done": done])
@@ -1456,16 +1529,16 @@ case "act":
                 guard let a = anchorFrame(app, w, near) else {
                     out(["ok": false, "error": "Step \(i + 1): no text \"\(near)\" on this page to find \"\(q)\" near.", "done": done])
                 }
-                let all = findTextEls(app, w, q, hidden: true, limit: 200).filter { wholeMatch($0.1, q) }
+                let all = findTextEls(app, w, q, hidden: true, limit: 200).filter { clickMatch($0.1) }
                 let best = all.first?.1["match"] as? String
                 hit = nearestAfter(a, all.filter { ($0.1["match"] as? String) == best })
                 if let (e, _) = hit, let f = frame(e), !CGRect(x: w.x, y: w.y, width: w.w, height: w.h).contains(CGPoint(x: f.midX, y: f.midY)) {
                     AXUIElementPerformAction(e, "AXScrollToVisible" as CFString); Thread.sleep(forTimeInterval: 0.3)
                 }
             } else {
-                hit = findTextEls(app, w, q).first(where: { wholeMatch($0.1, q) })
+                hit = findTextEls(app, w, q).first(where: { clickMatch($0.1) })
                 if let box = boxes.first, hit == nil || !inWebPage(hit!.0) { hit = (box.0, ["text": box.1["label"] ?? q]) }
-                if hit == nil, !q.isEmpty, scrollToText(app, w, q) { hit = findTextEls(app, w, q).first(where: { wholeMatch($0.1, q) }) }
+                if hit == nil, !q.isEmpty, scrollToText(app, w, q) { hit = findTextEls(app, w, q).first(where: { clickMatch($0.1) }) }
             }
             guard !q.isEmpty, let (e, info) = hit else {
                 out(["ok": false, "error": "Step \(i + 1): no visible text \"\(s["text"] ?? "")\" in \(w.app). Check the exact words with a screenshot or read_window.", "done": done])
@@ -1487,8 +1560,11 @@ case "act":
             controls = walk(app, w)
         case "type":
             // Typing outside a text field fires page shortcuts (YouTube's k pauses, Cmd-less digits switch views).
-            guard isEditable(focusedEl(app)) else {
-                out(["ok": false, "error": "Step \(i + 1): the cursor isn't in a text field, so typing would go nowhere. Use {do:'fill', field, text} to fill a field by its label.", "done": done])
+            let focus = focusedEl(app), hidden = !isEditable(focus)
+            guard mayType(editable: !hidden, focusRole: focus.map { axRole($0) }, clickedSpot: clickedSpot) else {
+                let opaque = focus.map { ["AXWindow", "AXApplication"].contains(axRole($0)) } ?? true
+                let tip = opaque ? "This app doesn't show its fields: click_at the field (from a screenshot) as the step right before typing." : "Use {do:'fill', field, text} to fill a field by its label."
+                out(["ok": false, "error": "Step \(i + 1): the cursor isn't in a text field, so typing would go nowhere. \(tip)", "done": done])
             }
             let text = s["text"] as? String ?? "", into = focusedEl(app), before = into.flatMap { str($0, kAXValueAttribute) }
             emitStep(i, "type", into, text: text)
@@ -1502,7 +1578,7 @@ case "act":
                     out(["ok": false, "error": "Step \(i + 1): typed, but the text field still shows \"\(now.prefix(80))\", so I stopped before the next step. Use {do:'fill', field, text} instead, or the open tool for a web address or a site's search results page.", "done": done])
                 }
             }
-            done.append("typed text")
+            done.append(hidden ? "typed text (the app doesn't show its fields, so check the result on screen)" : "typed text")
         case "fill":
             // A form field by its label, placeholder or id: put the cursor in it, replace its text, check it took.
             let text = s["text"] as? String ?? ""
@@ -1665,6 +1741,7 @@ case "act":
             let global = s["global"] as? Bool ?? false
             emitStep(i, "click_at", nil, at: global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y))
             click(global ? CGPoint(x: x, y: y) : CGPoint(x: w.x + x, y: w.y + y)); done.append("clicked at \(Int(x)),\(Int(y))")
+            clickedSpot = true
         case "wait":
             let secs = min(5, (s["seconds"] as? Double) ?? 0.5)
             if let before = sigBefore, i == steps.count - 1 {

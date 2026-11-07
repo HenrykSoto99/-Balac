@@ -1,6 +1,6 @@
 // Screenshot pixels → screen points for draw / click_at. Run: npm test
 import assert from 'node:assert/strict';
-import { shotMap, toScreen, parseSipsSize } from '../pointing.mjs';
+import { shotFits, shotMap, toScreen, parseSipsSize } from '../pointing.mjs';
 
 // Regression: an 1800×1066 pt Brave window at (0, 39) is captured at 3600 px and capped to 1568 px wide.
 // Image pixels used to be treated as points, so points landed up and left of the target.
@@ -56,3 +56,16 @@ console.log('screenshot coordinate tests: passed');
   assert.match(readProblem(null, 9, 3), /read_window on this window first/);
   console.log('freshness tests: passed');
 }
+
+// Regression: CapCut's 183×88 pt button window came back with a 1568×935 picture of the whole app, and every mark
+// was squeezed into the button's corner. A picture that isn't the shape of its area isn't used to point.
+assert.equal(shotFits([1625, 1029, 183, 88], 1568, 935), false, 'the button bounds with the whole-window picture');
+assert.equal(shotFits([0, 39, 1800, 1066], 1568, 929), true, 'a window capped to 1568 px');
+assert.equal(shotFits([0, 39, 1808, 1078], 1568, 935), true, 'a window with its child window');
+assert.equal(shotFits([400, 300, 700, 500], 1400, 1000), true, 'a small Retina window');
+assert.equal(shotFits([0, 0, 0, 0], 1568, 935), false, 'no area');
+{
+  const { shotProblem } = await import('../pointing.mjs');
+  assert.match(shotProblem({ unmapped: true, turn: 1 }, 1), /doesn't line up/);
+}
+console.log('screenshot shape tests: passed');

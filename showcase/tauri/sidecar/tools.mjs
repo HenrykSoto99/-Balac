@@ -391,6 +391,8 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     stop: () => { for (const done of [...ink.waits.values()]) done('stopped'); if (parts.screenCount) clearScreenInk(true); },
     // The user sent the whole drawing away (Esc): nothing is on screen any more.
     cleared: () => { for (const done of [...ink.waits.values()]) done('stopped'); parts.clear(); buttons.clear(); },
+    // The app takes its own drawing away (the setup showcase, when its step is left): everything goes.
+    clear: () => { for (const done of [...ink.waits.values()]) done('stopped'); clearAllInk(); },
     describe: () => parts.describe(),
     copy: (text) => toClipboard(text),
     // A drawing the app makes itself (the welcome tour): the same checks and overlay as one from the model.

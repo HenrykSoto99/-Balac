@@ -394,6 +394,19 @@ fn focus_guide(app: AppHandle) {
     activate_app(&app);
 }
 
+/// The guide steps aside while its showcase draws on the desktop (on: true), so no card lands on it, then comes back.
+#[tauri::command]
+fn guide_aside(app: AppHandle, on: bool) {
+    let Some(w) = app.get_webview_window(ONBOARDING_LABEL) else { return };
+    if on {
+        let _ = w.hide();
+    } else {
+        let _ = w.show();
+        let _ = w.set_focus();
+        activate_app(&app);
+    }
+}
+
 /// The guide hides its title bar, so its top strip calls this to move the window.
 #[tauri::command]
 fn drag_window(window: WebviewWindow) {
@@ -1254,7 +1267,7 @@ fn main() {
         .manage(TalkChord(Mutex::new(vec!["control".into(), "option".into()])))
         .manage(VoiceModel(Mutex::new(None)))
         .manage(PermGuide(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![buddy, ink_wait, set_hot, sidecar_send, set_typing, perm_status, perm_request, perm_guide, screen_check, open_settings, onboarding_finish, guide_close, panel_hide, esc_watch, relaunch, focus_guide, drag_window])
+        .invoke_handler(tauri::generate_handler![buddy, ink_wait, set_hot, sidecar_send, set_typing, perm_status, perm_request, perm_guide, screen_check, open_settings, onboarding_finish, guide_close, panel_hide, esc_watch, relaunch, focus_guide, guide_aside, drag_window])
         .on_menu_event(|app, e| match e.id.as_ref() {
             "quit" => app.exit(0),
             "restart" => spawn_sidecar(app),

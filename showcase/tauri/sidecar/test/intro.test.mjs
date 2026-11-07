@@ -60,3 +60,17 @@ console.log('intro tests: passed');
   assert.match(without[0].marks[0].action.value, /wallpaper/, 'no words-on-screen how-to off the Mac');
   console.log('tour tests: passed');
 }
+// The capability showcase: fixed beats that pass the draw tool's checks, one card per listed capability, in order.
+{
+  const { showcaseBeats, SHOWCASE } = await import('../intro.mjs');
+  const { DrawArgs, checkDraw } = await import('../draw.mjs');
+  const beats = showcaseBeats('Ken', 'Sarah');
+  assert.ok(DrawArgs.safeParse({ beats }).success, 'the showcase fits the draw schema');
+  assert.deepEqual(checkDraw({ beats }), [], 'the showcase passes the draw checks (the molecule parses)');
+  assert.equal(beats.length, SHOWCASE.length + 1, 'one beat per capability, then a wrap-up');
+  assert.deepEqual(beats.slice(0, -1).map((b) => b.marks[0].kind), ['card', 'graph', 'timeline', 'molecule', 'model', 'list']);
+  assert.ok(beats[0].marks[0].sources.length, 'the web search card shows where it came from');
+  assert.match(beats.at(-1).say, /Sarah/, 'the wrap-up uses the look\'s name');
+  assert.ok(!beats.some((b) => b.marks.some((m) => m.action || m.at)), 'nothing to click and nothing on the screen to find');
+  console.log('showcase tests: passed');
+}

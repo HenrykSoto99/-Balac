@@ -28,7 +28,7 @@ import { EMOTES, ReplyStream } from './reply.mjs';
 import { downloadModel, isReady, modelDir, sizeLabel, totalBytes } from './voicemodel.mjs';
 import { createTools, expand, fitImage, imageBlock, winOpen } from './tools.mjs';
 import { describeMarks } from './marks.mjs';
-import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom } from './intro.mjs';
+import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain, stripNote, tourBeats, goalFrom, showcaseBeats } from './intro.mjs';
 import { SpeechText, CueFilter, VOICE_CUES } from './speech.mjs';
 import { createSpeaker } from './speaker.mjs';
 import { DEFAULT_VOICE, FISH_CHOICES } from './fish.mjs';
@@ -484,6 +484,33 @@ async function playTour() {
   catch (e) { console.error('tour', e); }
   finally { if (turnVoice === voice) turnVoice = null; voice?.end(); }
 }
+// The setup guide's showcase: a fixed drawing of what it can do, while the guide steps aside. The guide follows
+// along (each beat as it starts, done when drawn) and comes back once every card is gone: faded 5 s after the end,
+// closed, cleared with Esc, or the screen changed.
+let showcase = null, showcases = 0;
+async function playShowcase() {
+  if (busy) return ob({ kind: 'showcase', phase: 'failed' });
+  endShowcase(null);
+  ink.clear(); // a replay starts clean, even while the last one is still fading
+  const me = showcase = { id: `showcase-${++showcases}`, watch: null };
+  const voice = VOICE_ON() ? speech.start() : null;
+  turnVoice = voice;
+  try { await ink.show(showcaseBeats(userName, lookName()), me.id, { fade: 5 }); }
+  catch (e) { console.error('showcase', e); if (showcase === me) endShowcase('failed'); }
+  finally { if (turnVoice === voice) turnVoice = null; voice?.end(); }
+}
+function endShowcase(phase) {
+  const s = showcase;
+  if (!s) return;
+  showcase = null; clearInterval(s.watch);
+  if (phase) ob({ kind: 'showcase', phase });
+}
+function showcaseDrawn() {
+  ob({ kind: 'showcase', phase: 'done' });
+  const s = showcase;
+  s.watch = setInterval(() => { if (!ink.describe()) endShowcase('gone'); }, 400);
+}
+function stopShowcase() { if (!showcase) return; endShowcase('gone'); ink.clear(); }
 // A next-step button on a drawing: ask sends its words as a new request; open and copy are checked again first.
 function onInkButton(part) {
   const a = ink.button(part);
@@ -1336,12 +1363,14 @@ async function filesStatus(request) {
 let keysBefore = null;
 async function onGuide(m) {
   if (m.type === 'ob_hello') { onboarding = true; await refreshAuth(); await fishKeyLoaded; obState(); }
-  else if (m.type === 'ob_closed') { onboarding = false; endIntro(); if (tourPending) setTimeout(playTour, 800); }
+  else if (m.type === 'ob_closed') { onboarding = false; endIntro(); stopShowcase(); if (tourPending) setTimeout(playTour, 800); }
+  else if (m.type === 'ob_showcase') playShowcase();
+  else if (m.type === 'ob_showcase_stop') stopShowcase();
   else if (m.type === 'chat_start') startIntro();
   else if (m.type === 'chat_answer' && typeof m.text === 'string') introAnswer(m.text.trim().slice(0, 2000));
   else if (m.type === 'chat_skip') { endIntro(); config.introDone = true; saveConfig(); menu(); }
   else if (m.type === 'chat_forget' && typeof m.id === 'string') { await forgetFact(m.id); ob({ kind: 'chat_facts', facts: introFacts() }); menu(); }
-  else if (m.type === 'ob_step') { config.onboardStep = Math.max(0, Math.min(6, m.step | 0)); saveConfig(); }
+  else if (m.type === 'ob_step') { config.onboardStep = Math.max(0, Math.min(7, m.step | 0)); saveConfig(); }
   // Voice needs a working key first: without one, the guide asks for it (ob_fishkey) instead.
   else if (m.type === 'ob_replies' && (m.mode === 'text' || (m.mode === 'voice' && speech.on))) { await fishKeyLoaded; await setReplies(m.mode); }
   else if (m.type === 'ob_fishkey' && typeof m.key === 'string') {
@@ -1407,11 +1436,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'list_toggle') toggleItem(String(m.id)).catch((e) => console.error('list', e));
   else if (m.type === 'show_list') showList({ seconds: 20, toggle: true });
   // The overlay's drawing: a segment started, a wait for a click or hover ended, a card was closed, a button clicked.
-  else if (m.type === 'draw_started') ink.started(String(m.id), m.seg | 0);
+  else if (m.type === 'draw_started') { ink.started(String(m.id), m.seg | 0); if (String(m.id) === showcase?.id) ob({ kind: 'showcase', phase: 'beat', beat: m.seg | 0 }); }
+  else if (m.type === 'draw_done') { if (String(m.id) === showcase?.id) showcaseDrawn(); }
   else if (m.type === 'draw_wait_done') ink.waitDone(String(m.id), m.beat | 0, String(m.result));
   else if (m.type === 'ink_closed') ink.closed(m.part);
   else if (m.type === 'ink_action') onInkButton(String(m.part));
-  else if (m.type === 'ink_cleared') ink.cleared();
+  else if (m.type === 'ink_cleared') { ink.cleared(); endShowcase('gone'); }
   else if (m.type === 'update_status') onUpdateStatus(m);
   else if (m.type === 'login_item_status') onLoginStatus(m);
 }).on('close', () => {

@@ -1,4 +1,4 @@
-// Setup guide: Welcome → Permissions → Connect AI → Replies → Shortcuts → About you → Find me.
+// Setup guide: Welcome → Permissions → Connect AI → Replies → What I can do → Shortcuts → About you → Find me.
 // The Sidekick lives on the left: it drops in on each step, points at what needs doing, cheers when
 // something gets done and listens when you test your voice. Talks to the app through Tauri commands;
 // opened in a plain browser it runs a simulated preview instead.
@@ -713,6 +713,86 @@
   }, true);
 
   // ---------------------------------------------------------------- step 5: find me
+  // ---------------------------------------------------------------- what I can do
+  // Try me out: this window steps aside and the desktop gets a fixed drawing (sidekick.mjs), one card per capability,
+  // ticked off here as each draws. It comes back once the cards are gone: faded a few seconds after the last one,
+  // closed with their ×, or cleared with Esc.
+  const DEMO = [
+    ['Search the web', 'Answers, with where they came from.'],
+    ['Graphs', 'Numbers turned into charts.'],
+    ['Timelines', 'Events in order, at a glance.'],
+    ['Science', 'Molecules drawn from their formula.'],
+    ['3D models', 'Little models that turn.'],
+    ['Plans and lists', 'To-dos that keep you on track.'],
+  ];
+  const demo = {
+    status: 'idle', // idle → playing → done → idle again once the cards are gone | failed
+    beat: -1, played: false, aside: false, timer: null,
+    enter() {
+      demo.render();
+      setTimeout(() => { if (at('demo') && demo.status !== 'playing') { poseFn = POSE.point(1.3, -0.9); quip('Want to see?'); } }, 700);
+    },
+    leave() { demo.stop(); poseFn = null; },
+    async play() {
+      demo.played = true; demo.status = 'playing'; demo.beat = -1;
+      $('demo-say').textContent = '';
+      poseFn = POSE.wait();
+      quip('Watch your desktop!', 1.2);
+      demo.render();
+      await wait(reduced.matches ? 0 : 1100);
+      if (demo.status !== 'playing') return;
+      demo.aside = true;
+      await invoke('guide_aside', { on: true }).catch(() => {});
+      send({ type: 'ob_showcase' });
+      // Back for sure, even if the end never comes through.
+      clearTimeout(demo.timer); demo.timer = setTimeout(() => demo.back(), 90000);
+    },
+    back() {
+      clearTimeout(demo.timer);
+      if (!demo.aside) return;
+      demo.aside = false;
+      invoke('guide_aside', { on: false }).catch(() => {});
+    },
+    stop() {
+      if (demo.status === 'playing') send({ type: 'ob_showcase_stop' });
+      demo.back();
+      if (demo.status === 'playing') demo.status = 'idle';
+      poseFn = null; demo.render();
+    },
+    on(msg) {
+      if (msg.phase === 'beat' && demo.status === 'playing') {
+        demo.beat = msg.beat | 0;
+        if (DEMO[demo.beat]) $('demo-say').textContent = `Drawing: ${DEMO[demo.beat][0]}`;
+      } else if (msg.phase === 'done' && demo.status === 'playing') {
+        demo.status = 'done'; demo.beat = DEMO.length;
+        $('demo-say').textContent = 'All drawn.';
+      } else if (msg.phase === 'gone' && demo.aside) {
+        // Stopped part way (Esc) still counts as seen: what drew stays ticked.
+        if (demo.status === 'playing') demo.status = 'idle';
+        demo.back(); poseFn = null;
+        if (at('demo')) { act('hype'); quip(demo.status === 'done' ? "That's a taste!" : 'Okay, stopped.'); }
+      } else if (msg.phase === 'failed') {
+        demo.status = 'failed'; demo.back(); poseFn = null;
+        if (at('demo')) { act('upset'); quip("Hmm, that didn't draw."); }
+      } else return;
+      demo.render();
+    },
+    render() {
+      const playing = demo.status === 'playing', shown = demo.status === 'done' ? DEMO.length : Math.max(0, demo.beat);
+      $('demo-lead').textContent = demo.status === 'failed' ? "I couldn't draw just now." : 'Watch me draw on your desktop.';
+      $('demo-rows').replaceChildren(...DEMO.map(([title, desc], i) => {
+        const done = demo.played && i < shown && !(playing && i === demo.beat), now = playing && i === demo.beat;
+        const side = done ? okMark('Shown') : now ? el('span', { className: 'waiting' }, led('busy'), ' Drawing') : null;
+        return el('li', { className: `px row${done ? ' granted' : now ? ' focus' : ''}` }, el('div', {}, el('h2', { textContent: title }), el('p', { textContent: desc, title: desc })), side);
+      }));
+      const btn = $('demo-again');
+      btn.textContent = playing ? 'Drawing…' : demo.status === 'failed' ? 'Try again' : demo.played ? 'Show me again' : 'Try me out';
+      btn.disabled = playing;
+      btn.className = `px btn ${demo.played && !playing ? 'ghost' : 'primary'}`;
+    },
+  };
+  $('demo-again').addEventListener('click', () => { if (demo.status !== 'playing') demo.play(); });
+
   const find = {
     enter() {
       const k = state?.keys;
@@ -980,6 +1060,7 @@
     { name: 'perms', enter: 'materialize', next: 'Continue', onEnter: perms.enter, onLeave: perms.leave, ready: () => perms.done(), get skip() { return !isMac(); } },
     { name: 'ai', enter: 'crt', next: 'Continue', onEnter: ai.enter, onLeave: ai.leave, ready: () => !!state?.connected, skip: true },
     { name: 'voice', enter: 'materialize', next: 'Continue', onEnter: replies.enter, onLeave: replies.leave, ready: () => replies.ready(), skip: true },
+    { name: 'demo', enter: 'crt', next: 'Continue', onEnter: demo.enter, onLeave: demo.leave },
     { name: 'keys', enter: 'materialize', next: 'Continue', onEnter: keys.enter, onLeave: keys.leave },
     { name: 'chat', enter: 'crt', next: 'Send', onEnter: () => chat.enter(), onLeave: () => chat.leave(), nav: () => chat.nav(), onNext: () => chat.next(), onSkip: () => chat.skip() },
     { name: 'find', enter: 'drop', next: 'Done', onEnter: find.enter, onLeave: find.leave },
@@ -1072,6 +1153,7 @@
         keys.render();
         break;
       case 'say': quip(msg.text, 3); break;
+      case 'showcase': demo.on(msg); break;
       case 'voice': if (at('chat')) chat.voice(msg); else voice.on(msg); break;
       case 'speech': Roamie.voiceOut?.handle(msg); break;
       case 'chat': case 'chat_state': case 'chat_turn': case 'chat_done': case 'chat_facts': chat.on(msg); break;
@@ -1111,8 +1193,10 @@
     let filesAsked = st.filesAsked;
     const logins = new Map(); // sign-in id → its timers, so Cancel stops the simulated one
     const reply = (m, ms = 0) => setTimeout(() => window.__onboard?.(m), ms);
+    const showcase = { at: null, n: 0 };
     return async (cmd, args) => {
       if (cmd === 'perm_status') return { ...sys };
+      if (cmd === 'guide_aside') return;
       // &shot=fail: the test screenshot fails.
       if (cmd === 'screen_check') { await wait(900); return { seen: q.get('shot') !== 'fail' }; }
       if (cmd === 'perm_request') { await wait(600); if (args.kind !== 'screen') sys[args.kind] = 'granted'; else setTimeout(() => { sys.screen = 'granted'; }, 2500); return { ...sys }; }
@@ -1168,7 +1252,15 @@
           for (let i = 0; i < words.length; i += 3) { t += 70 + ((i * 37) % 90); reply({ kind: 'chat', e: { type: 'text', text: (i ? ' ' : '') + words.slice(i, i + 3).join(' ') } }, t); }
           reply({ kind: 'chat_turn', n, total: 4, lead: lead.replace('[wave] ', ''), question, hint }, t + 250);
         }
-      } else if (m.type === 'chat_skip') { /* nothing comes back */ }
+      } else if (m.type === 'ob_showcase') {
+        // A card a beat, then done (&showcase=fail: it can't draw).
+        clearTimeout(showcase.at); showcase.n = 0;
+        if (q.get('showcase') === 'fail') { showcase.at = setTimeout(() => window.__onboard?.({ kind: 'showcase', phase: 'failed' }), 1200); return; }
+        // Then gone, as when the cards fade (the window stays put in a browser).
+        const tick = () => { const n = showcase.n++; window.__onboard?.(n < 7 ? { kind: 'showcase', phase: 'beat', beat: n } : n === 7 ? { kind: 'showcase', phase: 'done' } : { kind: 'showcase', phase: 'gone' }); if (n < 8) showcase.at = setTimeout(tick, n < 7 ? 1600 : 2500); };
+        showcase.at = setTimeout(tick, 600);
+      } else if (m.type === 'ob_showcase_stop') clearTimeout(showcase.at);
+      else if (m.type === 'chat_skip') { /* nothing comes back */ }
       else if (m.type === 'set_actions') { st.actions = m.on; }
       else if (m.type === 'set_login') { st.login = m.on; }
       else if (m.type === 'ob_voice_model' && st.voiceModel) {

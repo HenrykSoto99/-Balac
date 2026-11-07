@@ -177,6 +177,10 @@ h2 { margin: 0; font: 700 13px/1.35 var(--mono); font-stretch: 87.5%; color: var
 .pair { display: inline-flex; gap: 6px; }
 /* Errors stay on one line like every other row, so a row never grows; the full text is in the tooltip. */
 .row p.bad { color: var(--danger); }
+/* What I can do: the button sits on the lead's line, so all six rows fit without scrolling. */
+.demo-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+.demo-head .lead { margin: 0; }
+.demo-head .btn { flex: none; }
 /* Download progress: the step bar's LED segments, smaller. */
 .dl-wrap { display: inline-flex; align-items: center; gap: 10px; }
 .dl { display: inline-flex; gap: 2px; }

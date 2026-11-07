@@ -1090,6 +1090,7 @@
         try { await runSeg(e, gen); } catch (err) { console.error('ink', err); }
         if (gen !== G.gen) continue;
         if (e.last && e.fade) fadeLater(e.id, e.fade);
+        if (e.last) R.ink.send?.({ type: 'draw_done', id: e.id });
         if (e.last && !G.q.length) {
           await sleep(900);
           if (!G.q.length && gen === G.gen) { caption.hide(); if (G.held) { G.held = false; await penApi()?.release(); } }

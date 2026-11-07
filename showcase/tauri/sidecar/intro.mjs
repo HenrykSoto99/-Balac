@@ -91,3 +91,24 @@ export function tourBeats(name, me = 'Roamie', goal = null, { mac = true } = {})
   if (g) beats.push({ say: `[bright] And this is what we're going for. I'm in, ${name}.`, marks: [{ kind: 'medal', title: 'your goal', text: g }, { kind: 'emote', name: 'hype' }] });
   return beats.map((b) => ({ ...b, say: b.say.slice(0, 240) }));
 }
+
+// ---------- the capability showcase (a setup step) ----------
+// A fixed tour of what it can draw, one card per beat, played on the desktop while the guide shows a matching list.
+// Hardcoded content (no model call), plain draw beats like the tour above. The last beat only wraps up.
+export const SHOWCASE = ['web', 'graph', 'timeline', 'molecule', 'model', 'list'];
+const savings = (rate) => Array.from({ length: 16 }, (_, i) => [i * 2, Math.round(1000 * (1 + rate) ** (i * 2))]);
+export function showcaseBeats(name, me = 'Roamie') {
+  const beats = [
+    { say: `[warm] Here's a quick look at what I can do, ${name}. First, I can search the web for you.`, marks: [{ kind: 'card', title: 'web search', heading: 'How tall is Everest?', text: '8,849 metres. China and Nepal agreed on that height together in 2020.', sources: [{ name: 'Wikipedia', url: 'https://en.wikipedia.org/wiki/Mount_Everest' }, { name: 'BBC', url: 'https://www.bbc.com/news/world-asia-55218208' }] }] },
+    { say: 'I can turn numbers into graphs, like how saving grows.', marks: [{ kind: 'graph', title: '$1,000 over 30 years', x_range: [0, 30], plots: [{ points: savings(0.07), tone: 'accent', label: 'at 7%' }, { points: savings(0), tone: 'amber', label: 'under the bed' }] }] },
+    { say: 'Timelines, so history makes sense.', marks: [{ kind: 'timeline', title: 'the space race', events: [{ when: '1957', text: 'Sputnik' }, { when: '1961', text: 'First person in space' }, { when: '1969', text: 'Moon landing' }, { when: '1998', text: 'Space station' }] }] },
+    { say: 'Science too. This is caffeine, the stuff in your coffee.', marks: [{ kind: 'molecule', smiles: 'CN1C=NC2=C1C(=O)N(C)C(=O)N2C', label: 'caffeine' }] },
+    { say: 'And little 3D models, like Saturn and a moon.', marks: [{ kind: 'model', title: 'saturn', parts: [
+      { shape: 'sphere', size: [1, 1, 1], tone: 'amber', label: 'Saturn' },
+      { shape: 'torus', size: [2.1, 0.5, 2.1], rot: [24, 0, 10], tone: 'white', label: 'rings' },
+      { shape: 'sphere', at: [1.5, 0.5, 0], size: [0.22, 0.22, 0.22], tone: 'sky', label: 'Titan' }] }] },
+    { say: "I'll plan things with you and keep you on track.", marks: [{ kind: 'list', title: 'this week', items: ['Finish the slides by Thursday', 'Call the dentist', 'Gym on Monday and Wednesday'] }] },
+    { say: `[bright] That's a taste. Ask ${me} for any of it, any time.`, marks: [{ kind: 'emote', name: 'hype' }] },
+  ];
+  return beats.map((b) => ({ ...b, say: b.say.slice(0, 240) }));
+}

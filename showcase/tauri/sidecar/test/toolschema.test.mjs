@@ -43,6 +43,10 @@ console.log('tool schema ok');
 }
 
 // Regression: a YouTube search typed into the search box failed and re-ran the old search; the search URL works.
-assert.match(tools.find((t) => t.name === 'act_in_app').description, /youtube\.com\/results\?search_query=/);
-// ...but when the user asks for the page's own search box, it uses the box.
-assert.match(tools.find((t) => t.name === 'act_in_app').description, /unless the user asks you to use the box: then fill it/);
+// act_in_app exists only on macOS.
+if (process.platform === 'darwin') {
+  const actInApp = tools.find((t) => t.name === 'act_in_app').description;
+  assert.match(actInApp, /youtube\.com\/results\?search_query=/);
+  // ...but when the user asks for the page's own search box, it uses the box.
+  assert.match(actInApp, /unless the user asks you to use the box: then fill it/);
+}

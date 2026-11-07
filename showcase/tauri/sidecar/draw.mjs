@@ -117,7 +117,7 @@ export function pickTextMatch(matches, find) {
   return (matches ?? []).find((m) => m.match !== 'partial' && m.text.trim().length <= Math.max(40, q.length * 3)) ?? null;
 }
 
-/** One place → { rect: [x, y, w, h] in global screen points, r, role, name }. look: { text(find), id(n), pixel(x, y) }. */
+/** One place → { rect: [x, y, w, h] in global screen points, r, role, name }. look: { text(find), id(n), pixel(x, y), snap?(rect) }. */
 export async function resolveTarget(t, look, r) {
   let rect, role = '', name = '', live;
   if (t.text != null) {
@@ -128,11 +128,14 @@ export async function resolveTarget(t, look, r) {
     rect = c.bounds; role = c.role ?? ''; name = c.label || c.role || '';
     live = c.id;
   } else if (t.x != null && t.y != null) {
-    const a = await look.pixel(t.x, t.y);
+    // x, y is the thing's centre, with or without w, h: models give centres either way, and read as a top-left
+    // corner every loop sat half its size too low and to the right.
     if (t.w != null && t.h != null && t.w > 0 && t.h > 0) {
-      const b = await look.pixel(t.x + t.w, t.y + t.h);
+      const a = await look.pixel(t.x - t.w / 2, t.y - t.h / 2), b = await look.pixel(t.x + t.w / 2, t.y + t.h / 2);
       rect = [a[0], a[1], b[0] - a[0], b[1] - a[1]];
-    } else rect = [a[0] - 14, a[1] - 14, 28, 28];
+      // A guess a few pixels off a real button or field takes that control's exact box.
+      rect = (await look.snap?.(rect)) ?? rect;
+    } else { const a = await look.pixel(t.x, t.y); rect = [a[0] - 14, a[1] - 14, 28, 28]; }
   } else throw new Error('Give a place: text shown on screen, an id from read_window, or x and y from a screenshot.');
   rect = rect.map((v) => Math.round(v));
   return { rect, r: shapeRadius(rect[2], rect[3], role, r), role, name, ...(live != null ? { live } : {}) };

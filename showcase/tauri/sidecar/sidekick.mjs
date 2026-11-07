@@ -33,7 +33,7 @@ import { QUESTIONS, openNote, answerTurn, wantsSkip, endsChat, splitTurn, plain,
 import { SpeechText, CueFilter, VOICE_CUES } from './speech.mjs';
 import { createSpeaker } from './speaker.mjs';
 import { DEFAULT_VOICE, FISH_CHOICES } from './fish.mjs';
-import { createSecrets } from './secrets.mjs';
+import { createSecrets, retryLoad } from './secrets.mjs';
 import { createActivity } from './activity.mjs';
 import { keyCards, keyKinds, signInCards } from './providers.mjs';
 
@@ -126,7 +126,9 @@ const speech = createSpeaker({
 });
 speech.setVoice(lookVoice());
 speech.setModel(config.fishModel);
-const fishKeyLoaded = secrets.get('fish-audio').then((k) => { if (k) { speech.setKey(k); menu(); } }).catch((e) => console.error('fish key', e.message));
+// Read once, and again later if the keychain couldn't be read yet (locked at login, or its prompt unanswered): before,
+// one failed read left spoken replies off until the app restarted.
+const fishKeyLoaded = retryLoad(() => secrets.get('fish-audio').then((k) => { if (k && !speech.on) { speech.setKey(k); menu(); } }), { onError: (e) => console.error('fish key', e.message) });
 
 // ---------- shortcuts ----------
 const MOD_ORDER = ['control', 'option', 'shift', 'command'];

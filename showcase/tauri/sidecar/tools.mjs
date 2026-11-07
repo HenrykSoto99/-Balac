@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
-import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, toScreen } from './pointing.mjs';
+import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, snapRect, toScreen } from './pointing.mjs';
 import { ASK, BLOCK, checkDrawAction, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isRiskyClick, isYes } from './safety.mjs';
 import { CARDS, DrawArgs, checkDraw, createParts, faviconFor, photoFor, pickTextMatch, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
@@ -263,7 +263,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
   });
   // How each kind of place is found. retry: just after a click, when a menu or dialog may still be opening.
   function lookups(spec, retry) {
-    let live = null, shotOk = null;
+    let live = null, shotOk = null, controls = null;
     // The same words marked twice in a segment (a ring and a connect to it): one helper round trip.
     const seen = new Map();
     return {
@@ -292,6 +292,12 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         const c = live(n);
         if (c.offscreen) throw new Error(`"${c.label || c.role}" is further down the page. Use its text instead; that scrolls to it.`);
         return c;
+      },
+      // The controls on screen now (once per segment), for loops drawn from screenshot pixels to snap to.
+      async snap(rect) {
+        if (!HANDS || spec === 'screen') return null;
+        controls ??= hands('ui', spec, 'controls').then((r) => (r.controls ?? []).filter((c) => !c.offscreen && c.bounds).map((c) => c.bounds), () => []);
+        return snapRect(rect, await controls);
       },
       // The screenshot is checked once per segment (not for every point of a traced outline).
       async pixel(x, y) {
@@ -534,7 +540,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       name: 'draw',
       description: `Draw on the user's screen while you talk. Your Roamie turns into its cursor and draws with its tip, each beat's marks paced to its spoken line (also shown as a caption). One call holds a whole explanation or walkthrough.
 beats: [{say, marks, wait?}]. say: one short line, under 20 words, spoken while that beat's marks draw (don't repeat it in your reply). Keep 1 to 4 marks per beat, in the order you mention them.
-Places (at, to, tie), best first: {text: the exact words shown on screen} (exact bounds, scrolls to it; target 'screen' searches every app); {id} from read_window, for controls without words; {x, y, w, h} pixels in your latest screenshot, for icons and areas without words (give w and h, the thing's whole box, so the loop fits it).
+Places (at, to, tie), best first: {text: the exact words shown on screen} (exact bounds, scrolls to it; target 'screen' searches every app); {id} from read_window, for controls without words; {x, y, w, h} pixels in your latest screenshot, for icons and areas without words: x, y is the thing's centre, and w, h its whole width and height so the loop fits it.
 Which mark: one control they should click: target (with wait 'click' in a walkthrough); one thing to notice: ring (follows its shape; r sets the corner radius); a small spot or icon: point; a region or panel: frame; key words: underline (outdated ones: strike); right or wrong: check, cross; order of steps: num; a name beside something: label (text) or label on any mark; how two things relate: connect (at → to); an odd-shaped group: trace (points); scroll here: scroll (dir); one thing above all else: spotlight (sparingly); something to hover: hover with wait 'hover'; big words: write (text, size).
 Walkthroughs ("how do I…"): one beat per step, each a target on that step's control with label and wait 'click'; the next step is found after they click, on the screen as it is then.
 Explanations that a picture makes clearer go on cards beside the window (tie connects a card to what it explains): card (title, heading, text, items, sources), note (text, tone), list (title, items), clip (title, text), sources ([{name, url}]), photo (query: a thing with a Wikipedia page, or url; text = caption), graph (x_range, y_range, plots [{points, tone, label}], dots [{x, y, label}]) for numbers, timeline (events [{when, text}]) for dates, legend (keys [{tone, text}]), molecule (smiles, label) for chemistry, model (parts [{shape: box|sphere|cylinder|cone|torus, at [x,y,z], size [x,y,z], rot [deg x,y,z], tone, label}] within about -1 to 1, title) for objects and machines. Things saved with remember_commitment or update_commitment already show on their reminders list by themselves: never draw a list or note of them; list and note are for things that aren't being saved.

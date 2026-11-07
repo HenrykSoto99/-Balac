@@ -1,6 +1,6 @@
 // Screenshot pixels → screen points for draw / click_at. Run: npm test
 import assert from 'node:assert/strict';
-import { shotFits, shotMap, toScreen, parseSipsSize } from '../pointing.mjs';
+import { shotFits, shotMap, snapRect, toScreen, parseSipsSize } from '../pointing.mjs';
 
 // Regression: an 1800×1066 pt Brave window at (0, 39) is captured at 3600 px and capped to 1568 px wide.
 // Image pixels used to be treated as points, so points landed up and left of the target.
@@ -69,3 +69,13 @@ assert.equal(shotFits([0, 0, 0, 0], 1568, 935), false, 'no area');
   assert.match(shotProblem({ unmapped: true, turn: 1 }, 1), /doesn't line up/);
 }
 console.log('screenshot shape tests: passed');
+
+// A loop guessed from screenshot pixels, a little off a real button, takes the button's exact box.
+{
+  const theme = [1445, 88, 37, 36], discord = [1533, 88, 37, 36];
+  assert.deepEqual(snapRect([1447, 96, 37, 36], [discord, theme]), theme, 'a few points low: snapped');
+  assert.equal(snapRect([1300, 300, 40, 40], [discord, theme]), null, 'nothing near: left as drawn');
+  assert.equal(snapRect([1440, 85, 140, 42], [discord, theme]), null, 'round a group of icons: not shrunk to one');
+  assert.equal(snapRect([1460, 100, 8, 8], [theme]), null, 'a tiny spot inside a big control: not grown');
+  console.log('snap tests: passed');
+}

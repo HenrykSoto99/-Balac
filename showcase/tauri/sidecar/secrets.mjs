@@ -24,6 +24,17 @@ export const runInput = (cmd, args, input = '', timeout = 15000) => new Promise(
   p.stdin.end(input);
 });
 
+/** Runs load once and resolves when that first try is done. If it fails (the keychain is locked, or its prompt went
+ *  unanswered) it tries again in the background after each delay, the last one repeating, until it works. */
+export function retryLoad(load, { delays = [30_000, 60_000, 120_000, 300_000, 600_000], schedule = setTimeout, onError = () => {} } = {}) {
+  let n = 0;
+  const attempt = () => Promise.resolve().then(load).catch((e) => {
+    onError(e);
+    schedule(attempt, delays[Math.min(n++, delays.length - 1)])?.unref?.();
+  });
+  return attempt();
+}
+
 const lastJson = (s) => { try { return JSON.parse(String(s).trim().split('\n').pop() || '{}'); } catch { return {}; } };
 
 /** A secret store for this machine. `exec` is runInput (tests swap it). */

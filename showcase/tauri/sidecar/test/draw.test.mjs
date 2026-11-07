@@ -58,12 +58,18 @@ console.log('shape radius tests: passed');
   assert.deepEqual(b.marks[0].at, { rect: [100, 200, 80, 24], r: 12, role: 'button', name: 'Format' }, 'text: exact bounds, pill');
   assert.deepEqual(b.marks[1].at, { rect: [10, 10, 24, 24], r: 12, role: 'checkbox', name: 'Agree', live: 8 }, 'id: the live control');
   assert.deepEqual(b.marks[2].at.rect, [6, 46, 28, 28], 'a pixel: a small spot round it');
-  assert.deepEqual(b.marks[3].at.rect, [20, 60, 100, 40], 'pixels with w, h: both corners mapped');
+  // Regression: x, y with w, h was read as the top-left corner while models gave the centre, so loops sat low and right.
+  assert.deepEqual(b.marks[3].at.rect, [-30, 40, 100, 40], 'pixels with w, h: x, y is the centre, both corners mapped');
   assert.deepEqual(b.marks[4].points, [[0, 40], [20, 40], [20, 60]], 'paths map every point');
   assert.deepEqual(b.marks[5].to.rect, [-4, 36, 28, 28]);
   assert.equal(b.marks[6].mol.atoms.length, 3, 'molecules are parsed for the overlay');
   assert.equal(b.marks[7].at, undefined, 'cards need no place');
   await assert.rejects(resolveTargets([{ say: 'x', marks: [{ kind: 'ring', at: { text: 'Missing' } }] }], look), /beat 1 mark 1 \(ring\): No button reads "Missing"/);
+  // With the app's controls known, a pixel loop near one snaps to it; text and point marks don't ask.
+  const asked = [];
+  const [s2] = await resolveTargets([{ say: 'x', marks: [{ kind: 'ring', at: { x: 10, y: 10, w: 50, h: 20 } }, { kind: 'point', at: { x: 5, y: 5 } }] }], { ...look, snap: async (r) => { asked.push(r); return [-28, 42, 100, 40]; } });
+  assert.deepEqual(s2.marks[0].at.rect, [-28, 42, 100, 40], 'snapped to the control');
+  assert.equal(asked.length, 1, 'only the loop with w, h snaps');
   console.log('draw target tests: passed');
 }
 

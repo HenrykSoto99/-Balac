@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createSecrets, runInput } from '../secrets.mjs';
+import { createSecrets, retryLoad, runInput } from '../secrets.mjs';
 
 // macOS: the helper gets the secret on stdin only, never in its arguments.
 {
@@ -70,4 +70,17 @@ import { createSecrets, runInput } from '../secrets.mjs';
 // runInput: stdin reaches the child; a missing command resolves with an error instead of throwing.
 assert.equal((await runInput(process.execPath, ['-e', 'process.stdin.pipe(process.stdout)'], 'hello')).stdout, 'hello');
 assert.equal((await runInput('/no/such/binary', [])).code, -1);
+// Regression: one failed keychain read at start (its prompt unanswered) left spoken replies off until a restart.
+{
+  const waits = [], later = [];
+  let tries = 0, got = null;
+  const load = async () => { tries++; if (tries < 3) throw new Error('keychain unavailable'); got = 'key'; };
+  await retryLoad(load, { delays: [30, 60], schedule: (f, ms) => { waits.push(ms); later.push(f); } });
+  assert.equal(tries, 1, 'the first try finishes before it resolves');
+  await later.shift()();
+  await later.shift()();
+  assert.equal(got, 'key', 'a later try reads it');
+  assert.deepEqual(waits, [30, 60], 'waits longer each time');
+  assert.equal(later.length, 0, 'stops once it works');
+}
 console.log('secrets tests: passed');

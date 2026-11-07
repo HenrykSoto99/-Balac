@@ -9,6 +9,23 @@ export function shotFits([, , w, h], imgW, imgH) {
   return w > 0 && h > 0 && imgW > 0 && imgH > 0 && Math.abs((w / h) / (imgW / imgH) - 1) <= 0.02;
 }
 
+/** The real control a loop drawn from screenshot pixels was meant for: the one it overlaps most, if they overlap well
+ *  and are about the same size (so a loop round a group of icons stays round the group). Rects in screen points. */
+export function snapRect(rect, controls) {
+  const [x, y, w, h] = rect, area = w * h;
+  if (!(area > 0)) return null;
+  let best = null, bestFit = 0.35;
+  for (const b of controls ?? []) {
+    if (!Array.isArray(b) || !(b[2] > 0 && b[3] > 0)) continue;
+    const ratio = (b[2] * b[3]) / area;
+    if (ratio < 0.4 || ratio > 2.5) continue;
+    const ix = Math.max(0, Math.min(x + w, b[0] + b[2]) - Math.max(x, b[0])), iy = Math.max(0, Math.min(y + h, b[1] + b[3]) - Math.max(y, b[1]));
+    const fit = (ix * iy) / (area + b[2] * b[3] - ix * iy);
+    if (fit > bestFit) { bestFit = fit; best = b; }
+  }
+  return best ? [...best] : null;
+}
+
 export function toScreen(map, x, y) {
   return [Math.round(map.origin[0] + x * map.sx), Math.round(map.origin[1] + y * map.sy)];
 }

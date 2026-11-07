@@ -111,6 +111,14 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   assert.equal(other.at(-1).type, 'ink_stale');
   await assert.rejects(draw.execute({ edit: [{ do: 'erase', part: 'p1' }] }, { toolCallId: 'd9' }), /nothing is drawn/);
   fs.rmSync(path.join(dir, 'front.json'));
+  // A drawing that goes by itself (the tour, the setup showcase) is about no window: switching windows keeps it.
+  other.length = 0;
+  await made.ink.show([{ say: 'Graphs too.', marks: [{ kind: 'note', text: 'a showcase card' }] }], 'showcase-1', { fade: 5 });
+  fs.writeFileSync(path.join(dir, 'front.json'), JSON.stringify({ id: 11, app: 'Notes', title: 'y', bounds: [0, 0, 900, 700] }));
+  await new Promise((r) => setTimeout(r, 1800));
+  assert.ok(!other.some((e) => e.type === 'ink_stale'), 'the showcase stays when another window comes to the front');
+  assert.match(made.ink.describe(), /note “a showcase card”/);
+  fs.rmSync(path.join(dir, 'front.json'));
   // Typing goes through the helper's fill (the same path as act_in_app).
   fs.writeFileSync(log, '');
   await draw.execute({ beats: [{ say: 'Your email goes here.', marks: [{ kind: 'type', at: { text: 'Email' }, text: 'a@b.com' }] }] }, { toolCallId: 'd4' });

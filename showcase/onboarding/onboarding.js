@@ -730,6 +730,7 @@
     beat: -1, played: false, aside: false, timer: null,
     enter() {
       demo.render();
+      send({ type: 'ob_showcase_warm' });
       setTimeout(() => { if (at('demo') && demo.status !== 'playing') { poseFn = POSE.point(1.3, -0.9); quip('Want to see?'); } }, 700);
     },
     leave() { demo.stop(); poseFn = null; },
@@ -739,11 +740,12 @@
       poseFn = POSE.wait();
       quip('Watch your desktop!', 1.2);
       demo.render();
-      await wait(reduced.matches ? 0 : 1100);
+      // Started at once: the first card is still being got ready while the bubble shows and this window steps aside.
+      send({ type: 'ob_showcase' });
+      await wait(reduced.matches ? 0 : 500);
       if (demo.status !== 'playing') return;
       demo.aside = true;
-      await invoke('guide_aside', { on: true }).catch(() => {});
-      send({ type: 'ob_showcase' });
+      invoke('guide_aside', { on: true }).catch(() => {});
       // Back for sure, even if the end never comes through.
       clearTimeout(demo.timer); demo.timer = setTimeout(() => demo.back(), 90000);
     },

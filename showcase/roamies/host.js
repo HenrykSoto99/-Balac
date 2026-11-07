@@ -327,21 +327,22 @@
     else if (m.kind === 'cancel_ask') { if (ask?.id === m.id) { ask.id = null; finishAsk(null); } }
     else if (m.kind === 'agent') onAgent(m.e);
     else if (m.kind === 'voice') onVoice(m);
-    else if (m.kind === 'list') getAgent().list(m);
+    else if (m.kind === 'list') Roamie.ink?.reminders(m);
   };
 
   // ---------- Esc ----------
   // While it's on screen, Esc stops an answer (and the voice), or sends it away when it's idle. The shell holds a
   // global Esc only meanwhile (other apps don't get Esc while it does), so this overlay says when it's up.
-  // A drawing counts only while it plays: cards left on screen have their own close button and don't hold Esc.
-  const up = () => !!(getAgent()?.visible || ask || Roamie.panel?.isOpen || Roamie.ink?.playing);
+  // A drawing counts only while it plays: cards left on screen have their own close button and don't hold Esc. The
+  // reminders card does while it shows (it goes by itself in a few seconds).
+  const up = () => !!(getAgent()?.visible || ask || Roamie.panel?.isOpen || Roamie.ink?.playing || Roamie.ink?.reminding);
   function onEsc() {
     const a = getAgent();
     if (!a || !up()) return;
     if (ask) { finishAsk(null); return; }
     if (responding || Roamie.voiceOut?.playing()) { send({ type: 'menu', id: 'stop' }); Roamie.voiceOut?.stop(); return; }
     // A drawing on screen: Esc takes it all away (and the sidecar forgets its parts).
-    if (Roamie.ink?.busy) { Roamie.ink.clear({}); send({ type: 'ink_cleared' }); return; }
+    if (Roamie.ink?.busy) { Roamie.ink.clear({ all: true }); send({ type: 'ink_cleared' }); return; }
     if (Roamie.panel?.isOpen) Roamie.panel.close();
     endTalk(); listen?.close(); listen = null;
     if (a.visible) a.hide();
@@ -358,7 +359,6 @@
     const a = getAgent();
     if (!a) return setTimeout(ready, 150);
     a.setAuto(true);
-    a.onListToggle = (id) => send({ type: 'list_toggle', id });
     a.hide({ instant: true });
     send({ type: 'ui_ready' });
   };

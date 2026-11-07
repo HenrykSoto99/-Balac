@@ -934,7 +934,7 @@
   const partMarks = (id) => marks.filter((m) => m.alive && m.part === id);
   const partBox = (ms) => ms.reduce((u, m) => union(u, markBox(m)), null);
   async function edit(e) {
-    if (e.do === 'clear') { sfx('dematerialize'); const live = marks.filter((m) => m.alive && (m.part || m.card)); await tween(0.35, (u) => live.forEach((m) => (m.alpha = 1 - u))); live.forEach((m) => (m.alive = false)); return; }
+    if (e.do === 'clear') { sfx('dematerialize'); const live = marks.filter((m) => m.alive && (m.part || m.card) && !m.local); await tween(0.35, (u) => live.forEach((m) => (m.alpha = 1 - u))); live.forEach((m) => (m.alive = false)); return; }
     const ms = partMarks(e.part);
     if (!ms.length) return;
     const box = partBox(ms);
@@ -972,7 +972,7 @@
   }
   function clearEverything() {
     stop();
-    for (const id of new Set(marks.filter((m) => m.alive && m.part).map((m) => m.part))) R.ink.send?.({ type: 'ink_closed', part: id });
+    for (const id of new Set(marks.filter((m) => m.alive && m.part && !m.local).map((m) => m.part))) R.ink.send?.({ type: 'ink_closed', part: id });
     R.ink.send?.({ type: 'ink_cleared' });
     sfx('dematerialize');
     fadeOut(marks.filter((m) => m.alive));
@@ -1119,6 +1119,148 @@
     for (const f of G.idle.splice(0)) f();
   }
 
+  // ---------------------------------------------------------------- the reminders card: Today / Later
+  // The sidecar's list ({ today, later, seconds, flash, toggle }), shown as a card like the drawn list. It belongs to
+  // this overlay (part 'reminders', local): new drawings and stale windows leave it; ×, Esc and Clear all close it.
+  const REM_W = 340, REM_PART = 'reminders', HEADF = `800 16px ${DOTO}`;
+  const REM = { data: { today: [], later: [] }, known: false, m: null, until: 0, timer: 0, shown: new Map(), ticked: new Map(), rings: new Map(), checks: new Map(), strikes: new Map(), flash: null, flashAt: 0 };
+  const remOpen = () => !!REM.m && REM.m.alive && !REM.m.leaving;
+  const remWhen = (i) => (i.done ? 'done' : i.overdue ? `late ${i.when}` : i.when || '');
+  const cached = (map, key, make) => (map.has(key) ? map.get(key) : (map.set(key, make()), map.get(key)));
+  const shift = (pts, x, y) => pts.map(([px, py]) => [px + x, py + y]);
+  // Rows in card coordinates (from the card's top left), cut to the screen's height with "+N more".
+  function remLayout(x, y) {
+    const { today, later } = REM.data, all = [...today, ...later];
+    const whenW = Math.min(96, Math.max(0, ...all.map((i) => textW(remWhen(i), SMALL))));
+    const tw = REM_W - 40 - (whenW ? whenW + 12 : 0) - 16, rows = [];
+    let yy = 26 + 8;
+    const head = (label, n, gap) => { if (gap) yy += 8; rows.push({ head: label, n, gap, y: yy, h: 26 }); yy += 26; };
+    const item = (i) => { const lines = wrapRows(i.text, tw, BODY, 2), h = lines.length * 19 + 10; rows.push({ i, lines, when: remWhen(i), y: yy, h }); yy += h; };
+    head('Today', today.filter((i) => !i.done).length);
+    if (today.length) today.forEach(item); else { rows.push({ note: later.length ? 'Nothing due today' : 'Nothing on your list yet', y: yy, h: 26 }); yy += 26; }
+    if (later.length) { head('Later', later.length, true); later.forEach(item); }
+    const max = maxCardH();
+    let hidden = 0;
+    if (yy + 10 > max) {
+      while (rows.length > 1 && rows[rows.length - 1].y + rows[rows.length - 1].h + 26 + 10 > max) { const r = rows.pop(); if (r.i) hidden++; }
+      while (rows.length > 1 && rows[rows.length - 1].head) rows.pop();
+      yy = rows[rows.length - 1].y + rows[rows.length - 1].h;
+      if (hidden) { rows.push({ more: `+${hidden} more`, y: yy, h: 26 }); yy += 26; }
+    }
+    // Ink in screen points, made once per item so its outline doesn't change from frame to frame.
+    for (const r of rows) {
+      if (!r.i) continue;
+      const id = r.i.id, cy = r.y + 6;
+      r.ring = shift(cached(REM.rings, id, () => loop(0, 0, 12, 12, { pad: 0, r: 6, over: 0.1 })), x + 18, y + cy);
+      r.check = shift(cached(REM.checks, id, () => handLine([2.5, 6], [5.5, 9.5], { jitter: 0.3 }).concat(handLine([5.5, 9.5], [10.5, 2.5], { jitter: 0.3 }))), x + 18, y + cy);
+      r.strikes = r.lines.map((ln, k) => { const lw = textW(ln, BODY); return shift(cached(REM.strikes, `${id}:${k}:${Math.round(lw)}`, () => handLine([0, 0], [lw + 4, 0], { jitter: 0.6 })), x + 38, y + r.y + 13 + k * 19); });
+    }
+    return { rows, h: yy + 10 };
+  }
+  function remDraw(b, l, t) {
+    const x = this.x, y = this.y, w = REM_W, h = this.h, cw = this.ready ? w : this.cw, ch = this.ready ? h : this.ch;
+    if (cw < 4) return;
+    chrome(b, x, y, cw, ch);
+    if (!this.ready) return;
+    b.fillStyle = 'rgba(120,255,226,0.06)'; b.fillRect(x + 2, y + 2, w - 4, 24);
+    b.fillStyle = DEEP; b.fillRect(x + 2, y + 26, w - 4, 1);
+    [0, 1].forEach((k) => { b.fillStyle = k ? DEEP : ACC; b.fillRect(x + 12 + k * 12, y + 11, 5, 5); });
+    typed(b, 'reminders', x + w / 2, y + 17, `500 10px ${MONO}`, DIM, (t - this.opened) / 0.4, { anchor: 'middle' });
+    const cx = x + w - 18, cyy = y + 13;
+    b.fillStyle = this.hoverClose ? HOT : DIM; for (let k = -3; k <= 3; k++) { b.fillRect(cx + k - 1, cyy + k - 1, 2, 2); b.fillRect(cx + k - 1, cyy - k - 1, 2, 2); }
+    for (const c of [b, l]) { c.save(); c.beginPath(); c.rect(x + 2, y + 27, w - 4, h - 29); c.clip(); }
+    try {
+      for (const r of this.rows) {
+        const ry = y + r.y;
+        if (r.head) {
+          if (r.gap) { b.fillStyle = DEEP; for (let gx = x + 18; gx < x + w - 18; gx += 6) b.fillRect(gx, ry - 5, 3, 1.5); }
+          const hw = typed(b, r.head, x + 18, ry + 19, HEADF, TEXT, (t - this.opened) / 0.3);
+          if (r.n) typed(b, String(r.n), x + 18 + hw + 8, ry + 18, SMALL, DIM, (t - this.opened - 0.1) / 0.2);
+          continue;
+        }
+        if (r.note || r.more) { typed(b, r.note || r.more, x + (r.note ? 40 : 18), ry + 17, SMALL, DIM, (t - this.opened - 0.15) / 0.4); continue; }
+        const it = r.i, a = t - (REM.shown.get(it.id) ?? this.opened);
+        if (a <= 0) continue;
+        if (this.hoverId === it.id) { b.fillStyle = 'rgba(120,255,226,0.07)'; b.fillRect(x + 4, ry, w - 8, r.h); }
+        const ink = it.done ? MID : it.overdue ? TONES.coral : this.color;
+        pen(b, l, this, r.ring, clamp(a / 0.3, 0, 1), ink, { key: 'r' + it.id, w: 2.4 });
+        wrapped(b, r.lines, x + 40, ry + 18, 19, BODY, it.done ? DIM : TEXT, (a - 0.1) / 0.4);
+        if (r.when) typed(b, r.when, x + w - 16, ry + 18, SMALL, it.overdue && !it.done ? TONES.coral : DIM, (a - 0.2) / 0.3, { anchor: 'end' });
+        if (it.done) {
+          const tk = REM.ticked.get(it.id), u = tk != null ? t - tk : 9;
+          pen(b, l, this, r.check, clamp(u / 0.2, 0, 1), HOT, { key: 'c' + it.id, w: 2.2 });
+          r.strikes.forEach((s, k) => pen(b, l, this, s, clamp((u - 0.1 - k * 0.2) / 0.3, 0, 1), MID, { key: `s${it.id}:${k}`, w: 1.8 }));
+        }
+        // The item that just changed: its ring pulses once.
+        if (REM.flash === it.id && t >= REM.flashAt && t - REM.flashAt < 0.7) {
+          const u = (t - REM.flashAt) / 0.7;
+          l.save(); l.globalAlpha *= 1 - u; l.strokeStyle = u < 0.3 ? HOT : ink; l.lineWidth = 2; l.beginPath(); l.arc(x + 24, ry + 12, 8 + u * 12, 0, Math.PI * 2); l.stroke(); l.restore();
+        }
+      }
+    } finally { b.restore(); l.restore(); }
+  }
+  function remRelayout() {
+    const c = REM.m, S = scr(), L = remLayout(c.x, c.y);
+    // Grown taller than the room below it: up a little, then laid out again where it now sits.
+    const y = clamp(c.y, S[1] + 4, Math.max(S[1] + 4, S[3] - L.h - 64));
+    if (y !== c.y) { c.y = y; Object.assign(c, remLayout(c.x, c.y)); } else Object.assign(c, L);
+    c.__ol = {};
+    touch(1.2);
+  }
+  async function remShow(secs) {
+    REM.until = Math.max(REM.until, now() + secs);
+    if (remOpen()) { remRelayout(); return; }
+    await fontsReady();
+    if (remOpen()) { remRelayout(); return; }
+    const L0 = remLayout(0, 0), [x, y] = place(REM_W, L0.h, REM_PART);
+    const c = REM.m = add({ z: 2, part: REM_PART, local: true, card: true, kind: 'reminders', x, y, cw: 0, ch: 0, p: 1, ready: false, opened: Infinity,
+      box() { return [this.x - 4, this.y - 4, REM_W + 8, this.h + 14]; },
+      draw: remDraw,
+      hits() {
+        const { x: cx, y: cy } = this;
+        return [...this.rows.filter((r) => r.i).map((r) => ({ rect: [cx, cy + r.y, REM_W, r.h], kind: 'tick', id: r.i.id, done: r.i.done, part: REM_PART })),
+          { rect: [cx + REM_W - 28, cy + 2, 26, 22], kind: 'close', part: REM_PART }, { rect: [cx, cy, REM_W - 30, 26], kind: 'drag', part: REM_PART }, { rect: [cx, cy, REM_W, this.h], kind: 'card', part: REM_PART }];
+      },
+    });
+    Object.assign(c, remLayout(x, y));
+    sfx('page');
+    clearInterval(REM.timer);
+    // Stays while the pointer rests on it (or it's being dragged), then fades.
+    REM.timer = setInterval(() => {
+      if (!remOpen()) { clearInterval(REM.timer); return; }
+      if (drag?.part === REM_PART || (G.ptr && inside(markBox(c), G.ptr[0], G.ptr[1]))) REM.until = Math.max(REM.until, now() + 2.5);
+      if (now() > REM.until) remClose();
+    }, 250);
+    await tween(0.35, (u) => { const e = ease(u); c.cw = REM_W * e; c.ch = c.h * e; });
+    c.ready = true; c.opened = now();
+    REM.shown.clear();
+    c.rows.filter((r) => r.i).forEach((r, k) => REM.shown.set(r.i.id, c.opened + 0.15 + k * 0.08));
+    if (REM.flashAt === -1) REM.flashAt = (REM.shown.get(REM.flash) ?? c.opened) + 0.3;
+    touch(2 + c.rows.length * 0.08); syncClearAll();
+  }
+  function remClose(sound) { if (!remOpen()) return; clearInterval(REM.timer); if (sound) sfx('poof'); REM.until = 0; fadeOut([REM.m]); }
+  function reminders(msg = {}) {
+    const today = msg.today ?? [], later = msg.later ?? [], all = [...today, ...later], t = now();
+    const before = new Map([...REM.data.today, ...REM.data.later].map((i) => [i.id, i]));
+    REM.data = { today, later };
+    let fresh = false;
+    for (const i of all) {
+      const was = before.get(i.id);
+      if (REM.known && !was) { fresh = true; REM.shown.set(i.id, t); }
+      if (was && was.done !== i.done) { if (i.done) { REM.ticked.set(i.id, t); sfx('done'); } else REM.ticked.delete(i.id); }
+    }
+    const ids = new Set(all.map((i) => i.id));
+    for (const map of [REM.shown, REM.ticked, REM.rings, REM.checks]) for (const id of [...map.keys()]) if (!ids.has(id)) map.delete(id);
+    for (const key of [...REM.strikes.keys()]) if (!ids.has(key.split(':')[0])) REM.strikes.delete(key);
+    if (fresh && remOpen()) sfx('scribble');
+    REM.known = true;
+    // Not open yet: it pulses once its row has come in.
+    if (msg.flash != null) { REM.flash = String(msg.flash); REM.flashAt = remOpen() ? t : -1; }
+    if (msg.toggle && remOpen()) return remClose(true);
+    if (msg.seconds > 0) return remShow(msg.seconds);
+    if (remOpen()) remRelayout();
+  }
+
   // ---------------------------------------------------------------- hit areas: buttons, card close, card drag, links
   let drag = null, hovered = null;
   const hitAt = (x, y) => {
@@ -1130,18 +1272,19 @@
   };
   const setHover = (h) => {
     const m = h?.m ?? null;
-    if (hovered && hovered !== m) { hovered.hover = false; hovered.hoverClose = false; hovered.setHover?.(false); }
-    if (m) { m.hover = h.kind === 'button' || h.kind === 'link' || h.kind === 'clearall'; m.hoverClose = h.kind === 'close'; m.setHover?.(h.kind === 'button'); }
+    if (hovered && hovered !== m) { hovered.hover = false; hovered.hoverClose = false; hovered.hoverId = null; hovered.setHover?.(false); }
+    if (m) { m.hover = h.kind === 'button' || h.kind === 'link' || h.kind === 'clearall'; m.hoverClose = h.kind === 'close'; m.hoverId = h.kind === 'tick' ? h.id : null; m.setHover?.(h.kind === 'button'); }
     if (hovered !== m || m) touch(0.2);
     hovered = m;
-    document.documentElement.style.cursor = h && (h.kind === 'button' || h.kind === 'close' || h.kind === 'link' || h.kind === 'clearall') ? 'pointer' : h?.kind === 'drag' ? 'grab' : 'default';
+    document.documentElement.style.cursor = h && (h.kind === 'button' || h.kind === 'close' || h.kind === 'link' || h.kind === 'clearall' || h.kind === 'tick') ? 'pointer' : h?.kind === 'drag' ? 'grab' : 'default';
   };
   const ours = (e) => !!hitAt(e.clientX, e.clientY) || !!drag;
   addEventListener('pointerdown', (e) => {
     const h = hitAt(e.clientX, e.clientY);
     if (!h) return;
     e.stopPropagation(); e.preventDefault();
-    if (h.kind === 'close') { sfx('tick'); R.ink.send?.({ type: 'ink_closed', part: h.part }); fadeOut(partMarks(h.part)); }
+    if (h.kind === 'close') { sfx('tick'); if (!h.m.local) R.ink.send?.({ type: 'ink_closed', part: h.part }); fadeOut(partMarks(h.part)); }
+    else if (h.kind === 'tick') { sfx(h.done ? 'tick' : 'pip'); REM.until = Math.max(REM.until, now() + 4); R.ink.send?.({ type: 'list_toggle', id: h.id }); }
     else if (h.kind === 'button') { h.m.down = now(); h.m.press?.(); sfx('pip'); touch(0.3); R.ink.send?.({ type: 'ink_action', part: h.part }); }
     else if (h.kind === 'link') { sfx('pip'); R.ink.send?.({ type: 'open_link', url: h.url }); }
     else if (h.kind === 'clearall') clearEverything();
@@ -1160,17 +1303,22 @@
     send: null, invoke: null,
     // A segment of a drawing from the sidecar: { id, seg, beats, edits, last, win, busy }.
     play(e) { G.q.push(e); pump(); },
-    // { screen: true } clears the screen marks (cards stay); otherwise everything. stop: also ends what's playing.
+    // { screen: true } clears the screen marks (cards stay); otherwise everything but the reminders card, which
+    // { all: true } (Esc) takes too. stop: also ends what's playing.
     clear(e = {}) {
       if (e.stop || !e.screen) stop();
-      const gone = marks.filter((m) => m.alive && (e.screen ? m.screen : true));
+      const gone = marks.filter((m) => m.alive && (e.screen ? m.screen : e.all || !m.local));
       fadeOut(gone);
     },
     // Another window came to the front, or that window moved or closed: the drawing no longer sits on what it was
     // about, so all of it fades (cards too).
-    stale() { stop(); fadeOut(marks.filter((m) => m.alive), 0.6); },
+    stale() { stop(); fadeOut(marks.filter((m) => m.alive && !m.local), 0.6); },
     click(x, y) { G.wait?.click(x, y); },
     ptr(x, y) { G.ptr = [x, y]; G.wait?.ptr(x, y); },
+    // The reminders list from the sidecar: { today, later, seconds, flash, toggle }. seconds > 0 opens or extends it;
+    // 0 only updates it if it's open; toggle closes it if it's open.
+    reminders,
+    get reminding() { return remOpen(); },
     get busy() { return G.playing || marks.length > 0; },
     get playing() { return G.playing; },
     // Resolves once nothing is being drawn (at once if nothing is).

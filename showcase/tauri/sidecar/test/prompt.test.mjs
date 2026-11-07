@@ -10,4 +10,8 @@ assert.deepEqual(quoted.map(([n]) => n), [], 'a ${…} inside a quoted string in
 // Pointing is the draw tool now: the prompt never names the old tool.
 assert.ok(!/point_at/.test(side), 'no point_at left in the prompt');
 assert.match(side, /with draw/, 'the prompt says when to draw');
+// Saving a reminder shows the reminders card by itself: the prompt and the draw tool say not to draw it again.
+const tools = readFileSync(fileURLToPath(new URL('../tools.mjs', import.meta.url)), 'utf8');
+assert.match(side, /remember_commitment[^\n]*shows their reminders list on screen by itself, so don't also draw a list or note/, 'the memory line says saved items show by themselves');
+assert.match(tools, /remember_commitment or update_commitment already show on their reminders list by themselves: never draw a list or note of them/, 'the draw tool says saved items are not drawn again');
 console.log('prompt tests: passed');

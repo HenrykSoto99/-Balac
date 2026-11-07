@@ -200,6 +200,9 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
   // drew nothing (they were about the screen as it was). Parts (p1 …) stay editable meanwhile.
   const parts = createParts();
   const buttons = new Map(); // part id → the button's action, for when it's clicked
+  // Parts of drawings that go by themselves (the tour, the setup showcase): about no window, so switching windows keeps them.
+  const loose = new Set();
+  const windowBound = () => parts.ids.some((p) => !loose.has(p));
   const ink = { waits: new Map(), turn: -1, active: 0, front: '', watch: null };
   const inkWait = (key, ms, signal) => new Promise((resolve) => {
     const done = (v) => { clearTimeout(t); signal?.removeEventListener('abort', stop); ink.waits.delete(key); resolve(v); };
@@ -208,7 +211,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     ink.waits.set(key, done);
   });
   const clearScreenInk = (stop = false) => { parts.clearScreen(); for (const id of buttons.keys()) if (!parts.has(id)) buttons.delete(id); ui({ kind: 'agent', e: { type: 'ink_clear', screen: true, stop } }); };
-  const clearAllInk = () => { parts.clear(); buttons.clear(); ui({ kind: 'agent', e: { type: 'ink_clear' } }); };
+  const clearAllInk = () => { parts.clear(); buttons.clear(); loose.clear(); ui({ kind: 'agent', e: { type: 'ink_clear' } }); };
   // The window a drawing belongs to: the front window's id and place. Its title isn't part of it (a page updating
   // its title, a document being edited, isn't the screen changing).
   const frontKey = async () => {
@@ -222,9 +225,9 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     if (!HANDS || ink.watch) return;
     ink.watch = setInterval(async () => {
       if (ink.active) return;
-      if (!parts.ids.length) { clearInterval(ink.watch); ink.watch = null; return; }
+      if (!windowBound()) { clearInterval(ink.watch); ink.watch = null; return; }
       const k = await frontKey();
-      if (k && ink.front && k !== ink.front) { parts.clear(); buttons.clear(); ui({ kind: 'agent', e: { type: 'ink_stale' } }); }
+      if (k && ink.front && k !== ink.front) { parts.clear(); buttons.clear(); loose.clear(); ui({ kind: 'agent', e: { type: 'ink_stale' } }); }
     }, 1500);
     ink.watch.unref?.();
   }
@@ -354,7 +357,9 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
           notes.push(`Stopped before beat ${sg.from + 1}: ${e.message}`);
           break;
         }
-        drawn.push(...parts.assign(seg));
+        const ids = parts.assign(seg);
+        drawn.push(...ids);
+        if (opts.fade) for (const p of ids) loose.add(p);
         for (const b of seg) for (const m of b.marks) if (m.action && m.part) buttons.set(m.part, m.action);
         const out = seg.map((b, j) => ({ ...b, n: sg.from + j + 1, caption: plain(b.say), voiced: !!speak(b.say) }));
         said.push(...out.map((b) => b.caption));
@@ -376,7 +381,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         await new Promise((res) => setTimeout(res, 350));
       }
     } finally { ink.active--; }
-    if (parts.ids.length) { ink.front = await frontKey(); watchStale(); }
+    if (windowBound()) { ink.front = await frontKey(); watchStale(); }
     const list = parts.describe(drawn);
     return [drawn.length ? `Drew ${list}.` : edits.length ? 'Edited the drawing.' : 'Done.', ...notes, edits.length || drawn.length ? `On screen now: ${parts.describe() || 'nothing'}.` : ''].filter(Boolean).join(' ');
   }
@@ -384,13 +389,13 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
   const inkEvents = {
     started: (id, seg) => ink.waits.get(`${id}:start:${seg}`)?.('started'),
     waitDone: (id, beat, result) => ink.waits.get(`${id}:wait:${beat}`)?.(['clicked', 'hovered', 'skipped'].includes(result) ? result : 'skipped'),
-    closed: (part) => { parts.remove(String(part)); buttons.delete(String(part)); },
+    closed: (part) => { parts.remove(String(part)); buttons.delete(String(part)); loose.delete(String(part)); },
     button: (part) => buttons.get(String(part)) ?? null,
     // A request ended: if it drew nothing, the marks from before it are done with.
     endRequest: () => { if (ink.turn !== turn && parts.screenCount) clearScreenInk(); },
     stop: () => { for (const done of [...ink.waits.values()]) done('stopped'); if (parts.screenCount) clearScreenInk(true); },
     // The user sent the whole drawing away (Esc): nothing is on screen any more.
-    cleared: () => { for (const done of [...ink.waits.values()]) done('stopped'); parts.clear(); buttons.clear(); },
+    cleared: () => { for (const done of [...ink.waits.values()]) done('stopped'); parts.clear(); buttons.clear(); loose.clear(); },
     // The app takes its own drawing away (the setup showcase, when its step is left): everything goes.
     clear: () => { for (const done of [...ink.waits.values()]) done('stopped'); clearAllInk(); },
     describe: () => parts.describe(),
@@ -517,7 +522,7 @@ beats: [{say, marks, wait?}]. say: one short line, under 20 words, spoken while 
 Places (at, to, tie), best first: {text: the exact words shown on screen} (exact bounds, scrolls to it; target 'screen' searches every app); {id} from read_window, for controls without words; {x, y, w, h} pixels in your latest screenshot, for icons and areas without words (give w and h, the thing's whole box, so the loop fits it).
 Which mark: one control they should click: target (with wait 'click' in a walkthrough); one thing to notice: ring (follows its shape; r sets the corner radius); a small spot or icon: point; a region or panel: frame; key words: underline (outdated ones: strike); right or wrong: check, cross; order of steps: num; a name beside something: label (text) or label on any mark; how two things relate: connect (at → to); an odd-shaped group: trace (points); scroll here: scroll (dir); one thing above all else: spotlight (sparingly); something to hover: hover with wait 'hover'; big words: write (text, size).
 Walkthroughs ("how do I…"): one beat per step, each a target on that step's control with label and wait 'click'; the next step is found after they click, on the screen as it is then.
-Explanations that a picture makes clearer go on cards beside the window (tie connects a card to what it explains): card (title, heading, text, items, sources), note (text, tone), list (title, items), clip (title, text), sources ([{name, url}]), photo (query: a thing with a Wikipedia page, or url; text = caption), graph (x_range, y_range, plots [{points, tone, label}], dots [{x, y, label}]) for numbers, timeline (events [{when, text}]) for dates, legend (keys [{tone, text}]), molecule (smiles, label) for chemistry, model (parts [{shape: box|sphere|cylinder|cone|torus, at [x,y,z], size [x,y,z], rot [deg x,y,z], tone, label}] within about -1 to 1, title) for objects and machines.
+Explanations that a picture makes clearer go on cards beside the window (tie connects a card to what it explains): card (title, heading, text, items, sources), note (text, tone), list (title, items), clip (title, text), sources ([{name, url}]), photo (query: a thing with a Wikipedia page, or url; text = caption), graph (x_range, y_range, plots [{points, tone, label}], dots [{x, y, label}]) for numbers, timeline (events [{when, text}]) for dates, legend (keys [{tone, text}]), molecule (smiles, label) for chemistry, model (parts [{shape: box|sphere|cylinder|cone|torus, at [x,y,z], size [x,y,z], rot [deg x,y,z], tone, label}] within about -1 to 1, title) for objects and machines. Things saved with remember_commitment or update_commitment already show on their reminders list by themselves: never draw a list or note of them; list and note are for things that aren't being saved.
 Actions: type (text into the field at; needs actions allowed), copy (text to the clipboard), open (url), handoff (task), button (text + action {do: ask|open|copy, value}: a likely next step they can click), emote (name: hype, wave, upset, remind, motivate), sfx (name). tone: accent, teal, amber, coral, lilac, sky, lime, red, white.
 A drawing stays until the user clears it or the window changes; your next drawing replaces it. Every drawn piece gets an id (p1, p2 …) in the result. To change what's drawn ("make that red", "move it left", "never mind"): edit [{do: recolor|move|erase|clear, part, tone, dx, dy}] with no beats. Up to 12 beats, 40 marks each.`,
       parameters: DrawArgs, executionMode: 'sequential', timeoutMs: 30 * 60_000,

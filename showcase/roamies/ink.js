@@ -533,12 +533,15 @@
   let winRect = null;
   function place(w, h, part) {
     const S = scr(), top = S[1] + 12, bot = S[3] - 64; // room for the caption
-    const taken = [...marks.filter((m) => m.alive && m.card).map((m) => grow(markBox(m), 10)), ...markedNow().map((r) => grow(r, 10)), ...pillsNow()];
+    // Cards keep a small gap from each other (their boxes already include the shadow), marks a bigger one.
+    const taken = [...marks.filter((m) => m.alive && m.card).map((m) => grow(markBox(m), 6)), ...markedNow().map((r) => grow(r, 10)), ...pillsNow()];
     const xs = [];
     if (winRect) {
       if (S[2] - (winRect[0] + winRect[2]) >= w + 28) xs.push(Math.min(S[2] - w - 12, winRect[0] + winRect[2] + 20));
       if (winRect[0] - S[0] >= w + 28) xs.push(Math.max(S[0] + 12, winRect[0] - w - 20));
     }
+    // Also just right of each card already up, so a second column packs beside the first instead of landing on the window.
+    for (const m of marks) if (m.alive && m.card) { const b = markBox(m), x = b[0] + b[2] + 8; if (x + w <= S[2] - 8 && (!winRect || x >= winRect[0] + winRect[2] || x + w <= winRect[0])) xs.push(x); }
     xs.push(S[2] - w - 16, S[0] + 16);
     for (const x of xs) for (let y = top; y + h <= bot; y += 12) { const r = [x, y, w, h]; if (!taken.some((q) => overlap(r, q) > 0)) return r; }
     return [S[2] - w - 16, top, w, h];
@@ -702,7 +705,7 @@
       await card(m, w, h, function (b, l, t, x, y, age) { m.keys.forEach((k, i) => { const [kx, r, text] = at0[i], ky = y + 20 + r * 22; b.fillStyle = tone(k.tone); b.beginPath(); b.arc(x + kx + 4, ky - 4, 4, 0, Math.PI * 2); b.fill(); typed(b, text, x + kx + 14, ky, SMALL, DIM, age / 0.4); }); }, { bar: false });
     },
     async timeline(m) {
-      const ev = m.events, w = Math.max(360, ev.length * 84), h = 26 + 120, ty = 58;
+      const ev = m.events, w = clamp(ev.length * 82, 320, 620), h = 26 + 120, ty = 58;
       const xs = ev.map((_, i) => 30 + ((w - 60) * i) / Math.max(1, ev.length - 1)), line = handLine([16, ty], [w - 16, ty], { jitter: 0.5, bow: 0.006 });
       let lp = 0; const shown = [];
       const c = await card(m, w, h, function (b, l, t, x, y) {
@@ -724,12 +727,13 @@
     },
     molecule: (m) => drawMolecule(m),
     async model(m) {
-      const w = 320, h = 26 + 280, view3d = R.ink3d?.create(m.parts, w - 24, 250);
+      const w = 320, h = 26 + 236, view3d = R.ink3d?.create(m.parts, w - 24, 210);
       await card(m, w, h, function (b, l, t, x, y, age) {
-        if (!view3d) { typed(b, '3D isn’t available here', x + w / 2, y + 120, SMALL, DIM, 1, { anchor: 'middle' }); return; }
+        if (!view3d) { typed(b, '3D isn’t available here', x + w / 2, y + 100, SMALL, DIM, 1, { anchor: 'middle' }); return; }
         const u = clamp(age / 0.8, 0, 1), f = view3d.frame(reduced() ? 0 : t);
         for (let i = 0; i < f.lv.length; i++) { const v = f.lv[i]; if (!v) continue; const gx = i % f.gw, gy = (i / f.gw) | 0; if ((B4[(gy % 4) * 4 + (gx % 4)] + 0.5) / 16 > u * 1.05) continue; b.fillStyle = LED[v]; b.fillRect(x + 12 + gx * 3, y + 6 + gy * 3, 3, 3); }
-        if (u >= 1) for (const lab of f.labels) { const lx = x + 12 + lab.x, ly = y + 6 + lab.y; b.fillStyle = ACC; b.fillRect(lx - 1.5, ly - 1.5, 3, 3); typed(b, lab.text, lx + 6, ly - 4, `600 10px ${MONO}`, TEXT, 1, { rim: 3 }); }
+        // Labels follow their parts as it turns; one that would land on another this frame waits its turn.
+        if (u >= 1) { const took = []; for (const lab of f.labels) { const lx = x + 12 + lab.x, ly = y + 6 + lab.y, r = [lx - 2, ly - 14, textW(lab.text, `600 10px ${MONO}`) + 10, 16]; if (took.some((q) => overlap(q, r) > 0)) continue; took.push(r); b.fillStyle = ACC; b.fillRect(lx - 1.5, ly - 1.5, 3, 3); typed(b, lab.text, lx + 6, ly - 4, `600 10px ${MONO}`, TEXT, 1, { rim: 3 }); } }
       }, { title: m.title || m.label || 'model', live: () => !!view3d && !reduced() });
       sfx('scan');
     },

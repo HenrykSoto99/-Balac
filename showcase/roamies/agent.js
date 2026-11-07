@@ -155,12 +155,16 @@
       const xs = [S.l + r * 2.4, (S.l + S.r) / 2, S.r - r * 2.4], ys = [S.t + r * 2.4, (S.t + S.b) / 2, S.b - r * 1.9];
       for (const x of xs) for (const y of ys) if (x !== xs[1] || y !== ys[1]) c.push([x, y]);
       if (fromX != null) for (const rr of [3.5, 5, 7]) for (let i = 0; i < 12; i++) { const a = (i / 12) * Math.PI * 2; c.push([fromX + Math.cos(a) * rr * r, fromY + Math.sin(a) * rr * r]); }
-      const usable = c.filter(([x, y]) => spotOK(x, y));
+      // Never onto a card or button a drawing left on screen (ink.js), where it would cover what it just drew.
+      const onInk = (x, y) => !!R.inkHit && [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1], [-0.7, -0.7], [0.7, -0.7], [-0.7, 0.7], [0.7, 0.7]].some(([dx, dy]) => R.inkHit(x + dx * r * 1.2, y + dy * r * 1.2));
+      const usable = c.filter(([x, y]) => spotOK(x, y) && !onInk(x, y));
       const clear = usable.filter(([x, y]) => cx == null || Math.hypot(x - cx, y - cy) >= AVOID());
       // Shortest trip from where it is; the very first spot prefers the bottom-right corner.
       const ref = fromX != null ? [fromX, fromY] : [S.r, S.b];
       if (clear.length) return clear.sort((p, q) => Math.hypot(p[0] - ref[0], p[1] - ref[1]) - Math.hypot(q[0] - ref[0], q[1] - ref[1]))[0];
       if (usable.length && cx != null) return usable.sort((p, q) => Math.hypot(q[0] - cx, q[1] - cy) - Math.hypot(p[0] - cx, p[1] - cy))[0];
+      // Nowhere better (cards fill the free space): stay where it is rather than jump to the middle of the screen.
+      if (fromX != null && spotOK(fromX, fromY)) return [fromX, fromY];
       return [(S.l + S.r) / 2, (S.t + S.b) / 2];
     };
     const setStation = (x, y, byCursor = null) => { station.x = x; station.y = y; station.byCursor = byCursor; m.anchor = { x, y, r: k.R * 0.35 }; };

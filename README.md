@@ -29,7 +29,7 @@ voice, keeps track of what you said you'd do and nudges you when it's due.
 - **Talk, don't type.** Hold ⌃⌥ (Ctrl+Alt on Windows), say it, let go.
 - **It talks back.** Spoken replies in its own voice, with real feeling, through [Fish Audio](https://fish.audio).
 - **It remembers.** What you said you'd do, reminders down to the second, and what matters to you.
-- **It sees and points.** Reads any window and points at exactly where to click.
+- **It draws on your screen.** Rings the exact button to click, walks you through each step, and sketches answers beside what you're reading.
 - **It does the clicking.** Opens apps, sites and files, and clicks or types in other apps for you.
 - **Your subscriptions.** Sign in with Claude or ChatGPT, or use an API key (Gemini, Grok, Kimi Code and more).
 
@@ -42,6 +42,25 @@ voice, keeps track of what you said you'd do and nudges you when it's due.
 | Adrian           | A pixel man                                             |
 
 <sub>Each one has its own name, voice and animations, in three sizes: Default, Small, or Cursor, a pixel pointer that rides along with your mouse.</sub>
+
+## JARVIS shows you how
+
+<p align="center">
+  <img src="docs/art/jarvis-shows-you-how.gif" alt="Asked &quot;How do I export this as an MP4?&quot;, JARVIS turns into its reticle cursor, rings the Format menu, then MP4, then the Export button in a video editor, waiting for each click while a caption reads each step">
+</p>
+
+Ask how to do something in any app. JARVIS turns into its cursor, rings the exact button on your real screen,
+says the step out loud and waits for your click before showing the next one.
+
+## JARVIS explains anything
+
+<p align="center">
+  <img src="docs/art/jarvis-explains.gif" alt="Asked how black holes work while reading Wikipedia, JARVIS draws an answer card tied to the page, a turning 3D black hole with its glowing disk, underlines the key sentence and adds a discovery timeline">
+</p>
+
+Ask about whatever you're looking at. JARVIS sketches the answer right beside it while it talks: cards, graphs,
+timelines, photos, molecules and turning 3D models, all in its own glowing ink. Ask it to change any part, or
+clear it all in one go.
 
 ## Also included
 
@@ -59,6 +78,7 @@ voice, keeps track of what you said you'd do and nudges you when it's due.
 | Spoken replies          | Yes, with a Fish Audio key | Yes, with a Fish Audio key  |
 | Memory and reminders    | Yes                        | Yes                         |
 | Read windows and point  | Yes                        | Not yet                     |
+| Cards and diagrams      | Yes                        | Yes                         |
 | Click and type in apps  | Yes                        | Not yet                     |
 | Ask about an area (⌃⌥A) | Yes                        | Not yet                     |
 

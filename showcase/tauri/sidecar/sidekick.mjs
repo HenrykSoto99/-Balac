@@ -5,12 +5,12 @@
 // in:  {type:'menu', id} {type:'answer', id, text} {type:'ui_ready'}
 // out: {type:'menu', items} {type:'ui', msg} {type:'overlays', ids}
 import { Agent } from '@kenkaiiii/gg-agent';
+import { ClaudeCodeAgent } from './claudecode.mjs';
 import { SAFE, checkLink, redactArgs } from './safety.mjs';
 import { agentEvents } from './agentstream.mjs';
-import { agentUserAgent } from './useragent.mjs';
 import {
-  AUTH_PROVIDERS, AuthStorage, dualAuthProvider, getClaudeCliUserAgent, getContextWindow, getDefaultModel, getModel, getModelsForProvider,
-  loginAnthropic, loginGemini, loginKimi, loginOpenAI, loginXai,
+  AUTH_PROVIDERS, AuthStorage, claudeCodeEnv, dualAuthProvider, getContextWindow, getDefaultModel, getModel, getModelsForProvider,
+  loginKimi, loginOpenAI, loginXai, resolveClaudeCodeBinary, signInWithClaudeCode,
 } from '@kenkaiiii/gg-core';
 import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
@@ -32,6 +32,7 @@ import { createSpeaker } from './speaker.mjs';
 import { DEFAULT_VOICE, FISH_CHOICES } from './fish.mjs';
 import { createSecrets } from './secrets.mjs';
 import { createActivity } from './activity.mjs';
+import { keyCards, signInCards } from './providers.mjs';
 
 console.log = console.info = (...a) => console.error(...a);
 const send = (o) => process.stdout.write(JSON.stringify(o) + '\n');
@@ -58,13 +59,12 @@ const UPDATE_REPO = 'KenKaiii/Roamies';
 const HOME = os.homedir();
 // ROAMIES_DATA_DIR (tests and benchmarks): config, sessions and memory go there instead; sign-in stays in ~/.gg.
 const CONFIG_PATH = process.env.ROAMIES_DATA_DIR ? path.join(process.env.ROAMIES_DATA_DIR, 'sidekick.json') : path.join(HOME, '.gg', 'sidekick.json');
-const OAUTH = { anthropic: loginAnthropic, openai: loginOpenAI, gemini: loginGemini, moonshot: loginKimi, xai: loginXai };
+// Claude sign-in runs through Claude Code (downloaded once, about 140 MB); it keeps the token, auth.json a marker.
+const OAUTH = { anthropic: (cb, signal) => signInWithClaudeCode(auth, cb, { signal }), openai: loginOpenAI, moonshot: loginKimi, xai: loginXai };
 const PROVIDER_LABELS = { gemini: 'Gemini', ...Object.fromEntries(AUTH_PROVIDERS.map((p) => [p.value, p.label])) };
-const MENU_PROVIDERS = ['anthropic', 'openai', 'gemini', ...AUTH_PROVIDERS.map((p) => p.value)].filter((v, i, a) => a.indexOf(v) === i);
+// Gemini is hidden in gg-core (not in AUTH_PROVIDERS, never signed in), so it isn't offered.
+const MENU_PROVIDERS = ['anthropic', 'openai', ...AUTH_PROVIDERS.map((p) => p.value)].filter((v, i, a) => a.indexOf(v) === i);
 const FAST = { anthropic: 'claude-haiku-5-5', openai: 'gpt-6-luna', gemini: 'gemini-3.8-flash' };
-// Claude sign-in requests must look like a recent Claude Code; gg-ai's built-in default (2.1.75) is too old
-// for newer models like Opus 5.5. Looked up before every request (latest on npm, cached a day in ~/.gg).
-let claudeUserAgent;
 
 // ---------- config ----------
 // On Windows, Ctrl+Alt is AltGr on many keyboards (Ctrl+Alt+S types "ś" in Polish), so it uses Ctrl+Shift.
@@ -150,8 +150,18 @@ const PANEL = `the panel (click my ${MAC ? 'menu bar' : 'system tray'} icon)`;
 
 const auth = new AuthStorage();
 const signedIn = new Map();
+// Per method, for the guide's cards: Claude, Kimi and Grok can be signed in, have a key, or both.
+const oauthOn = new Map(), keyOn = new Map();
+const hasAny = async (keys) => { for (const k of keys) if (await auth.hasCredentials(k).catch(() => false)) return true; return false; };
 async function refreshAuth() {
   for (const p of MENU_PROVIDERS) signedIn.set(p, await auth.hasProviderAuth(p).catch(() => false));
+  for (const p of Object.keys(OAUTH)) {
+    oauthOn.set(p, p === 'anthropic' ? await auth.hasClaudeCodeLogin().catch(() => false) : dualAuthProvider(p) ? await auth.hasCredentials(dualAuthProvider(p).oauthKey).catch(() => false) : !!signedIn.get(p));
+  }
+  for (const meta of AUTH_PROVIDERS.filter((x) => x.methods?.includes('apikey'))) {
+    const p = meta.value;
+    keyOn.set(p, OAUTH[p] ? await hasAny(meta.apiKeyVariants?.map((v) => v.key) ?? [dualAuthProvider(p)?.provider ?? p]) : !!signedIn.get(p));
+  }
 }
 function ensureModel() {
   if (config.provider && signedIn.get(config.provider) && getModel(config.model)) return true;
@@ -358,18 +368,25 @@ let session = null;
 // instead of starting a new one that it then replaces.
 const resumed = loadLatestSession().then((s) => { if (s && !isStale(s) && !session) session = s; }).catch((e) => console.error('resume', e));
 const BUDGET_CAP = 120_000;
-function makeAgent() {
+// Claude Code's session for this conversation, so a rebuilt agent continues it instead of starting over.
+let ccResume = null;
+// The Claude Code process when Anthropic is signed in with Claude (else null: the API, with a key or another provider).
+async function claudeCodeRoute() {
+  if (config.provider !== 'anthropic' || !(await auth.hasClaudeCodeLogin().catch(() => false))) return null;
+  const executable = resolveClaudeCodeBinary();
+  if (!executable) throw new Error(`Claude Code isn't installed anymore. Sign in with Claude again on the Model page in ${PANEL}.`);
+  return { executable, env: claudeCodeEnv() };
+}
+let agentRoute = null;
+function makeAgent(cc) {
   const m = getModel(config.model);
   controller = new AbortController();
   const prior = forProvider(session?.messages ?? [], session?.provider, config.provider);
   if (session) { session.provider = config.provider; session.model = config.model; }
-  agent = new Agent({
-    provider: config.provider,
+  agentRoute = cc ? 'claude-code' : 'api';
+  const common = {
     model: config.model,
     system: system(),
-    // One hour on Anthropic (falls back to 5 min elsewhere); the key keeps one conversation on one cache.
-    cacheRetention: 'long',
-    promptCacheKey: session?.id ? `roamies-${session.id}` : undefined,
     priorMessages: prior,
     tools,
     maxTurns: 24,
@@ -381,15 +398,29 @@ function makeAgent() {
       return out;
     },
     thinking: m?.supportsThinking ? (process.env.ROAMIES_THINKING === 'off' ? undefined : process.env.ROAMIES_THINKING || 'low') : undefined,
-    webSearch: ['anthropic', 'openai', 'gemini'].includes(config.provider),
     signal: controller.signal,
+  };
+  if (cc) {
+    const sid = session?.id;
+    agent = new ClaudeCodeAgent({
+      ...common, executable: cc.executable, env: cc.env, cwd: HOME,
+      resume: ccResume?.session === sid ? ccResume.state : null,
+      onResume: (state) => { ccResume = { session: sid, state }; },
+    });
+    return;
+  }
+  agent = new Agent({
+    ...common,
+    provider: config.provider,
+    // One hour on Anthropic (falls back to 5 min elsewhere); the key keeps one conversation on one cache.
+    cacheRetention: 'long',
+    promptCacheKey: session?.id ? `roamies-${session.id}` : undefined,
+    webSearch: ['anthropic', 'openai', 'gemini'].includes(config.provider),
     resolveCredentials: async () => {
       const c = await auth.resolveCredentials(config.provider);
       return { apiKey: c.accessToken, accountId: c.accountId, projectId: c.projectId };
     },
     baseUrl: credsBaseUrl,
-    // gg-ai only sends this for Anthropic OAuth tokens; API keys are unaffected.
-    userAgent: config.provider === 'anthropic' ? claudeUserAgent : undefined,
   });
 }
 let credsBaseUrl;
@@ -459,11 +490,12 @@ async function prompt(text, image = null, note = '') {
   }
   if (agentStale && agent) { agent = null; }
   agentStale = false;
-  const ua = await agentUserAgent(config.provider, getClaudeCliUserAgent);
-  if (ua !== claudeUserAgent) { claudeUserAgent = ua; agent = null; }
+  let cc;
+  try { cc = await claudeCodeRoute(); } catch (e) { return say(e.message, 'concerned'); }
+  if (agent && agentRoute !== (cc ? 'claude-code' : 'api')) agent = null; // signed in or out of Claude meanwhile
   if (!agent) {
     try { credsBaseUrl = (await auth.resolveCredentials(config.provider)).baseUrl; } catch { credsBaseUrl = undefined; }
-    makeAgent();
+    makeAgent(cc);
   }
   busy = true; quiet = false;
   if (!intro && !text.startsWith('(')) activity.asked(text);
@@ -589,42 +621,63 @@ function ask(opts, signal) {
 }
 
 // ---------- logins ----------
-let loggingIn = null;
-async function oauthLogin(provider) {
-  if (loggingIn) return say(`Still finishing the ${PROVIDER_LABELS[loggingIn]} sign-in. One at a time!`, 'concerned');
-  loggingIn = provider; menu();
+// One sign-in at a time; starting another (or cancelling from the guide) supersedes the current one. Claude's stops
+// for real (its signal); the others can't be stopped, so their late result is ignored. The guide names each attempt.
+let loggingIn = null, loginStatus = '', loginSeq = 0, loginRun = null;
+function cancelLogin(id) {
+  if (!loginRun || (id != null && loginRun.id !== id)) return;
+  loginRun.controller.abort();
+  loginRun = null; loggingIn = null; loginStatus = ''; menu();
+}
+async function oauthLogin(provider, id = `l${++loginSeq}`) {
+  cancelLogin();
+  const run = { id, provider, controller: new AbortController() };
+  loginRun = run; loggingIn = provider; loginStatus = ''; menu();
+  const live = () => loginRun === run;
+  const tell = (msg) => { if (live() && onboarding) ob({ kind: 'login', provider, id, ...msg }); };
   try {
     const creds = await OAUTH[provider]({
       onOpenUrl: (url) => {
+        if (!live()) return;
         openUrl(url);
-        if (onboarding) ob({ kind: 'login', provider, phase: 'browser' });
+        if (onboarding) tell({ phase: 'browser' });
         else say(`Opening ${PROVIDER_LABELS[provider]} in your browser. Sign in there!`, 'happy');
       },
       onPromptCode: async (message, signal) => {
-        const text = await ask({ prompt: 'Paste the code from the browser here.', placeholder: 'code#state' }, signal);
+        const text = await ask({ prompt: 'Paste the code from the browser here.', placeholder: 'code#state' }, signal ? AbortSignal.any([signal, run.controller.signal]) : run.controller.signal);
         if (signal?.aborted) return '';
         if (text == null) throw new Error('Sign-in cancelled.');
         return text;
       },
-      onStatus: (m) => console.error('[oauth]', m),
-    });
-    const key = provider === 'moonshot' || provider === 'xai' ? dualAuthProvider(provider).oauthKey : provider;
-    await auth.setCredentials(key, creds);
+      // Claude's: "Downloading Claude Code… 40% (56 of 140 MB)", then "Opening Claude sign-in…".
+      onStatus: (m) => {
+        console.error('[oauth]', m);
+        if (!live() || m === loginStatus) return;
+        loginStatus = m; tell({ phase: 'status', text: m }); panel();
+      },
+    }, run.controller.signal);
+    if (!live()) return;
+    // Claude Code keeps Claude's token itself (signInWithClaudeCode saved the marker).
+    if (provider !== 'anthropic') {
+      const key = provider === 'moonshot' || provider === 'xai' ? dualAuthProvider(provider).oauthKey : provider;
+      await auth.setCredentials(key, creds);
+    }
     await refreshAuth();
     if (!config.provider || !signedIn.get(config.provider)) { config.provider = null; ensureModel(); }
     agent = null;
-    if (onboarding) { ob({ kind: 'login', provider, phase: 'done' }); obState(); }
+    if (onboarding) { tell({ phase: 'done' }); obState(); }
     else {
       say(`Signed in to ${PROVIDER_LABELS[provider]}. Let's go!`, 'happy');
       ui({ kind: 'agent', e: { type: 'emote', action: 'hype' } });
     }
   } catch (err) {
+    if (!live()) return;
     console.error('login failed', err);
     const msg = String(err?.message ?? err).slice(0, 120);
-    if (onboarding) ob({ kind: 'login', provider, phase: 'error', error: msg });
+    if (onboarding) tell({ phase: 'error', error: msg });
     else say(`${PROVIDER_LABELS[provider]} sign-in didn't work: ${msg}`, 'concerned');
   } finally {
-    loggingIn = null; menu();
+    if (live()) { loginRun = null; loggingIn = null; loginStatus = ''; menu(); }
   }
 }
 
@@ -664,7 +717,7 @@ async function setReplies(mode) {
   config.replies = mode; saveConfig();
   agentStale = true; // the spoken and written styles are different prompts
   if (mode === 'text') speech.stop();
-  menu();
+  menu(); if (onboarding) obState();
   if (mode === 'voice') speakLine('Voice is on. This is how I sound.');
   else say('Text only from now on.', 'happy');
 }
@@ -673,6 +726,7 @@ async function setReplies(mode) {
 function speakLine(text, mood = 'happy') {
   say(text, mood);
   const v = config.replies === 'voice' ? speech.start() : null;
+  if (v && onboarding) guideVoices.add(v.id); // heard in the setup guide, where it was switched on
   if (v) { v.say(text); v.end(); }
 }
 
@@ -684,11 +738,11 @@ async function removeFishKey() {
   say('Fish Audio key removed. Replies are text only.', 'happy');
 }
 
-async function fishKeyLogin({ thenVoice = false, given = null } = {}) {
-  // From the panel: what goes wrong shows there too, next to the field.
-  const say = given == null ? sayOut : (text, mood) => { sayOut(text, mood); panelNote(text, mood === 'concerned'); };
+// note(text, bad): typed into the panel or the setup guide, so how it went shows there too, next to the field.
+async function fishKeyLogin({ thenVoice = false, given = null, note = null } = {}) {
+  const say = note ? (text, mood) => { sayOut(text, mood); note(text, mood === 'concerned'); } : sayOut;
   const key = (given ?? (await ask({ prompt: 'Paste your Fish Audio API key', placeholder: 'Fish Audio API key', mask: true })))?.trim();
-  if (!key) return;
+  if (!key) return note?.('Paste your Fish Audio key first.', true);
   if (!/^[\x21-\x7e]{8,512}$/.test(key)) return say("That doesn't look like a Fish Audio key. Copy it again from fish.audio.", 'concerned');
   const prev = await secrets.get('fish-audio').catch(() => null);
   speech.setKey(key);
@@ -703,8 +757,8 @@ async function fishKeyLogin({ thenVoice = false, given = null } = {}) {
     return say(`I couldn't save the key safely${MAC ? ' in your Keychain' : ''}, so voice stays off.`, 'concerned');
   }
   if (thenVoice || config.replies !== 'voice') { config.replies = 'voice'; saveConfig(); agentStale = true; }
-  menu();
-  if (given != null) panelNote('Fish Audio key saved. Voice is on.');
+  menu(); if (onboarding) obState();
+  note?.('Fish Audio key saved. Voice is on.');
   speakLine(speech.model.endsWith('-free') ? "Voice is on, on Fish Audio's free model since the account has no credit." : 'Voice is on. This is how I sound.');
 }
 
@@ -828,7 +882,7 @@ function panelState() {
   const doing = activity.doing();
   return {
     version: VERSION, os: MAC ? 'mac' : process.platform === 'win32' ? 'win' : 'other',
-    status: busy ? { state: 'busy', text: doing ?? 'Thinking' } : loggingIn ? { state: 'busy', text: `Signing in to ${PROVIDER_LABELS[loggingIn]}` } : current ? { state: 'ready', text: 'Ready' } : { state: 'off', text: 'Not signed in' },
+    status: busy ? { state: 'busy', text: doing ?? 'Thinking' } : loggingIn ? { state: 'busy', text: loginStatus || `Signing in to ${PROVIDER_LABELS[loggingIn]}` } : current ? { state: 'ready', text: 'Ready' } : { state: 'off', text: 'Not signed in' },
     busy, canNew: !busy && !!session?.messages.length,
     model: current ? { provider: config.provider, id: config.model, name: current.name, providerLabel: PROVIDER_LABELS[config.provider] ?? config.provider } : null,
     providers: MENU_PROVIDERS.map((p) => {
@@ -837,6 +891,7 @@ function panelState() {
       return {
         id: p, label: PROVIDER_LABELS[p] ?? p, on,
         method: OAUTH[p] && (!meta || meta.methods.includes('oauth')) ? 'oauth' : meta?.methods?.includes('apikey') ? 'key' : null,
+        key: !!meta?.methods?.includes('apikey'), // also takes an API key (Anthropic, Kimi, Grok next to their sign-in)
         models: on ? getModelsForProvider(p).slice(0, 24).map((mm) => ({ id: mm.id, name: mm.name })) : [],
       };
     }),
@@ -1087,15 +1142,14 @@ async function introAnswer(text) {
 }
 
 // ---------- setup guide ----------
-const OAUTH_NAMES = { anthropic: ['Claude', 'Anthropic'], openai: ['ChatGPT', 'OpenAI'], gemini: ['Gemini', 'Google'], xai: ['Grok', 'xAI'], moonshot: ['Kimi', 'Moonshot'] };
 function obState() {
   const current = getModel(config.model);
   ob({
     kind: 'state',
     platform: process.platform,
     step: config.onboardStep ?? 0,
-    oauth: Object.keys(OAUTH).map((id) => ({ id, name: OAUTH_NAMES[id]?.[0] ?? PROVIDER_LABELS[id], company: OAUTH_NAMES[id]?.[1] ?? '', connected: !!signedIn.get(id) })),
-    apikey: AUTH_PROVIDERS.filter((p) => p.methods?.includes('apikey')).map((p) => ({ id: p.value, name: p.label, connected: !!signedIn.get(p.value) })),
+    oauth: signInCards(Object.keys(OAUTH), (id) => oauthOn.get(id), PROVIDER_LABELS),
+    apikey: keyCards(AUTH_PROVIDERS, (id) => keyOn.get(id)),
     connected: current && signedIn.get(config.provider) ? { provider: PROVIDER_LABELS[config.provider] ?? config.provider, model: current.name } : null,
     keys: keys(),
     actions: config.allowActions,
@@ -1106,6 +1160,8 @@ function obState() {
     filesAsked: config.filesAsked,
     look: config.look ?? 'classic',
     size: config.size ?? 'default',
+    replies: config.replies === 'voice' ? 'voice' : 'text',
+    fishKey: speech.on,
   });
 }
 
@@ -1126,14 +1182,21 @@ async function filesStatus(request) {
 
 let keysBefore = null;
 async function onGuide(m) {
-  if (m.type === 'ob_hello') { onboarding = true; await refreshAuth(); obState(); }
+  if (m.type === 'ob_hello') { onboarding = true; await refreshAuth(); await fishKeyLoaded; obState(); }
   else if (m.type === 'ob_closed') { onboarding = false; endIntro(); }
   else if (m.type === 'chat_start') startIntro();
   else if (m.type === 'chat_answer' && typeof m.text === 'string') introAnswer(m.text.trim().slice(0, 2000));
   else if (m.type === 'chat_skip') { endIntro(); config.introDone = true; saveConfig(); menu(); }
   else if (m.type === 'chat_forget' && typeof m.id === 'string') { await forgetFact(m.id); ob({ kind: 'chat_facts', facts: introFacts() }); menu(); }
-  else if (m.type === 'ob_step') { config.onboardStep = Math.max(0, Math.min(5, m.step | 0)); saveConfig(); }
-  else if (m.type === 'ob_login' && OAUTH[m.provider]) oauthLogin(m.provider);
+  else if (m.type === 'ob_step') { config.onboardStep = Math.max(0, Math.min(6, m.step | 0)); saveConfig(); }
+  // Voice needs a working key first: without one, the guide asks for it (ob_fishkey) instead.
+  else if (m.type === 'ob_replies' && (m.mode === 'text' || (m.mode === 'voice' && speech.on))) { await fishKeyLoaded; await setReplies(m.mode); }
+  else if (m.type === 'ob_fishkey' && typeof m.key === 'string') {
+    const note = (text, bad) => ob({ kind: 'fish', ok: !bad, error: bad ? text : null });
+    await fishKeyLogin({ given: m.key.slice(0, 1000), thenVoice: true, note }).catch((e) => note(`Couldn't save the key: ${String(e?.message ?? e).slice(0, 80)}`, true));
+  }
+  else if (m.type === 'ob_login' && OAUTH[m.provider]) oauthLogin(m.provider, typeof m.id === 'string' ? m.id.slice(0, 40) : undefined);
+  else if (m.type === 'ob_login_cancel') cancelLogin(typeof m.id === 'string' ? m.id : undefined);
   else if (m.type === 'ob_apikey') apiKeyLogin(m.provider, String(m.key ?? '')).catch((e) => ob({ kind: 'login', provider: m.provider, phase: 'error', error: String(e?.message ?? e).slice(0, 120) }));
   else if (m.type === 'ob_files') ob({ kind: 'files', status: await filesStatus(!!m.request) });
   else if (m.type === 'set_actions') { config.allowActions = !!m.on; saveConfig(); menu(); obState(); }
@@ -1173,9 +1236,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     const label = PROVIDER_LABELS[m.provider] ?? m.provider;
     apiKeyLogin(m.provider, m.key.slice(0, 1000)).then(() => panelNote(signedIn.get(m.provider) ? `${label} is connected.` : `That ${label} key didn't work.`, !signedIn.get(m.provider)))
       .catch((e) => panelNote(`That ${label} key didn't work: ${String(e?.message ?? e).slice(0, 80)}`, true));
-  } else if (m.type === 'panel_fishkey' && typeof m.key === 'string') fishKeyLogin({ given: m.key.slice(0, 1000) }).catch((e) => console.error('fish key', e));
+  } else if (m.type === 'panel_fishkey' && typeof m.key === 'string') fishKeyLogin({ given: m.key.slice(0, 1000), note: panelNote }).catch((e) => console.error('fish key', e));
   else if (m.type === 'answer') { pending.get(m.id)?.(m.text ?? null); pending.delete(m.id); }
   else if (m.type === 'ui_ready') {
+    legacyClaude.then((gone) => { if (gone) { legacyClaude = Promise.resolve(false); say(`Claude sign-in works differently now. Sign in with Claude again on the Model page in ${PANEL}.`, 'concerned'); } });
     ui({ kind: 'sound', on: config.sound });
     ui({ kind: 'size', size: config.size });
     ui({ kind: 'look', look: config.look ?? 'classic' });
@@ -1195,6 +1259,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   Promise.race([flushWrites(), new Promise((r) => setTimeout(r, 3000))]).finally(() => process.exit(0));
 });
 
+// An old Claude sign-in token (from before Claude Code) no longer works: it's removed, and said once.
+let legacyClaude = auth.takeLegacyClaudeSignIn().catch(() => false);
+await legacyClaude;
 await refreshAuth();
 ensureModel();
 // Due commitments turn into a nudge, but only when Sidekick isn't mid-conversation.

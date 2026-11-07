@@ -41,9 +41,9 @@
 
     <section class="step" id="step-ai" data-name="Connect AI" aria-labelledby="h-2" hidden>
       <h1 id="h-2">Give me a brain</h1>
-      <p class="lead">Sign in with an AI account you have. Using GG Coder? You're already in.</p>
-      <p class="connected" id="connected" role="status" hidden></p>
-      <div class="providers" id="providers"></div>
+      <p class="lead" id="ai-lead">Sign in with an AI account you have. Using GG Coder? You're already in.</p>
+      <div class="providers two" id="providers"></div>
+      <div class="providers keys" id="key-providers" hidden></div>
       <form class="inline" id="code-form" hidden>
         <label for="code-input" id="code-label">Paste the code from your browser</label>
         <div class="field-row">
@@ -51,17 +51,37 @@
           <button class="px btn primary" type="submit">Submit</button>
         </div>
       </form>
-      <button class="link" type="button" id="key-toggle" aria-expanded="false" aria-controls="key-form">Use an API key instead</button>
       <form class="inline" id="key-form" hidden>
-        <label for="key-provider" class="sr-only">Provider</label>
+        <div class="label-row">
+          <label for="key-input" id="key-label">API key</label>
+          <button class="link" type="button" id="key-link" hidden>Get a key</button>
+        </div>
         <div class="field-row">
-          <span class="px field select"><select id="key-provider"></select></span>
-          <label for="key-input" class="sr-only">API key</label>
-          <span class="px field"><input id="key-input" type="password" placeholder="Paste API key" autocomplete="off" spellcheck="false"></span>
-          <button class="px btn primary" type="submit">Save</button>
+          <span class="px field"><input id="key-input" type="password" placeholder="Paste API key" autocomplete="off" spellcheck="false" maxlength="1000"></span>
+          <button class="px btn primary" type="submit" id="key-save">Save</button>
         </div>
       </form>
+      <button class="link" type="button" id="key-toggle">Use an API key instead</button>
       <p class="error" id="login-error" role="alert" hidden></p>
+    </section>
+
+    <section class="step" id="step-voice" data-name="Replies" aria-labelledby="h-voice" hidden>
+      <h1 id="h-voice">How should I reply?</h1>
+      <p class="lead">Text shows in my bubbles. Voice also says it out loud. Change it any time in the Roamies panel.</p>
+      <div class="providers two" id="replies" role="radiogroup" aria-labelledby="h-voice"></div>
+      <button class="link" type="button" id="fish-change" aria-controls="fish-form" aria-expanded="false" hidden>Change key</button>
+      <form class="inline" id="fish-form" hidden>
+        <div class="label-row">
+          <label for="fish-input" id="fish-label">Fish Audio API key</label>
+          <button class="link" type="button" id="fish-link">Get a free key</button>
+        </div>
+        <div class="field-row">
+          <span class="px field"><input id="fish-input" type="password" placeholder="Paste your key" autocomplete="off" spellcheck="false" maxlength="1000" aria-describedby="fish-note"></span>
+          <button class="px btn primary" type="submit" id="fish-save">Save</button>
+        </div>
+        <p class="note" id="fish-note">Spoken replies are billed to your own Fish Audio account.</p>
+      </form>
+      <p class="error" id="fish-error" role="alert" hidden></p>
     </section>
 
     <section class="step" id="step-keys" data-name="Shortcuts" aria-labelledby="h-3" hidden>
@@ -70,8 +90,8 @@
       <div class="px keyrow" id="talk-row">
         <div class="keyrow-head">
           <h2>Talk to me</h2>
-          <p>Hold, talk, let go. A quick tap listens hands-free.</p>
-          <p id="draw-tip" hidden>While holding, circle something with the cursor to mark it.</p>
+          <p>Hold to talk. Tap to listen hands-free.</p>
+          <p id="draw-tip" hidden>Hold and circle something to mark it.</p>
         </div>
         <div class="chords" id="chords" role="radiogroup" aria-label="Talk shortcut"></div>
         <div class="try" id="try">
@@ -144,6 +164,12 @@
 <p class="px quip" id="quip" aria-hidden="true"></p>
 <span class="quip-tail" id="quip-tail" aria-hidden="true"></span>
 <canvas class="roamie" id="roamie" aria-hidden="true"></canvas>
+<!-- Shortcuts step (Mac): a cursor holding the talk keys circles Roamie, the way the real pen marks things. -->
+<div class="pen-demo" id="pen-demo" aria-hidden="true" hidden>
+  <svg width="1" height="1"><g class="stroke" id="pen-stroke"><path class="rim" id="pen-rim"/><path class="ink" id="pen-ink"/></g>
+    <path class="arrow" id="pen-cursor" d="M0 0V15.5L4 11.8L6.6 18L9.3 16.9L6.8 10.9H12Z"/></svg>
+  <span class="pen-keys" id="pen-keys"></span>
+</div>
 
 <script>window.ROAMIE_AUTOSOUND = true;</script>
 <script src="../roamies/core.js"></script>

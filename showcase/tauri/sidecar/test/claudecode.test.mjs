@@ -1,0 +1,124 @@
+// The Claude Code route ("Sign in with Claude"), driven by a stubbed SDK query. Run: npm test
+import assert from 'node:assert/strict';
+import { z } from 'zod';
+import { ClaudeCodeAgent, fingerprint, resumeId } from '../claudecode.mjs';
+import { agentEvents } from '../agentstream.mjs';
+
+const SESSION = 'sess-1', TOOL_ID = 'toolu_1', MSG1 = 'msg_1', MSG2 = 'msg_2';
+const ev = (event) => ({ type: 'stream_event', event, parent_tool_use_id: null, session_id: SESSION });
+
+// A fake query(): connects to our MCP server like Claude Code does, calls one tool, then answers.
+function fakeQuery(script) {
+  const calls = { options: null, inputs: [], interrupts: 0, closes: 0 };
+  const query = ({ prompt, options }) => {
+    calls.options = options;
+    const inputs = prompt[Symbol.asyncIterator]();
+    let rpc;
+    const connect = async () => {
+      const waiting = new Map();
+      const transport = { onmessage: undefined, async send(msg) { waiting.get(msg.id)?.(msg); } };
+      await options.mcpServers.gg.instance.connect(transport);
+      let n = 0;
+      return (method, params) => new Promise((resolve) => { const id = ++n; waiting.set(id, resolve); transport.onmessage({ jsonrpc: '2.0', id, method, params }); });
+    };
+    const ctx = {
+      async nextInput() { const x = await inputs.next(); if (!x.done) calls.inputs.push(x.value); return x.value; },
+      async rpc(method, params) { rpc ??= await connect(); return rpc(method, params); },
+    };
+    return Object.assign(script(ctx), { interrupt: async () => { calls.interrupts++; }, close: () => { calls.closes++; } });
+  };
+  return { query, calls };
+}
+
+async function* toolRun(ctx) {
+  await ctx.nextInput();
+  yield { type: 'system', subtype: 'init', session_id: SESSION };
+  const listed = await ctx.rpc('tools/list', {});
+  assert.deepEqual(listed.result.tools.map((t) => t.name), ['read_file'], 'our tools are listed over MCP');
+  yield ev({ type: 'message_start', message: { id: MSG1, usage: { input_tokens: 10, cache_read_input_tokens: 4 } } });
+  yield ev({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'Checking. ' } });
+  yield { type: 'assistant', parent_tool_use_id: null, message: { id: MSG1, model: 'claude-haiku-5-5', content: [{ type: 'text', text: 'Checking. ' }, { type: 'tool_use', id: TOOL_ID, name: 'mcp__gg__read_file', input: { path: '~/a.txt' } }] } };
+  yield ev({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { input_tokens: 10, output_tokens: 5 } });
+  yield ev({ type: 'message_stop' });
+  const called = await ctx.rpc('tools/call', { name: 'read_file', arguments: { path: '~/a.txt' }, _meta: { 'claudecode/toolUseId': TOOL_ID } });
+  assert.deepEqual(called.result.content, [{ type: 'text', text: 'pancake' }], 'the tool result goes back to Claude Code');
+  yield { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: TOOL_ID, content: [{ type: 'text', text: 'pancake' }] }] } };
+  yield ev({ type: 'message_start', message: { id: MSG2, usage: {} } });
+  yield ev({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'It says pancake.' } });
+  yield { type: 'assistant', parent_tool_use_id: null, message: { id: MSG2, model: 'claude-haiku-5-5', content: [{ type: 'text', text: 'It says pancake.' }] } };
+  yield ev({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 20, output_tokens: 4 } });
+  yield ev({ type: 'message_stop' });
+  yield { type: 'result', subtype: 'success', is_error: false, result: 'It says pancake.', session_id: SESSION };
+}
+
+const ran = [];
+const readFile = { name: 'read_file', description: 'Read a file', parameters: z.object({ path: z.string() }), execute: async (a) => { ran.push(a.path); return 'pancake'; } };
+const { query, calls } = fakeQuery(toolRun);
+let saved = null;
+const agent = new ClaudeCodeAgent({
+  model: 'claude-haiku-5-5', system: 'You are Roamie.', tools: [readFile], maxTurns: 24, thinking: 'low',
+  priorMessages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: [{ type: 'text', text: 'hello!' }] }],
+  transformContext: (msgs) => msgs.map((m, i) => (i === msgs.length - 1 ? { ...m, content: `<live-state>now</live-state>\n\n${m.content}` } : m)),
+  executable: '/bin/claude', cwd: '/home/me', env: { A: '1' }, query, onRateLimit: () => {}, onResume: (s) => { saved = s; },
+});
+
+const types = [];
+for await (const e of agentEvents(agent.prompt('what is in a.txt?'))) types.push(e.type);
+assert.deepEqual(types, ['text_delta', 'turn_end', 'tool_call_start', 'tool_call_end', 'checkpoint', 'text_delta', 'turn_end', 'agent_done'], 'SDK messages map to agent events');
+assert.deepEqual(ran, ['~/a.txt'], 'the bridged tool ran once');
+
+const o = calls.options;
+assert.equal(o.systemPrompt.prompt, 'You are Roamie.');
+assert.deepEqual(o.tools, [], 'none of Claude Code\'s own tools');
+assert.deepEqual(o.allowedTools, ['mcp__gg__read_file']);
+assert.equal(o.cwd, '/home/me'); assert.equal(o.pathToClaudeCodeExecutable, '/bin/claude'); assert.deepEqual(o.env, { A: '1' });
+assert.equal(o.effort, 'low'); assert.equal(o.maxTurns, 24); assert.equal(o.resume, undefined, 'a fresh session');
+assert.deepEqual((await o.canUseTool('Bash', {})).behavior, 'deny', 'anything not ours is denied');
+const sent = calls.inputs[0].message.content.map((p) => p.text).join('\n');
+assert.match(sent, /<conversation_so_far>[\s\S]*User: hi[\s\S]*Assistant: hello!/, 'a fresh session is seeded with the history');
+assert.match(sent, /<live-state>now<\/live-state>\n\nwhat is in a\.txt\?$/, 'the pending turn carries the live block');
+
+const msgs = agent.getMessages();
+assert.deepEqual(msgs.map((m) => m.role), ['system', 'user', 'assistant', 'user', 'assistant', 'tool', 'assistant']);
+assert.equal(msgs[3].content, 'what is in a.txt?', 'the saved user turn has no live block');
+assert.deepEqual(msgs[4].content.map((p) => p.type), ['text', 'tool_call']);
+assert.equal(msgs[4].content[1].name, 'read_file', 'the MCP prefix is stripped');
+assert.equal(msgs[5].content[0].content, 'pancake');
+assert.equal(msgs[6].content[0].text, 'It says pancake.');
+assert.equal(calls.closes, 1, 'the query is closed after the run');
+
+// The next prompt continues the same Claude Code session, also after the agent is rebuilt from saved messages.
+assert.equal(saved.sessionId, SESSION);
+assert.equal(resumeId(saved, [...msgs, { role: 'user', content: 'and b?' }]), SESSION);
+const fromDisk = msgs.map((m) => JSON.parse(JSON.stringify(m)));
+assert.equal(resumeId(saved, [...fromDisk, { role: 'user', content: 'and b?' }]), SESSION, 'survives a save and reload');
+assert.equal(resumeId(saved, [...msgs, { role: 'assistant', content: 'other route' }, { role: 'user', content: 'x' }]), undefined, 'turns from another provider start fresh');
+assert.equal(resumeId(saved, msgs.slice(0, 3)), undefined, 'trimmed history starts fresh');
+assert.equal(fingerprint({ role: 'user', content: [{ type: 'text', text: 'a' }, { type: 'image', data: 'x' }] }), fingerprint({ role: 'user', content: [{ type: 'text', text: 'a' }, { type: 'image', data: '' }] }), 'old images dropped on save keep the fingerprint');
+
+// A failed run reaches the caller as an error, with Claude Code's own message.
+async function* failing(ctx) {
+  await ctx.nextInput();
+  yield { type: 'assistant', parent_tool_use_id: null, message: { id: 'x', model: '<synthetic>', content: [{ type: 'text', text: 'API Error: 401 not logged in' }] } };
+  yield { type: 'result', subtype: 'success', is_error: true, result: '' };
+}
+const bad = new ClaudeCodeAgent({ model: 'm', system: 's', tools: [], executable: '/bin/claude', cwd: '/', env: {}, query: fakeQuery(failing).query, onRateLimit: () => {} });
+await assert.rejects(async () => { for await (const _ of agentEvents(bad.prompt('hi'))); }, /401 not logged in/);
+
+// Stop: the run ends quietly and the dangling tool call gets a result.
+const stopper = fakeQuery(async function* (ctx) {
+  await ctx.nextInput();
+  yield { type: 'assistant', parent_tool_use_id: null, message: { id: 'y', model: 'm', content: [{ type: 'tool_use', id: 't9', name: 'mcp__gg__read_file', input: { path: 'x' } }] } };
+  await new Promise((r) => setTimeout(r, 30));
+  yield { type: 'result', subtype: 'error_during_execution', errors: [] };
+});
+const ctl = new AbortController();
+const stopped = new ClaudeCodeAgent({ model: 'm', system: 's', tools: [readFile], executable: '/bin/claude', cwd: '/', env: {}, query: stopper.query, signal: ctl.signal, onRateLimit: () => {} });
+setTimeout(() => ctl.abort(), 10);
+const stopTypes = [];
+for await (const e of agentEvents(stopped.prompt('go'))) stopTypes.push(e.type);
+assert.deepEqual(stopTypes, ['agent_done']);
+assert.equal(stopper.calls.interrupts, 1, 'Claude Code is interrupted');
+assert.equal(stopped.getMessages().at(-1).content[0].isError, true, 'the open tool call is closed');
+
+console.log('claudecode ok');

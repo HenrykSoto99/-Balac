@@ -194,8 +194,15 @@ h2 { margin: 0; font: 700 13px/1.35 var(--mono); font-stretch: 87.5%; color: var
 .switch[aria-checked="true"]::after { transform: translateX(20px); background: var(--accent); box-shadow: 0 0 8px rgba(120, 255, 226, 0.8); }
 
 /* ---------- providers ---------- */
-.connected { display: flex; align-items: center; gap: 10px; margin: -6px 0 14px; font-weight: 700; color: var(--accent); }
 .providers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+/* Four sign-ins and the two reply choices: two wide cards a row, room for "Downloading Claude Code… 40%". */
+.providers.two { grid-template-columns: repeat(2, 1fr); }
+/* Ten API-key providers: smaller cards, three a row. */
+.providers.keys { gap: 6px; margin-bottom: 10px; }
+.providers.keys .prov { align-items: center; padding: 8px 10px; font-size: 13px; white-space: nowrap; }
+.providers.keys .prov .led { margin-top: 0; }
+.providers.keys .prov[aria-pressed="true"] { color: var(--accent); }
+.providers[hidden] { display: none; }
 .prov {
   appearance: none; display: grid; grid-template-columns: 1fr auto; align-items: start; gap: 2px 8px;
   text-align: left; cursor: pointer; padding: 10px 12px; border: 0; color: var(--ink);
@@ -210,23 +217,27 @@ h2 { margin: 0; font: 700 13px/1.35 var(--mono); font-stretch: 87.5%; color: var
 .prov.busy { --bc: var(--accent); opacity: 1; }
 .prov.on { --bc: var(--accent); --fill: #0a2a28; }
 .prov.on small { color: var(--accent); }
+/* Picked (an API-key provider whose field is open, or a reply choice): a lit frame on the plain fill. */
+.prov[aria-pressed="true"], .prov[aria-checked="true"] { --bc: var(--accent); }
+.prov[aria-checked="true"] small { color: var(--accent); }
 
 .inline { margin: 4px 0 8px; }
 .inline label { display: block; margin-bottom: 6px; font-size: 12px; color: var(--ink-2); }
+/* A field's label with its "Get a key" link at the far end, on one baseline. */
+.label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+.label-row label { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.label-row .link { flex: none; padding: 0; }
+.link[hidden] { display: none; }
+#fish-change { margin: -6px 0 10px; }
+.note { margin: 8px 0 0; font-size: 11px; line-height: 1.4; color: var(--ink-3); }
 .field-row { display: flex; gap: 8px; }
 .field { display: flex; flex: 1; min-width: 0; --bc: var(--line-hi); --fill: #061719; }
-.field.select { flex: 0 0 160px; }
-input, select {
+input {
   min-width: 0; flex: 1; padding: 9px 12px; border: 0; background: transparent; color: var(--ink);
   font: 500 13px/1.25 var(--mono); font-stretch: 87.5%; user-select: text;
 }
 input::placeholder { color: var(--ink-3); }
-select {
-  appearance: none; padding-inline-end: 30px;
-  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h2v2H0zM2 2h2v2H2zM4 4h2v2H4zM6 2h2v2H6zM8 0h2v2H8z' fill='%23b4d8d1'/%3E%3C/svg%3E") no-repeat right 12px center;
-}
-select option { background: var(--panel); color: var(--ink); }
-input:focus-visible, select:focus-visible { outline: none; }
+input:focus-visible { outline: none; }
 
 /* ---------- shortcuts ---------- */
 .keyrow { padding: 13px 16px; margin-bottom: 9px; }
@@ -340,7 +351,27 @@ input:focus-visible, select:focus-visible { outline: none; }
 .quip.on + .quip-tail { opacity: 1; }
 .quip:empty, .quip:empty + .quip-tail { display: none; }
 
+/* ---------- drawing demo (shortcuts step, Mac) ----------
+   The real pen (voice/ink.swift): teal, a dark rim, a soft glow, dimmer until the loop snaps shut. */
+.pen-demo { position: fixed; left: 0; top: 0; z-index: 5; pointer-events: none; }
+.pen-demo[hidden] { display: none; }
+.pen-demo svg { position: absolute; left: 0; top: 0; overflow: visible; }
+.pen-demo .rim, .pen-demo .ink { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.pen-demo .rim { stroke: rgba(3, 39, 34, 0.6); stroke-width: 8.5; }
+.pen-demo .ink { stroke: var(--accent); stroke-width: 5.5; filter: drop-shadow(0 0 4px rgba(120, 255, 226, 0.75)); }
+.pen-demo .stroke { opacity: 0.55; }
+.pen-demo .stroke.snapped { opacity: 1; }
+.pen-demo .stroke.snapped .ink { animation: pen-snap .32s var(--ease); }
+@keyframes pen-snap { 50% { filter: drop-shadow(0 0 12px rgb(120, 255, 226)); } }
+.pen-demo .arrow { fill: #ffffff; stroke: #000000; stroke-width: 1.1; stroke-linejoin: round; }
+/* The talk keys, held down while the cursor moves: they ride along beside it. */
+.pen-keys { position: absolute; left: 0; top: 0; display: inline-flex; gap: 3px; }
+.pen-keys .cap { --bc: var(--line-hot); --fill: #0c2a2c; min-width: 24px; height: 24px; padding: 0 5px 2px; font-size: 12px; transition: transform .08s steps(2); }
+/* Held down: the thick bottom edge goes (the key sinks) and it lights up, like the real keys while drawing. */
+.pen-keys.down .cap { --bc: var(--accent); --fill: #0e3a36; --bw: 2px; transform: translateY(2px); color: var(--accent); filter: drop-shadow(0 0 5px rgba(120, 255, 226, 0.55)); }
+
 @media (prefers-reduced-motion: reduce) {
+  .pen-demo .stroke.snapped .ink { animation: none; }
   .step, .mb-me, .summon.recording .caps, .led.busy { animation: none; }
-  .px, .px::before, .link, .switch::after, .quip, .quip-tail, .progress li, .dl i { transition: none; }
+  .px, .px::before, .link, .switch::after, .quip, .quip-tail, .progress li, .dl i, .pen-keys .cap { transition: none; }
 }

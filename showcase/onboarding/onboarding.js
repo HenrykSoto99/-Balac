@@ -1,4 +1,4 @@
-// Setup guide: Welcome → Permissions → Connect AI → Shortcuts → Find me.
+// Setup guide: Welcome → Permissions → Connect AI → Replies → Shortcuts → About you → Find me.
 // The Sidekick lives on the left: it drops in on each step, points at what needs doing, cheers when
 // something gets done and listens when you test your voice. Talks to the app through Tauri commands;
 // opened in a plain browser it runs a simulated preview instead.
@@ -77,7 +77,8 @@
     const dt = Math.min(1 / 30, (now - last) / 1000);
     last = now; clock += dt; env.t += dt; env.reduced = reduced.matches;
     // Eyes follow the cursor; when it's outside the window, they rest on the panel instead of wandering.
-    if (!env.mouse.active) Object.assign(env.mouse, { x: 520, y: m.y - 20, inside: true, active: true, idle: true });
+    // While the drawing demo runs, they watch its cursor instead.
+    if (!env.mouse.active) Object.assign(env.mouse, { ...(penDemo.eye ?? { x: 520, y: m.y - 20 }), inside: true, active: true, idle: true });
     sidekick.update(dt, env);
     if (env.mouse.idle) Object.assign(env.mouse, { active: false, idle: false });
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -101,6 +102,7 @@
       tailEl.style.left = `${clamp(m.x, qx - 100, qx + 100)}px`; tailEl.style.top = `${qy - 0.5}px`;
     }
     voice.drawMeter(dt);
+    penDemo.draw(dt);
     requestAnimationFrame(frame);
   }
   function resize() {
@@ -284,6 +286,8 @@
     },
     enter() {
       perms.since = clock;
+      // Allow was tapped in an earlier run: the folders can be read (no prompt), so check them now.
+      if (state?.filesAsked) perms.asked.files = true;
       for (const r of perms.rows()) if (perms.status(r.id) === 'granted') perms.seen.add(r.id);
       perms.render();
       // Hint after the first status check, so it matches what's actually left to allow.
@@ -295,7 +299,7 @@
       }, 900);
       const tick = async () => {
         perms.apply(await invoke('perm_status'));
-        // Probe folders only after Allow was tapped in this run: reading them is the permission prompt.
+        // Probe folders only after Allow was tapped (now or in an earlier run): the first read is the permission prompt.
         if (perms.asked.files) send({ type: 'ob_files', request: false });
         perms.render();
       };
@@ -335,35 +339,89 @@
   }
 
   // ---------------------------------------------------------------- step 2: connect AI
+  // Sign-in cards, or (Use an API key instead) a card per key provider with a field for its key. A sign-in can
+  // always be cancelled (click its card again) or swapped for another (click that one), and gives up after
+  // 3 minutes, so a browser tab closed halfway never leaves it stuck on "Waiting".
+  const LOGIN_MS = 3 * 60_000;
   const ai = {
-    busy: null, keyOpen: false,
+    busy: null, loginId: null, status: '', timer: null, mode: 'signin', key: null, keyBusy: null,
     render() {
-      const conn = $('connected');
-      conn.hidden = !state?.connected;
-      if (state?.connected) conn.replaceChildren(led(), `Connected to ${state.connected.provider} · ${state.connected.model}`);
+      $('ai-lead').textContent = ai.mode === 'key' ? 'Pick where your key is from, then paste it.' : "Sign in with an AI account you have. Using GG Coder? You're already in.";
+      $('providers').hidden = ai.mode !== 'signin';
+      $('key-providers').hidden = ai.mode !== 'key';
+      $('key-toggle').textContent = ai.mode === 'key' ? 'Sign in instead' : 'Use an API key instead';
       $('providers').replaceChildren(...(state?.oauth ?? []).map((p) => {
         const busy = ai.busy === p.id;
         const b = el('button', { className: `px prov${p.connected ? ' on' : ''}${busy ? ' busy' : ''}`, type: 'button' },
           el('span', { textContent: p.name }), led(p.connected ? 'on' : busy ? 'busy' : ''),
-          el('small', { textContent: busy ? 'Waiting for browser…' : p.connected ? 'Connected' : p.company }));
-        b.disabled = !!ai.busy && ai.busy !== p.id;
-        b.onclick = () => ai.login(p);
+          el('small', { textContent: busy ? ai.waitText() : p.connected ? 'Connected' : p.company }));
+        if (busy) b.setAttribute('aria-label', `${p.name}: ${ai.waitText()}. Click to cancel.`);
+        b.onclick = () => (busy ? ai.cancel() : ai.login(p));
         return b;
       }));
-      const sel = $('key-provider');
-      if (!sel.options.length) for (const p of state?.apikey ?? []) sel.append(el('option', { value: p.id, textContent: p.name }));
+      $('key-providers').replaceChildren(...(state?.apikey ?? []).map((p) => {
+        const busy = ai.keyBusy === p.id;
+        // One line each, so ten fit with the key field under them: the light says Connected (and the field's label).
+        const b = el('button', { className: `px prov${p.connected ? ' on' : ''}${busy ? ' busy' : ''}`, type: 'button', title: p.connected ? `${p.name}: connected` : '' },
+          el('span', { textContent: p.name }), led(p.connected ? 'on' : busy ? 'busy' : ''));
+        b.setAttribute('aria-label', `${p.name}${busy ? ', checking the key' : p.connected ? ', connected' : ''}`);
+        b.setAttribute('aria-pressed', String(ai.key === p.id));
+        b.onclick = () => ai.pickKey(p);
+        return b;
+      }));
+      const k = (state?.apikey ?? []).find((p) => p.id === ai.key);
+      $('key-form').hidden = ai.mode !== 'key' || !k;
+      if (k) {
+        $('key-label').textContent = k.connected ? `${k.name} is connected. Paste a new key to replace it` : `Paste your ${k.name} API key`;
+        $('key-link').hidden = !k.link;
+        $('key-link').setAttribute('aria-label', `Get a ${k.name} API key (opens your browser)`);
+        $('key-save').disabled = !!ai.keyBusy;
+      }
       nav();
     },
+    // What the waiting card says: Claude's download progress, else how to get out of it.
+    waitText() {
+      const st = ai.status, pct = /(\d+)%/.exec(st)?.[1], mb = /(\d+) MB/.exec(st)?.[1];
+      if (/^Downloading/.test(st)) return pct ? `Downloading ${pct}%` : mb ? `Downloading ${mb} MB` : 'Downloading…';
+      if (/^Checking/.test(st)) return 'Checking download…';
+      if (/^Unpacking/.test(st)) return 'Unpacking…';
+      return 'Waiting… click to cancel';
+    },
     login(p) {
-      if (ai.busy) return;
-      ai.busy = p.id; $('login-error').hidden = true; ai.render();
+      if (ai.busy) ai.stop();
+      ai.busy = p.id; ai.status = ''; ai.loginId = `g${Date.now().toString(36)}`;
+      $('login-error').hidden = true; ai.render();
       poseFn = POSE.think();
-      quip("Sign in there. I'll wait!", 3.2);
-      send({ type: 'ob_login', provider: p.id });
+      quip(p.id === 'anthropic' ? 'Claude takes a minute' : "Sign in there. I'll wait!", 3.2);
+      send({ type: 'ob_login', provider: p.id, id: ai.loginId });
+      ai.arm();
+    },
+    // The 3 minutes restart whenever there's progress (Claude's one-time download can take a while).
+    arm() { clearTimeout(ai.timer); ai.timer = setTimeout(() => ai.cancel('Took too long. Try again?'), LOGIN_MS); },
+    stop() {
+      clearTimeout(ai.timer);
+      if (ai.loginId) send({ type: 'ob_login_cancel', id: ai.loginId });
+      ai.busy = null; ai.loginId = null; ai.status = ''; poseFn = null;
+      askId = null; $('code-form').hidden = true;
+    },
+    cancel(why) {
+      if (!ai.busy) return;
+      ai.stop();
+      if (why) { const e = $('login-error'); e.hidden = false; e.textContent = e.title = why; quip('Hmm. Try again?'); }
+      else quip('Okay, stopped.');
+      ai.render();
+    },
+    pickKey(p) {
+      ai.key = p.id; $('login-error').hidden = true; ai.render();
+      $('key-input').focus();
     },
     onLogin(msg) {
+      // A key save has no id; a sign-in's messages carry the one this guide gave it. Older attempts are ignored.
+      if (msg.id == null ? ai.keyBusy !== msg.provider : msg.id !== ai.loginId) return;
       if (msg.phase === 'browser') return;
-      ai.busy = null; poseFn = null;
+      if (msg.phase === 'status') { ai.status = String(msg.text ?? ''); ai.arm(); ai.render(); return; }
+      clearTimeout(ai.timer);
+      ai.busy = null; ai.loginId = null; ai.status = ''; ai.keyBusy = null; poseFn = null;
       if (msg.phase === 'done') { act('hype'); quip('Ooh, a brain!'); $('code-form').hidden = true; }
       else { const e = $('login-error'); e.hidden = false; e.textContent = e.title = `That didn't work: ${msg.error}`; quip('Hmm. Try again?'); }
       ai.render();
@@ -375,7 +433,8 @@
       else poseFn = POSE.point(1.7, 0.05);
       aim($('providers'));
     },
-    leave() { poseFn = null; },
+    // A sign-in carries on after leaving the step; it's only cancelled by the card or the timeout.
+    leave() { if (!ai.busy) poseFn = null; },
   };
   let askId = null;
   $('code-form').addEventListener('submit', (e) => {
@@ -386,22 +445,107 @@
     askId = null; $('code-form').hidden = true; $('code-input').value = '';
   });
   $('key-toggle').addEventListener('click', () => {
-    ai.keyOpen = !ai.keyOpen;
-    $('key-form').hidden = !ai.keyOpen;
-    $('key-toggle').setAttribute('aria-expanded', String(ai.keyOpen));
-    if (ai.keyOpen) $('key-input').focus();
+    ai.mode = ai.mode === 'key' ? 'signin' : 'key';
+    $('login-error').hidden = true;
+    ai.render();
+    $(ai.mode === 'key' ? 'key-providers' : 'providers').querySelector('button')?.focus();
+  });
+  $('key-link').addEventListener('click', () => {
+    const k = (state?.apikey ?? []).find((p) => p.id === ai.key);
+    if (k?.link) { send({ type: 'open_link', url: k.link }); quip('Copy it, then paste here'); }
   });
   $('key-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const key = $('key-input').value.trim();
-    if (!key) return $('key-input').focus();
-    ai.busy = $('key-provider').value; ai.render();
+    if (!key || !ai.key) return $('key-input').focus();
+    ai.keyBusy = ai.key; ai.render();
     poseFn = POSE.think();
-    send({ type: 'ob_apikey', provider: ai.busy, key });
+    send({ type: 'ob_apikey', provider: ai.key, key });
     $('key-input').value = '';
   });
 
-  // ---------------------------------------------------------------- step 3: shortcuts
+  // ---------------------------------------------------------------- step 3: how replies come
+  // Text only, or Voice + text (spoken with Fish Audio). Voice needs the user's own Fish Audio key: picking it
+  // opens the field, and the key is checked before voice turns on.
+  // Ken's Fish Audio referral link (sign-up lands on their site; keys are under Developers).
+  const FISH_URL = 'https://fish.audio/?aff=XJ3PAOHK3INL4';
+  const replies = {
+    pick: null, saving: false, changing: false, // changing: replacing a key that's already saved
+    mode: () => replies.pick ?? (state?.replies === 'voice' ? 'voice' : 'text'),
+    ready: () => replies.mode() === 'text' || (!!state?.fishKey && state.replies === 'voice'),
+    render() {
+      const mode = replies.mode(), on = state?.replies === 'voice' && state?.fishKey;
+      const CARDS = [
+        ['text', 'Text only', 'Answers in my bubbles'],
+        ['voice', 'Voice + text', on ? 'Voice is on' : mode === 'voice' ? 'Needs a Fish Audio key' : 'Said out loud too'],
+      ];
+      $('replies').replaceChildren(...CARDS.map(([id, name, sub]) => {
+        const checked = mode === id;
+        const b = el('button', { className: `px prov${id === 'voice' && on ? ' on' : ''}`, type: 'button', role: 'radio', tabIndex: checked ? 0 : -1 },
+          el('span', { textContent: name }), led(checked ? 'on' : ''), el('small', { textContent: sub }));
+        b.setAttribute('aria-checked', String(checked));
+        b.onclick = () => replies.choose(id);
+        return b;
+      }));
+      const saved = !!state?.fishKey;
+      if (!saved || mode !== 'voice') replies.changing = false;
+      $('fish-form').hidden = mode !== 'voice' || (saved && !replies.changing);
+      $('fish-change').hidden = !saved || mode !== 'voice';
+      $('fish-change').textContent = replies.changing ? 'Keep my current key' : 'Change key';
+      $('fish-label').textContent = replies.changing ? 'New Fish Audio API key' : 'Fish Audio API key';
+      $('fish-change').setAttribute('aria-expanded', String(replies.changing));
+      $('fish-save').disabled = replies.saving;
+      $('fish-save').textContent = replies.saving ? 'Checking…' : 'Save';
+      nav();
+    },
+    choose(id) {
+      if (replies.mode() === id && (id === 'text' || state?.replies === 'voice')) return;
+      replies.pick = id; $('fish-error').hidden = true;
+      if (id === 'text' || state?.fishKey) {
+        if (state?.replies === id) quip(id === 'text' ? 'Text it is!' : 'Voice it is!');
+        send({ type: 'ob_replies', mode: id });
+      }
+      replies.render();
+      if (id === 'voice' && !state?.fishKey) { $('fish-input').focus(); quip('Got a Fish Audio key?', 3); }
+    },
+    onFish(msg) {
+      replies.saving = false;
+      if (msg.ok) { act('hype'); $('fish-error').hidden = true; replies.changing = false; }
+      else { const e = $('fish-error'); e.hidden = false; e.textContent = e.title = msg.error || "That key didn't work."; }
+      replies.render();
+    },
+    enter() {
+      replies.render();
+      poseFn = POSE.point(1.7, 0.05);
+      aim($('replies'));
+      setTimeout(() => at('voice') && quip('Should I talk out loud?', 3), 700);
+    },
+    leave() { poseFn = null; },
+  };
+  $('replies').addEventListener('keydown', (e) => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+    e.preventDefault();
+    const next = replies.mode() === 'text' ? 'voice' : 'text';
+    replies.choose(next);
+    requestAnimationFrame(() => $('replies').children[next === 'text' ? 0 : 1]?.focus());
+  });
+  $('fish-change').addEventListener('click', () => {
+    replies.changing = !replies.changing; $('fish-error').hidden = true; $('fish-input').value = '';
+    replies.render();
+    if (replies.changing) $('fish-input').focus();
+  });
+  $('fish-link').addEventListener('click', () => { send({ type: 'open_link', url: FISH_URL }); quip('Copy it, then paste here'); });
+  $('fish-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const key = $('fish-input').value.trim();
+    if (!key || replies.saving) return $('fish-input').focus();
+    replies.saving = true; $('fish-error').hidden = true; replies.render();
+    poseFn = POSE.think();
+    send({ type: 'ob_fishkey', key });
+    $('fish-input').value = '';
+  });
+
+  // ---------------------------------------------------------------- step 4: shortcuts
   const MAC_CHORDS = [['control', 'option'], ['option', 'command'], ['control', 'command'], ['control', 'shift'], ['option', 'shift']];
   // Windows: no Win key (letting go of it opens Start) and no Alt+Shift (it switches keyboard layout).
   const PC_CHORDS = [['control', 'option'], ['control', 'shift']];
@@ -428,8 +572,12 @@
       else if (msg.type === 'state' && msg.state === 'processing') { voice.listening = false; }
       else if (msg.type === 'final') {
         voice.listening = false; poseFn = null;
-        heard.textContent = `“${msg.text}”`;
-        act('hype'); quip('I heard you!'); sfx('heard');
+        // Drawing (Mac): circling something while holding the keys marks it; the words arrive with that area.
+        const drew = isMac() && !!msg.area;
+        heard.textContent = drew ? `“${msg.text}” + your circle` : `“${msg.text}”`;
+        act('hype'); quip(drew ? 'I saw your circle!' : keys.heard && isMac() && !keys.drew ? 'Now try circling!' : 'I heard you!'); sfx('heard');
+        if (drew) keys.drew = true; else keys.heard = true;
+        keys.tryLabel();
       } else if (msg.type === 'state' && msg.state === 'idle') { voice.listening = false; if (poseFn) poseFn = null; }
       else if (msg.type === 'error') {
         voice.listening = false; poseFn = null;
@@ -440,7 +588,7 @@
   };
   // Recorder for the two letter-key shortcuts: 'summon' (show/hide) and 'snap' (ask about an area).
   const keys = {
-    recording: null,
+    recording: null, heard: false, drew: false,
     render() {
       const k = state?.keys; if (!k) return;
       $('talk-row').hidden = !state.voice;
@@ -463,6 +611,8 @@
       const k = state?.keys, vm = state?.voiceModel; if (!k) return;
       const tl = $('try-label');
       if (!isMac() && vm && vm.status !== 'ready') tl.replaceChildren(vm.status === 'downloading' ? `Try it once my voice has downloaded (${pctOf(vm)}%).` : 'Download my voice in step 2 to try it.');
+      // Mac: once talking worked, the next try teaches drawing (circle something while holding the keys).
+      else if (isMac() && keys.heard && !keys.drew) tl.replaceChildren('Now hold ', capsEl(capsFor(k.talk)), ' and circle something as you ask');
       else tl.replaceChildren('Try it: hold ', capsEl(capsFor(k.talk)), ' and say hi');
     },
     record(which) {
@@ -484,6 +634,62 @@
     enter() { keys.render(); aim($('chords')); setTimeout(() => at('keys') && quip(state?.voice ? 'Try talking to me!' : 'Your shortcuts'), 700); },
     leave() { if (keys.recording) keys.stop(); poseFn = null; voice.listening = false; },
   };
+  // Drawing, shown not told (Mac): a cursor holding the talk keys circles Roamie and the loop snaps shut, like the
+  // real pen. It loops while the step is open, pauses while they try talking or record a shortcut, and holds
+  // still as a finished circle with reduced motion.
+  const penDemo = {
+    t: 0, eye: null, keysFor: '',
+    LOOP: 6, START: 0.4, DRAW: 1.7,
+    on: () => at('keys') && isMac() && !!state?.voice && !keys.recording && !voice.listening && !sidekick.hidden,
+    // A hand-drawn loop: starts top left, goes clockwise, a little wobbly, and overlaps its start before it closes.
+    points(r) {
+      const pts = [], a0 = -2.3, span = Math.PI * 2 + 0.35, n = 80;
+      for (let i = 0; i <= n; i++) {
+        const f = i / n, a = a0 + span * f, rr = r * (1 + 0.05 * Math.sin(2 * a + 0.7) + 0.05 * f);
+        pts.push([Math.cos(a) * rr * 1.08, Math.sin(a) * rr * 0.94 - r * 0.04]);
+      }
+      return pts;
+    },
+    path: (pts) => pts.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)} ${y.toFixed(1)}`).join(''),
+    draw(dt) {
+      const box = $('pen-demo');
+      if (!penDemo.on()) { if (!box.hidden) { box.hidden = true; penDemo.t = 0; } penDemo.eye = null; return; }
+      // A new go waits until the speech bubble is gone: the loop runs round where it sits.
+      if (!reduced.matches && penDemo.t === 0 && quipText && clock < quipUntil + 0.3) { box.hidden = true; penDemo.eye = null; return; }
+      box.hidden = false;
+      const caps = capsFor(state.keys.talk).join('');
+      if (penDemo.keysFor !== caps) { penDemo.keysFor = caps; fillCaps($('pen-keys'), capsFor(state.keys.talk)); }
+      const still = reduced.matches;
+      penDemo.t = still ? penDemo.START + penDemo.DRAW + 0.5 : penDemo.t + dt >= penDemo.LOOP ? 0 : penDemo.t + dt;
+      const t = penDemo.t, pts = penDemo.points((K?.R ?? 50) * 1.6);
+      const f = Math.min(1, Math.max(0, (t - penDemo.START) / penDemo.DRAW));
+      const eased = f < 0.5 ? 2 * f * f : 1 - (-2 * f + 2) ** 2 / 2;
+      const shown = pts.slice(0, Math.max(1, Math.round(eased * (pts.length - 1)) + 1));
+      const d = penDemo.path(shown);
+      $('pen-ink').setAttribute('d', d); $('pen-rim').setAttribute('d', d);
+      const snapped = f >= 1;
+      $('pen-stroke').classList.toggle('snapped', snapped);
+      // The cursor leads the ink, then drifts off after the snap; everything fades before the next go.
+      // Outward from Roamie, so the cursor and keys never cover it.
+      const head = shown.at(-1), drift = snapped ? Math.min(1, (t - penDemo.START - penDemo.DRAW) / 1.2) : 0;
+      const len = Math.hypot(head[0], head[1]) || 1, ux = head[0] / len, uy = head[1] / len;
+      const cx = head[0] + ux * drift * 24, cy = head[1] + uy * drift * 24;
+      const fade = still ? 1 : t < 0.15 ? t / 0.15 : t > 4 ? Math.max(0, 1 - (t - 4) / 0.5) : 1;
+      // The keys go down first, stay held while it draws, and come back up a moment after the snap.
+      const held = still || (t > 0.2 && t < penDemo.START + penDemo.DRAW + 0.6);
+      $('pen-stroke').style.opacity = fade < 1 ? String(fade * (snapped ? 1 : 0.55)) : '';
+      $('pen-cursor').setAttribute('transform', `translate(${cx.toFixed(1)} ${cy.toFixed(1)})`);
+      $('pen-cursor').style.opacity = still ? '0' : String(fade);
+      const k = $('pen-keys');
+      const kx = (still ? pts[0][0] : cx) + ux * 38 - 26, ky = (still ? pts[0][1] : cy) + uy * 32 - 12;
+      k.style.transform = `translate(${(m.x + kx).toFixed(1)}px, ${(m.y + ky).toFixed(1)}px)`;
+      k.style.opacity = String(fade);
+      k.classList.toggle('down', held);
+      box.querySelector('svg').style.transform = `translate(${m.x.toFixed(1)}px, ${m.y.toFixed(1)}px)`;
+      penDemo.eye = still ? null : { x: m.x + cx, y: m.y + cy };
+    },
+  };
+
   for (const id of ['chords', 'looks', 'sizes']) $(id).addEventListener('keydown', (e) => {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
     e.preventDefault();
@@ -506,13 +712,13 @@
     act('hype'); quip('Got it!');
   }, true);
 
-  // ---------------------------------------------------------------- step 4: find me
+  // ---------------------------------------------------------------- step 5: find me
   const find = {
     enter() {
       const k = state?.keys;
       const recap = $('recap');
       recap.replaceChildren();
-      if (state?.voice && k) recap.append(el('dt', {}, capsEl(capsFor(k.talk))), el('dd', { textContent: 'Hold to talk to me' }));
+      if (state?.voice && k) recap.append(el('dt', {}, capsEl(capsFor(k.talk))), el('dd', { textContent: isMac() ? 'Hold to talk to me. Circle something to mark it' : 'Hold to talk to me' }));
       if (k) recap.append(el('dt', {}, capsEl(accelCaps(k.summon))), el('dd', { textContent: 'Show or hide me' }));
       if (k?.snap && isMac()) recap.append(el('dt', {}, capsEl(accelCaps(k.snap))), el('dd', { textContent: 'Ask about an area of the screen' }));
       const tray = el('span', { className: 'caps' }); const cap = el('kbd', { className: 'px cap' }); cap.innerHTML = TRAY_SVG; tray.append(cap);
@@ -773,6 +979,7 @@
     // Windows: the voice download is optional, so it can be skipped.
     { name: 'perms', enter: 'materialize', next: 'Continue', onEnter: perms.enter, onLeave: perms.leave, ready: () => perms.done(), get skip() { return !isMac(); } },
     { name: 'ai', enter: 'crt', next: 'Continue', onEnter: ai.enter, onLeave: ai.leave, ready: () => !!state?.connected, skip: true },
+    { name: 'voice', enter: 'materialize', next: 'Continue', onEnter: replies.enter, onLeave: replies.leave, ready: () => replies.ready(), skip: true },
     { name: 'keys', enter: 'materialize', next: 'Continue', onEnter: keys.enter, onLeave: keys.leave },
     { name: 'chat', enter: 'crt', next: 'Send', onEnter: () => chat.enter(), onLeave: () => chat.leave(), nav: () => chat.nav(), onNext: () => chat.next(), onSkip: () => chat.skip() },
     { name: 'find', enter: 'drop', next: 'Done', onEnter: find.enter, onLeave: find.leave },
@@ -843,10 +1050,11 @@
         if (first) { sidekick.setLook?.(msg.look); sidekick.setForm?.(msg.size); }
         if (at('welcome')) look.render();
         if (first) go(MODE === 'chat' ? 0 : clamp(msg.step | 0, 0, STEPS.length - 1));
-        else { if (at('perms')) perms.render(); if (at('ai')) ai.render(); if (at('keys')) keys.render(); }
+        else { if (at('perms')) perms.render(); if (at('ai')) ai.render(); if (at('voice')) replies.render(); if (at('keys')) keys.render(); }
         break;
       }
       case 'login': ai.onLogin(msg); break;
+      case 'fish': replies.onFish(msg); break;
       case 'ask':
         askId = msg.id;
         $('code-label').textContent = msg.prompt || 'Paste the code from your browser';
@@ -890,13 +1098,17 @@
     // ?platform=win32 previews Windows (&blocked=1: microphone switched off in Privacy settings; &model=downloading|ready|error).
     const sys = win ? { type: 'perms', mic: q.get('blocked') === '1' ? 'denied' : 'granted', input: true } : { type: 'perms', mic: pre, speech: old ? pre : 'granted', speechNeeded: old, screen: pre, accessibility: pre };
     const st = {
-      kind: 'state', platform: q.get('platform') || 'darwin', step: +(q.get('step') || 0), sound: true, look: q.get('look') || 'classic', size: q.get('size') || 'default', voice: true, actions: false, login: true, filesAsked: false,
+      // &filesAsked=1: Allow was tapped for the folders in an earlier run. &replies=voice&fish=1: voice already on.
+      kind: 'state', platform: q.get('platform') || 'darwin', step: +(q.get('step') || 0), sound: true, look: q.get('look') || 'classic', size: q.get('size') || 'default', voice: true, actions: false, login: true, filesAsked: q.get('filesAsked') === '1',
+      replies: q.get('replies') === 'voice' ? 'voice' : 'text', fishKey: q.get('fish') === '1',
       keys: q.get('platform') === 'win32' ? { talk: ['control', 'option'], summon: 'Control+Shift+KeyS', snap: 'Control+Shift+KeyA' } : { talk: ['control', 'option'], summon: 'Control+Alt+KeyS', snap: 'Control+Alt+KeyA' }, connected: null,
       voiceModel: win ? { status: q.get('model') || 'missing', done: q.get('model') === 'downloading' ? 281601575 : 0, total: 670479942, error: q.get('model') === 'error' ? 'Download failed. Check your internet.' : null, size: '670 MB' } : null,
-      oauth: [['anthropic', 'Claude', 'Anthropic'], ['openai', 'ChatGPT', 'OpenAI'], ['gemini', 'Gemini', 'Google'], ['xai', 'Grok', 'xAI'], ['moonshot', 'Kimi', 'Moonshot']].map(([id, name, company]) => ({ id, name, company, connected: false })),
-      apikey: [['openrouter', 'OpenRouter'], ['deepseek', 'DeepSeek'], ['glm', 'Z.AI (GLM)']].map(([id, name]) => ({ id, name, connected: false })),
+      oauth: [['anthropic', 'Claude', 'Anthropic'], ['openai', 'ChatGPT', 'OpenAI'], ['moonshot', 'Kimi', 'Moonshot'], ['xai', 'Grok', 'xAI']].map(([id, name, company]) => ({ id, name, company, connected: false })),
+      apikey: [['anthropic', 'Anthropic'], ['xai', 'xAI'], ['moonshot', 'Moonshot'], ['glm', 'Z.AI'], ['minimax', 'MiniMax'], ['xiaomi', 'Xiaomi MiMo'], ['deepseek', 'DeepSeek'], ['sakana', 'Sakana'], ['openrouter', 'OpenRouter'], ['huggingface', 'Hugging Face']]
+        .map(([id, name]) => ({ id, name, connected: id === 'openrouter' && q.get('keys') === '1', link: id === 'xiaomi' ? null : `https://example.com/${id}` })),
     };
-    let filesAsked = false;
+    let filesAsked = st.filesAsked;
+    const logins = new Map(); // sign-in id → its timers, so Cancel stops the simulated one
     const reply = (m, ms = 0) => setTimeout(() => window.__onboard?.(m), ms);
     return async (cmd, args) => {
       if (cmd === 'perm_status') return { ...sys };
@@ -909,8 +1121,27 @@
       if (m.type === 'ob_hello') reply(st, 50);
       else if (m.type === 'ob_files') { if (m.request) filesAsked = true; reply({ kind: 'files', status: Object.fromEntries(['Desktop', 'Documents', 'Downloads'].map((f) => [f, filesAsked ? 'granted' : 'unknown'])) }, m.request ? 1200 : 0); }
       else if (m.type === 'ob_login') {
-        reply({ kind: 'login', provider: m.provider, phase: 'browser' }, 300);
-        setTimeout(() => { st.connected = { provider: 'Anthropic', model: 'Claude Haiku 5.5' }; st.oauth[0].connected = true; reply({ kind: 'login', provider: m.provider, phase: 'done' }); reply({ ...st }); }, 1800);
+        // Claude: the one-time download, then the browser. &login=hang: the browser never comes back (cancel or time out).
+        const id = m.id, t = [], at = (ms, f) => t.push(setTimeout(f, ms));
+        logins.set(id, t);
+        let ms = 300;
+        if (m.provider === 'anthropic') for (const pct of [0, 12, 31, 55, 78, 100]) at((ms += 450), () => window.__onboard?.({ kind: 'login', provider: m.provider, id, phase: 'status', text: `Downloading Claude Code… ${pct}% (${Math.round(pct * 1.4)} of 140 MB)` }));
+        at((ms += 300), () => window.__onboard?.({ kind: 'login', provider: m.provider, id, phase: 'browser' }));
+        if (q.get('login') !== 'hang') at(ms + 1500, () => { st.connected = { provider: 'Anthropic', model: 'Claude Haiku 5.5' }; st.oauth.find((p) => p.id === m.provider).connected = true; window.__onboard?.({ kind: 'login', provider: m.provider, id, phase: 'done' }); window.__onboard?.({ ...st }); });
+      } else if (m.type === 'ob_login_cancel') { (logins.get(m.id) ?? []).forEach(clearTimeout); logins.delete(m.id); }
+      else if (m.type === 'ob_apikey') {
+        setTimeout(() => {
+          if (m.key === 'bad') return window.__onboard?.({ kind: 'login', provider: m.provider, phase: 'error', error: 'That key was refused.' });
+          st.apikey.find((p) => p.id === m.provider).connected = true; st.connected = { provider: m.provider, model: 'A model' };
+          window.__onboard?.({ kind: 'login', provider: m.provider, phase: 'done' }); window.__onboard?.({ ...st });
+        }, 900);
+      } else if (m.type === 'ob_replies') { st.replies = m.mode; reply({ ...st }); reply({ kind: 'say', text: m.mode === 'voice' ? 'Voice is on!' : 'Text only from now on.' }, 50); }
+      else if (m.type === 'ob_fishkey') {
+        // A key of "bad" is refused, like a wrong one.
+        setTimeout(() => {
+          if (m.key === 'bad') return window.__onboard?.({ kind: 'fish', ok: false, error: "That key didn't work. Copy it again from fish.audio and retry." });
+          Object.assign(st, { fishKey: true, replies: 'voice' }); window.__onboard?.({ kind: 'fish', ok: true }); window.__onboard?.({ ...st });
+        }, 900);
       } else if (m.type === 'set_keys') { if (m.talk) st.keys.talk = m.talk; if (m.summon) st.keys.summon = m.summon; if (m.snap) st.keys.snap = m.snap; reply({ kind: 'keys', keys: st.keys }); }
       else if (m.type === 'chat_start' || m.type === 'chat_answer') {
         // A canned chat: &chat=nomodel previews not being signed in.

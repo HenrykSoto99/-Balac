@@ -310,6 +310,9 @@
     return el('div', { className: 'keyform', hidden: ui.key !== id }, el('span', { className: 'px field' }, input), btn('Save', save, { k: `save:${id}` }));
   }
 
+  const signIn = (p) => link('Sign in', () => act(`login:${p.id}`), { k: `login:${p.id}`, aria: `Sign in to ${p.label}`, disabled: !!state.loggingIn });
+  const addKey = (p) => link(ui.key === p.id ? 'Cancel' : 'Add key', () => { ui.key = ui.key === p.id ? null : p.id; render(ui.key ? `key-${p.id}` : `addkey:${p.id}`); }, { k: `addkey:${p.id}`, aria: `Add ${p.label} API key` });
+
   // Settings, one page per concern.
   function modelPage() {
     const on = state.providers.filter((p) => p.on);
@@ -327,9 +330,9 @@
             el('span', {}, p.label),
             p.on ? el('span', { className: 'ok' }, el('span', { className: 'led on', 'aria-hidden': 'true' }), 'Signed in')
               : state.loggingIn === p.id ? el('span', { className: 'waiting', textContent: 'Signing in…' })
-              : p.method === 'oauth' ? link('Sign in', () => act(`login:${p.id}`), { k: `login:${p.id}`, aria: `Sign in to ${p.label}`, disabled: !!state.loggingIn })
-              : link(ui.key === p.id ? 'Cancel' : 'Add key', () => { ui.key = ui.key === p.id ? null : p.id; render(ui.key ? `key-${p.id}` : `addkey:${p.id}`); }, { k: `addkey:${p.id}`, aria: `Add ${p.label} API key` })),
-          p.on || p.method !== 'key' ? null : keyForm(p.id, p.label, (key) => send({ type: 'panel_key', provider: p.id, key })),
+              : p.method === 'oauth' ? (p.key ? el('span', { className: 'links' }, signIn(p), addKey(p)) : signIn(p))
+              : addKey(p)),
+          p.on || !(p.method === 'key' || p.key) ? null : keyForm(p.id, p.label, (key) => send({ type: 'panel_key', provider: p.id, key })),
         ]).flat())),
     ];
   }

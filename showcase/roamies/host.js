@@ -23,13 +23,15 @@
     hide: () => invoke('buddy', { msg: { on: false } }).catch(() => {}),
   };
   window.__roamieBuddy = (m) => { Roamie.wake?.(); Roamie.buddy.onEvent?.(m); };
-  let hot = null, cursor = null;
+  // handsBusy: Roamies is acting in another app (it may take the real cursor), so clicks always go through.
+  let hot = null, cursor = null, handsBusy = false;
+  const setHot = (h) => { if (h !== hot) { hot = h; invoke('set_hot', { hot: h }).catch(() => { hot = null; }); } };
   window.__roamiePtr = (x, y, t) => {
     if (!window.Roamie?.ptr) return;
     cursor = [x, y];
     Roamie.ink?.ptr(x, y);
     const h = Roamie.ptr(x, y, t);
-    if (h !== hot) { hot = h; invoke('set_hot', { hot: h }).catch(() => { hot = null; }); }
+    setHot(h && !handsBusy);
   };
 
   let agent = null;
@@ -80,7 +82,7 @@
   // ---------- agent events -> body language ----------
   let speech = null, thought = null, nextMood = null, listen = null, heard = null, responding = false;
   // waveTurn: a spoken question whose "thinking" shows as dots beside the cursor (macOS), so the Sidekick
-  // shows no thought cloud of its own. research: this turn reads the web, so its answer goes on the card.
+  // shows no thought cloud of its own. research: this turn's answer broke down into points, so it goes on the card.
   let waveTurn = false, research = false, heardText = false, spoken = '', fromWeb = false;
   // An answer that turns into points (or cites sources) reads better on the card than in a bubble.
   const LISTY = /\n\s*(?:[-*•]|\d+[.)])\s+\S|\n\s*sources?\s*:/i;
@@ -184,13 +186,11 @@
         // Tools with nothing to show (listing commitments) don't interrupt the bubble.
         if (!e.anim) break;
         endTalk();
-        // The web: the answer will stream onto the card (opened now, saying what it's looking up).
-        // The card says what it's looking up, so the web prop and chip don't play (they'd sit under the card).
+        // The web: just the task tag ("searching the web"), and the answer is said in the bubble. The card is for an
+        // answer that breaks down into points (LISTY), not every lookup; one already open this turn says what it checks.
         if (e.anim.tool === 'web') {
           fromWeb = true;
-          if (!research) { research = 'looking'; a.show(); panel()?.open({ status: webStatus(e.anim), near: near() }); }
-          else { research = 'looking'; panel()?.status(webStatus(e.anim)); }
-          break;
+          if (research) { research = 'looking'; panel()?.status(webStatus(e.anim)); break; }
         }
         jobs.push({ id: e.id, anim: e.anim }); playTools();
         break;
@@ -312,6 +312,7 @@
       return;
     }
     if (!getAgent()) return;
+    if (m.kind === 'hands') { handsBusy = !!m.on; if (handsBusy) setHot(false); return; }
     if (m.kind === 'greet') { getAgent().act('wave'); return; }
     if (m.kind === 'intro') { getAgent().intro(m.x, m.text); return; }
     if (m.kind === 'esc') { onEsc(); return; }

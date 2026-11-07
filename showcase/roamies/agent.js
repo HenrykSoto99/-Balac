@@ -1,5 +1,5 @@
-// Agent layer for the sidekick. Speech and thought bubbles are drawn on the same LED grid as the body,
-// text is dot-matrix on a finer grid, and talking/thinking drive the pose, face and voice blips.
+// Agent layer for the sidekick. Speech, question and listening bubbles, the thinking tag and the task tag are drawn in
+// the card look (glass.js) over the LED body; talking, thinking and tools drive the pose, face and voice blips.
 // API: agent.say(text) / agent.think(text) return handles with append(), end() and a `closed` promise.
 (() => {
   const R = window.Roamie;
@@ -109,21 +109,13 @@
     const tctx = tcan.getContext('2d');
     let b = null, dying = [], now = 0, W = 800, H = 600, mouthT = 0, mouthMode = null, gestT = 0;
     let tool = null, lastPose = null, lookAt = null, actUntil = 0, typedAt = -9;
-    const glyphParts = [];
-    // Context handed to tool performances.
+    // Context handed to tool performances (agent-tools.js): timing, sounds and the face; the task tag shows the rest.
     const C = {
-      k, PAL, L, th, put, disc: k.disc, sq: k.sq, face, spawn: k.spawn, S: k.S, css,
+      k, sq: k.sq, face, S: k.S,
       get P() { return k.P; }, get R() { return k.R; }, get now() { return now; }, get W() { return W; }, get H() { return H; },
-      // Props shrink with the body (z: 1 at the default size, about half small or as the cursor). Held in front they'd
-      // hide a small body or the pointer, so those forms hold them just beside it (side: which way, 0 = in front).
-      get z() { return clamp(k.R / k.P / 16, 0.45, 1); },
-      get jv() { return k.look === 'jarvis'; },
-      get mx() { return m.x; },
-      get side() { return k.form === 'default' ? 0 : m.x > W - 140 ? -1 : 1; },
-      get bx() { return m.x + (lastPose?.ox ?? 0) + C.side * (k.R + k.P * 2); },
+      get bx() { return m.x + (lastPose?.ox ?? 0); },
       get by() { return m.y + (lastPose?.oy ?? 0); },
       look: (x, y) => { lookAt = [x, y]; },
-      spawnGlyph: (g, x, y) => glyphParts.push({ g, x, y, vy: -60, life: 1 }),
     };
 
     // Presence: in auto mode the sidekick hides when idle and comes back for anything it has to do.
@@ -144,7 +136,7 @@
     // home: where it was when taken, to go back to when the cursor isn't on this screen. tw: running moves (resolved on the agent's clock). idle: a
     // little motion while parked on a control (tapping, circling).
     // speed: above 1 when a drawing has fallen behind its voice and is catching up.
-    const pen = { held: false, tip: [0, 0], home: null, tw: [], idle: null, idleAt: 0, reduced: false, v: [0, 0], speed: 1 };
+    const pen = { held: false, tip: [0, 0], home: null, follow: false, tw: [], idle: null, idleAt: 0, reduced: false, v: [0, 0], speed: 1 };
     const AVOID = () => k.R * 5;
     const spotOK = (x, y) => {
       const S = bounds(), r = k.R;
@@ -347,12 +339,20 @@
       const [x, y] = spot();
       k.appear(entrance(), x, y);
     };
-    const MAX_COLS = 38, MAX_LINES = 7, THINK_COLS = 28, THINK_LINES = 2, METER = 7;
+    const MAX_COLS = 38, MAX_LINES = 7, THINK_COLS = 28, THINK_LINES = 1, METER = 7;
     // Bubble text: Martian Mono (0.7 em per letter), sized to the bubble's line grid.
     const fontPx = (t) => Math.round(CH * t * 0.64 * 2) / 2;
     const colW = (t) => fontPx(t) * 0.7 + 0.35;
     const TEXT_INK = '#dcfff6', TEXT_ACCENT = '#78ffe2';
     const T = () => clamp(k.P * 0.42, 1.4, 2.4);
+    const G = R.glass;
+    // Padding inside a bubble. The thinking tag is slim, one line, with its three dots before the words.
+    const DOTS_W = 24;
+    const padX = (bb) => (bb.kind === 'thought' ? 13 : k.P * 3), padY = (bb) => (bb.kind === 'thought' ? 5 : k.P * 3);
+    const dotsDx = (bb) => (bb.kind === 'thought' && bb.text ? DOTS_W + 10 : 0);
+    // Under a question: how to answer it.
+    const HINT = 'enter to send · esc to skip', HINT_F = `400 11px ${G.MONO}`, HINT_H = 18;
+    const hintH = (bb) => (bb.input && !bb.input.listen ? HINT_H : 0);
 
     const make = (kind) => ({
       kind, text: '', lines: [{ start: 0, s: '' }], shown: 0, at: [], ended: false, age: 0, wait: 0,
@@ -406,8 +406,6 @@
       dying.push(bb);
       if (b === bb) b = null;
       k.S('poof');
-      const gx0 = bb.x.x, gy0 = bb.y.x;
-      for (let i = 0; i < 26; i++) k.spawn(gx0 + Math.random() * bb.w.x, gy0 + Math.random() * bb.h.x, (Math.random() - 0.5) * 60, -Math.random() * 80, 260, Math.random() < 0.5 ? L : L - 1, 0, 1.6);
     };
 
     const tipPoint = () => ({ x: m.x + Math.sign((b?.x.x ?? m.x) + (b?.w.x ?? 0) / 2 - m.x) * k.R * 0.25, y: b?.below ? m.y + k.R * 0.95 : m.y - k.R * 1.02 });
@@ -415,7 +413,7 @@
     // ---- layout targets ----
     const innerSize = (bb) => {
       const t = T();
-      if (bb.kind === 'thought' && !bb.text) return { cols: 7, rows: 1, w: 7 * colW(t), h: CH * t };
+      if (bb.kind === 'thought' && !bb.text) return { cols: 4, rows: 1, w: DOTS_W + 6, h: CH * t };
       const maxCols = bb.kind === 'thought' ? THINK_COLS : bb.expanded ? Math.min(72, Math.floor((W - 80) / colW(t))) : MAX_COLS;
       const maxRows = bb.kind === 'thought' ? THINK_LINES : bb.expanded ? Math.max(MAX_LINES, Math.floor((H * 0.62) / (CH * t))) : MAX_LINES;
       if (bb.input) {
@@ -425,17 +423,15 @@
         for (const l of src) cols = Math.max(cols, Math.min(l.s.length + 1, MAX_COLS));
         const rows = clamp(src.length, 1, MAX_LINES);
         const meter = bb.input.listen ? (METER + 1) * k.P : 0;
-        return { cols, rows, maxRows: MAX_LINES, w: cols * colW(t), h: rows * CH * t + meter };
+        return { cols, rows, maxRows: MAX_LINES, w: Math.max(cols * colW(t), hintH(bb) ? G.textW(HINT, HINT_F) : 0), h: rows * CH * t + meter + hintH(bb) };
       }
       const shownLines = bb.lines.filter((l) => l.start < Math.max(1, bb.shown) || l === bb.lines[0]);
       let cols = 4;
       for (const l of (bb.expanded ? bb.lines : shownLines)) cols = Math.max(cols, Math.min(l.s.length, maxCols));
       if (bb.lines.length > 1) cols = Math.max(cols, Math.min(maxCols, 18));
       const rows = clamp(bb.expanded ? bb.lines.length : shownLines.length, 1, maxRows);
-      return { cols, rows, maxRows, w: cols * colW(t), h: rows * CH * t };
+      return { cols, rows, maxRows, w: cols * colW(t) + dotsDx(bb), h: rows * CH * t };
     };
-
-    const pad = () => k.P * 3;
 
     const step = (bb, dt, env) => {
       bb.age += dt;
@@ -464,7 +460,7 @@
       }
       const done = bb.ended && bb.shown >= bb.text.length;
       const inner = innerSize(bb);
-      const tw = Math.ceil((inner.w + pad() * 2) / P) * P, thh = Math.ceil((inner.h + pad() * 2) / P) * P;
+      const tw = Math.ceil(inner.w + padX(bb) * 2), thh = Math.ceil(inner.h + padY(bb) * 2);
       // Input bubbles track their text tightly (near-critical damping) so new lines never outrun the frame. Speech
       // grows critically damped too: an overshoot as each line arrives bobbed the text up and down mid-read.
       const [sk, sc] = bb.input ? [460, 42] : [190, 28];
@@ -480,9 +476,8 @@
       bb.overflow = bb.lines.length > inner.rows;
       bb.rows = inner.rows; bb.cols = inner.cols;
       // Placement: above the head, else below, else beside; always fully inside the visible screen.
-      const S = bounds(), edge = P * (bb.cloud.x > 0.05 ? 5 : 2);
-      const gap = (k.R * 0.5 + P * 2) * (bb.cloud.x > 0.5 ? 1.9 : 1);
-      const lift = bb.kind === 'speech' && tool?.def.head ? tool.def.head * k.R : 0; // room for props above the head
+      // The thinking tag sits where the reply will open, so it turns into the reply without moving.
+      const S = bounds(), edge = P * 2 + 4, gap = k.R * 0.5 + P * 2;
       const w = bb.w.x, h = bb.h.x, L0 = S.l + edge, T0 = S.t + edge, R0 = S.r - edge, B0 = S.b - edge;
       // The text holds still to be read: the body's small drifts while it idles and talks don't move the bubble
       // (each one jumped the text a whole cell). It moves once the body really has, or rides with it while it's
@@ -491,7 +486,7 @@
       const ax = bb.ax, ay = bb.ay;
       const skew = clamp((ax - W / 2) * -0.15, -w * 0.3, w * 0.3);
       const place = {
-        above: { x: ax - w / 2 + skew, y: ay - k.R * 1.1 - gap - lift - h },
+        above: { x: ax - w / 2 + skew, y: ay - k.R * 1.1 - gap - h },
         below: { x: ax - w / 2 + skew, y: ay + k.R * 1.1 + gap },
         // Beside it, the top stays put level with its head and the bubble grows down: centred on it, every new
         // line pushed the whole bubble (and what you're reading) up by half a line.
@@ -544,142 +539,93 @@
       }
     };
 
-    // ---- grid drawing (bubble chrome lives on the LED grid) ----
-    const shapeFn = (bb, x0, y0, x1, y1) => {
-      const cr = 2, ix0 = x0 + cr, ix1 = x1 - cr, iy0 = y0 + cr, iy1 = y1 - cr;
-      const cloud = bb.cloud.x, rb = 2.6 * cloud, bumps = [];
-      if (cloud > 0.05) {
-        const nx = Math.max(2, Math.round((x1 - x0) / 5)), ny = Math.max(1, Math.round((y1 - y0) / 5));
-        for (let i = 0; i <= nx; i++) { const x = lerp(x0 + 1, x1 - 1, i / nx); bumps.push([x, y0 + 0.6, rb + (i % 2) * 0.8 * cloud], [x, y1 - 0.6, rb + ((i + 1) % 2) * 0.8 * cloud]); }
-        for (let j = 1; j < ny; j++) { const y = lerp(y0 + 1, y1 - 1, j / ny); bumps.push([x0 + 0.6, y, rb], [x1 - 0.6, y, rb]); }
-      }
-      return (x, y, grow) => {
-        const dx = Math.max(ix0 - x, 0, x - ix1), dy = Math.max(iy0 - y, 0, y - iy1);
-        if (dx * dx + dy * dy <= (cr + grow) * (cr + grow)) return true;
-        for (const [bx, by, r] of bumps) if ((x - bx) ** 2 + (y - by) ** 2 <= (r + grow) ** 2) return true;
-        return false;
-      };
-    };
-
-    const drawBubbleGrid = (bb) => {
-      const P = k.P;
-      const fade = bb.closing ? clamp(1 - bb.closing / 0.3, 0, 1) : clamp(bb.age / 0.22, 0, 1);
-      if (fade <= 0) return;
-      const pop = clamp(bb.pop.x, 0, 1.08);
-      const beside = bb.side === 'left' || bb.side === 'right';
+    // ---- bubbles: the card look, with a stepped tail to the body (or, thinking, two little steps up from it) ----
+    // The frame as drawn this instant: it pops in and out around the point its tail comes from.
+    const bubbleBox = (bb) => {
+      const pop = clamp(bb.pop.x, 0, 1.08), beside = bb.side === 'left' || bb.side === 'right';
       const ax = beside ? (bb.side === 'right' ? bb.x.x : bb.x.x + bb.w.x) : bb.tail.x.x;
       const ay = beside ? clamp(bb.tail.y.x, bb.y.x, bb.y.x + bb.h.x) : bb.below ? bb.y.x : bb.y.x + bb.h.x;
-      const X = (v) => ax + (v - ax) * pop, Y = (v) => ay + (v - ay) * pop;
-      const x0 = Math.round(X(bb.x.x) / P), y0 = Math.round(Y(bb.y.x) / P);
-      const x1 = Math.round(X(bb.x.x + bb.w.x) / P) - 1, y1 = Math.round(Y(bb.y.x + bb.h.x) / P) - 1;
-      if (x1 - x0 < 3 || y1 - y0 < 2) return;
-      const inside = shapeFn(bb, x0, y0, x1, y1);
-      const on = (gx, gy) => th(gx, gy) < fade;
-      // tail: a tapered, lagging pixel wedge (speech) or rising beads (thought)
-      const tbx = beside ? (bb.side === 'right' ? x0 : x1) : clamp(bb.tail.x.x, X(bb.x.x) + P * 4, X(bb.x.x + bb.w.x) - P * 4) / P;
-      const tby = beside ? clamp(bb.tail.y.x / P, y0 + 3, y1 - 3) : bb.below ? y0 : y1;
-      const tipx = bb.tail.x.x / P, tipy = bb.tail.y.y === undefined ? bb.tail.y.x / P : bb.tail.y.x / P;
-      const beads = [];
+      const X = (v) => ax + (v - ax) * pop, Y = (v) => ay + (v - ay) * pop, x = X(bb.x.x), y = Y(bb.y.x);
+      return { x, y, w: X(bb.x.x + bb.w.x) - x, h: Y(bb.y.x + bb.h.x) - y };
+    };
+    const TAIL_SIDE = { above: 'bottom', below: 'top', right: 'left', left: 'right' };
+    const drawBubble = (ctx, bb) => {
+      const fade = bb.closing ? clamp(1 - bb.closing / 0.3, 0, 1) : clamp(bb.age / 0.22, 0, 1);
+      const f = (bb.frame = bubbleBox(bb));
+      if (fade <= 0 || f.w < 12 || f.h < 10) return;
+      const P = k.P, tip = [bb.tail.x.x, bb.tail.y.x], side = TAIL_SIDE[bb.side] ?? 'bottom', across = side === 'top' || side === 'bottom';
       const speechTail = 1 - bb.cloud.x;
-      if (speechTail > 0.05) {
-        const n = Math.max(4, Math.ceil(Math.hypot(tipx - tbx, tipy - tby)));
-        const cxp = lerp(tbx, tipx, 0.5) + (bb.tail.x.v || 0) * -0.004, cyp = lerp(tby, tipy, 0.5);
-        for (let i = 0; i <= n; i++) {
-          const u = i / n, a = (1 - u) * (1 - u), bq = 2 * (1 - u) * u, c = u * u;
-          beads.push([a * tbx + bq * cxp + c * tipx, a * tby + bq * cyp + c * tipy, lerp(2.4, 0.5, u) * speechTail]);
-        }
-      }
+      ctx.save();
+      ctx.globalAlpha *= fade;
       if (bb.cloud.x > 0.05) {
-        const tr = bb.trail;
-        [[0.25, 1.9], [0.55, 1.3], [0.82, 0.8]].forEach(([u, r], i) => {
-          if (tr < i * 0.3) return;
-          const bob = Math.sin(now * 4 - i * 0.9) * 0.5;
-          beads.push([lerp(tbx, tipx, u), lerp(tby + (bb.below ? -2 : 2), tipy, u) + bob, r * bb.cloud.x, true]);
+        const base = across ? [clamp(tip[0], f.x + 12, f.x + f.w - 12), side === 'top' ? f.y : f.y + f.h] : [side === 'left' ? f.x : f.x + f.w, clamp(tip[1], f.y + 8, f.y + f.h - 8)];
+        [[0.32, 8], [0.7, 5]].forEach(([u, sz], i) => {
+          if (bb.trail < i * 0.3) return;
+          const s = sz * bb.cloud.x, cx = base[0] + (tip[0] - base[0]) * u, cy = base[1] + (tip[1] - base[1]) * u;
+          G.chrome(ctx, cx - s / 2, cy - s / 2, s, s, { corner: i ? 1 : 2, glint: false });
         });
       }
-      const disc = (cx, cy, r, lvl, solidLvl, pass) => {
-        const rr = Math.ceil(r + 1);
-        for (let yy = -rr; yy <= rr; yy++) for (let xx = -rr; xx <= rr; xx++) {
-          const gx = Math.round(cx) + xx, gy = Math.round(cy) + yy, d2 = (gx - cx) ** 2 + (gy - cy) ** 2;
-          if (!on(gx, gy)) continue;
-          if (pass === 0 && d2 <= (r + 1) ** 2) setPx(gx, gy, EDGE, 255);
-          if (pass === 1 && d2 <= r * r) setPx(gx, gy, DARK, 235, true);
-        }
-      };
-      // pass 0: tail and body borders; pass 1: fills, so the tail joins the bubble seamlessly
-      for (const [cx, cy, r, free] of beads) if (!free) disc(cx, cy, r, 0, 0, 0);
-      const ex = bb.cloud.x > 0.05 ? 5 : 2;
-      for (let gy = y0 - ex; gy <= y1 + ex; gy++) for (let gx = x0 - ex; gx <= x1 + ex; gx++)
-        if (on(gx, gy) && inside(gx, gy, 1) && !inside(gx, gy, 0)) setPx(gx, gy, EDGE, 255);
-      for (const [cx, cy, r, free] of beads) if (free) disc(cx, cy, r, 0, 0, 0);
-      for (const [cx, cy, r] of beads) disc(cx, cy, r, 0, 0, 1);
-      for (let gy = y0 - ex; gy <= y1 + ex; gy++) for (let gx = x0 - ex; gx <= x1 + ex; gx++) {
-        if (!on(gx, gy) || !inside(gx, gy, 0)) continue;
-        const glass = gy - y0 < 1 && gx - x0 > 2 && gx - x0 < 6;
-        setPx(gx, gy, glass ? RIM : DARK, 235, true);
+      const tail = speechTail > 0.05 ? { side, at: across ? tip[0] : tip[1], to: tip, w: 14 * speechTail } : null;
+      G.chrome(ctx, f.x, f.y, f.w, f.h, { tail });
+      // A light running along the top edge while words arrive or it waits for typing.
+      const streaming = bb.kind !== 'thought' && (bb.shown < bb.text.length || (bb.input?.focused && !bb.input.processing && !bb.closing));
+      if (streaming && f.w > 40) {
+        const run = f.w - 32, u = pen.reduced ? 0.4 : (now * 0.8) % 1;
+        ctx.save(); ctx.shadowColor = G.rgba(G.ACC, 0.8); ctx.shadowBlur = 6; ctx.fillStyle = G.HOT;
+        ctx.fillRect(f.x + 8 + run * u, f.y - 0.25, 16, 1.5); ctx.restore();
       }
-      // running light around the rim while text is arriving
-      const streaming = bb.shown < bb.text.length || (bb.kind === 'thought' && !bb.closing) || (bb.input?.focused && !bb.input.processing && !bb.closing);
-      if (streaming && bb.cloud.x < 0.5) {
-        const pw = x1 - x0, ph = y1 - y0, per = 2 * (pw + ph);
-        for (let j = 0; j < 4; j++) {
-          let q = (Math.floor(now * 28) - j * 1 + per * 10) % per, gx, gy;
-          if (q < pw) { gx = x0 + q; gy = y0 - 1; } else if ((q -= pw) < ph) { gx = x1 + 1; gy = y0 + q; } else if ((q -= ph) < pw) { gx = x1 - q; gy = y1 + 1; } else { q -= pw; gx = x0 - 1; gy = y1 - q; }
-          if (inside(gx, gy, 1)) setPx(gx, gy, j === 0 ? HOT : RIM, 255);
+      // Thinking: three small squares, one lit at a time; before the words when there are any.
+      if (bb.kind === 'thought' && bb.cloud.x > 0.3) {
+        const dx = bb.text ? f.x + padX(bb) : f.x + (f.w - DOTS_W) / 2, cy = f.y + f.h / 2, lit = Math.floor(now * 5) % 3;
+        for (let i = 0; i < 3; i++) {
+          const on = i === lit;
+          ctx.save();
+          if (on) { ctx.shadowColor = G.rgba(G.ACC, 0.8); ctx.shadowBlur = 6; } else ctx.globalAlpha *= 0.55;
+          ctx.fillStyle = on ? G.ACC : G.MID; ctx.fillRect(Math.round(dx + i * 10), Math.round(cy - 2 - (on ? 1.5 : 0)), 4, 4);
+          ctx.restore();
         }
       }
-      bb.grid = { x0, y0, x1, y1 };
-      const ip = Math.round(pad() / P);
-      // thinking dots
-      if (bb.kind === 'thought' && !bb.text && fade > 0.5) {
-        const cy = Math.round((y0 + y1) / 2), cx = Math.round((x0 + x1) / 2);
-        for (let i = -1; i <= 1; i++) {
-          const lit = Math.floor(now * 5) % 3 === i + 1;
-          const lift = lit ? -1 : 0;
-          for (let yy = 0; yy < 2; yy++) for (let xx = 0; xx < 2; xx++) put(cx + i * 4 + xx - 1, cy + yy - 1 + lift, lit ? L : L - 2);
-        }
-      }
-      // listening: scrolling LED waveform of the voice level, a sweep while the transcript finalises
+      // Listening: the voice level as thin glowing bars under the transcript, a sweep while it's finished off.
       if (bb.input?.listen) {
-        const inp = bb.input, bot = y1 - ip + 1, top = bot - METER + 1, xa = x0 + ip, xb = x1 - ip;
-        const n = Math.max(1, Math.floor((xb - xa) / 2) + 1);
+        const inp = bb.input, mh = METER * P, x0 = f.x + padX(bb), x1 = f.x + f.w - padX(bb), bot = f.y + f.h - padY(bb);
+        const n = Math.max(1, Math.floor((x1 - x0) / 5));
         while (inp.levels.length < n) inp.levels.unshift(0);
         if (inp.levels.length > n) inp.levels.splice(0, inp.levels.length - n);
+        ctx.save(); ctx.shadowColor = G.rgba(G.ACC, 0.6); ctx.shadowBlur = 4; ctx.fillStyle = G.ACC;
         for (let i = 0; i < n; i++) {
-          const gx = xa + i * 2;
           let v = inp.levels[i];
           if (inp.processing) v = 0.15 + 0.7 * Math.max(0, Math.sin(now * 9 - i * 0.55)) ** 3;
-          const h = Math.max(1, Math.round(v * METER));
-          for (let j = 0; j < METER; j++) {
-            const gy = bot - j;
-            if (j < h) put(gx, gy, j === h - 1 ? L : j >= METER - 2 ? L : L - 1);
-            else if (j === 0) put(gx, gy, 1);
-          }
+          const bh = Math.max(2, v * mh);
+          ctx.fillRect(x0 + i * 5, bot - bh, 2, bh);
         }
-        void top;
+        ctx.restore();
       }
-      // scrollbar and "more" chevron for long text
+      if (hintH(bb) && bb.pop.x > 0.6) G.typed(ctx, HINT, f.x + padX(bb), f.y + f.h - padY(bb) - HINT_H / 2 + 2, HINT_F, G.DIM);
+      // Long text: a thin scrollbar, and a little chevron while there's more below.
       if (bb.overflow && bb.kind === 'speech') {
-        const bx = x1 - 1, top = y0 + ip, bot = y1 - ip, len = bot - top;
+        const bx = f.x + f.w - 7, top = f.y + padY(bb), len = Math.max(4, f.h - padY(bb) * 2);
         const total = bb.lines.length, frac = bb.rows / total, pos = bb.scroll.x / Math.max(1, total - bb.rows);
-        const tl = Math.max(2, Math.round(len * frac)), t0 = top + Math.round((len - tl) * clamp(pos, 0, 1));
-        for (let gy = top; gy <= bot; gy++) put(bx, gy, gy >= t0 && gy < t0 + tl ? L - 1 : 1);
-        const atEnd = bb.scroll.x >= total - bb.rows - 0.05;
-        if (!atEnd || !bb.ended) {
-          const cx = Math.round((x0 + x1) / 2), cy = y1 - 1 + (Math.sin(now * 6) > 0 ? 1 : 0);
-          if (bb.ended) { put(cx - 2, cy - 1, L); put(cx - 1, cy, L); put(cx, cy + 1 - 1, L); put(cx + 1, cy, L); put(cx + 2, cy - 1, L); }
+        const tl = Math.max(6, len * frac), t0 = top + (len - tl) * clamp(pos, 0, 1);
+        ctx.fillStyle = G.rgba(G.ACC, 0.15); ctx.fillRect(bx, top, 2, len);
+        ctx.fillStyle = G.ACC; ctx.fillRect(bx, t0, 2, tl);
+        if (bb.ended && bb.scroll.x < total - bb.rows - 0.05) {
+          const cx = f.x + f.w - 20, cy = f.y + f.h - 7 + (Math.sin(now * 6) > 0 ? 1 : 0);
+          ctx.fillStyle = G.HOT;
+          for (const [dx, dy] of [[-4, -2], [-2, 0], [0, 2], [2, 0], [4, -2]]) ctx.fillRect(cx + dx - 1, cy + dy - 1, 2, 2);
         }
       }
+      ctx.restore();
     };
 
-    // ---- fine dot-matrix text layer ----
+    // ---- the bubble's words: real type, crisp at any size ----
     const drawText = (ctx, env, bb) => {
       const ph = bb.input && !bb.text;
-      if (!bb.grid || (!bb.text && !bb.input)) return;
+      const fr = bb.frame;
+      if (!fr || (!bb.text && !bb.input)) return;
       const P = k.P, t = T(), dpr = env.dpr || 1, cw = colW(t), lh = CH * t;
       const fade = bb.closing ? clamp(1 - bb.closing / 0.25, 0, 1) : clamp((bb.age - 0.08) / 0.2, 0, 1);
       if (fade <= 0 || bb.pop.x < 0.6) return;
-      const ix = bb.grid.x0 * P + pad() - P * 0.5, iy = bb.grid.y0 * P + pad() - P * 0.5;
+      const ix = fr.x + padX(bb) + dotsDx(bb), iy = fr.y + padY(bb);
       const iw = bb.cols * cw, ih = bb.rows * lh;
       const pw = Math.ceil(iw * dpr) + 2, phh = Math.ceil(ih * dpr) + 2;
       if (tcan.width !== pw || tcan.height !== phh) { tcan.width = pw; tcan.height = phh; }
@@ -743,8 +689,7 @@
         if (cy > -1 && cy < ih) { tctx.fillStyle = css(HOT); tctx.fillRect(col * cw + 0.5, cy + lh * 0.15, Math.max(1.5, t * 0.8), lh * 0.7); }
       }
       // Clip to the frame as it is this instant: it may still be growing, or shrinking away on close.
-      const ip = Math.round(pad() / P), meterCells = bb.input?.listen ? METER + 1 : 0;
-      const cx1 = (bb.grid.x1 + 1 - ip) * P + P * 0.5, cy1 = (bb.grid.y1 + 1 - ip - meterCells) * P + P * 0.5;
+      const cx1 = fr.x + fr.w - padX(bb) + 2, cy1 = fr.y + fr.h - padY(bb) - (bb.input?.listen ? (METER + 1) * P : 0) - hintH(bb) + 2;
       const cwid = Math.min(iw + t, cx1 - ix), chgt = Math.min(ih + t, cy1 - iy);
       if (cwid <= t || chgt <= t) return;
       ctx.save();
@@ -754,58 +699,55 @@
       ctx.restore();
     };
 
-    // ---- tool chip: an LED tag under the blob with a spinner, label and progress ----
-    const chipGeom = (st) => {
-      const t = T(), P = k.P, text = (st.label + (st.detail ? '  ' + st.detail : '')).slice(0, 34);
-      const w = Math.ceil((text.length * CW * t + P * 9) / P), h = Math.ceil((CH * t + P * 3) / P);
-      const S = bounds(), below = !b || b.side !== 'below';
-      const cy = below ? m.y + k.R * 1.32 : m.y - k.R * 1.5 - h * P;
-      const x0 = Math.round(clamp(m.x - (w * P) / 2, S.l + 8, S.r - w * P - 8) / P), y0 = Math.round(clamp(cy, S.t + 8, S.b - h * P - 8) / P);
-      return { text, w, h, x0, y0, t };
+    // ---- the task tag under the body: a spinner, what it's doing (dim) and what on (bright), then a tick or a cross ----
+    const TAG_VERB = `400 12px ${G.MONO}`, TAG_THING = `500 12px ${G.MONO}`, TAG_H = 30, TAG_MAX = 340;
+    // label is the verb ("running"), detail the thing ("npm test"); a label alone shows bright.
+    const tagWords = (st) => {
+      if (st.words) return st.words;
+      const verb = st.detail ? String(st.label ?? '') : '', room = TAG_MAX - 50 - (verb ? G.textW(verb, TAG_VERB) + 7 : 0);
+      let thing = String(st.detail || st.label || '');
+      if (G.textW(thing, TAG_THING) > room) { while (thing.length > 1 && G.textW(`${thing}…`, TAG_THING) > room) thing = thing.slice(0, -1); thing = `${thing.trimEnd()}…`; }
+      return (st.words = { verb, thing });
     };
-    const drawChip = (st) => {
-      const g = chipGeom(st), pop = clamp(st.age / 0.15, 0, 1) * (1 - clamp((st.out - 0.5) / 0.35, 0, 1));
-      if (pop <= 0) return;
-      const { x0, y0, w, h } = g;
-      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-        if ((x === 0 || x === w - 1) && (y === 0 || y === h - 1)) continue;
-        if (th(x0 + x, y0 + y) > pop) continue;
-        const edge = x === 0 || y === 0 || x === w - 1 || y === h - 1;
-        setPx(x0 + x, y0 + y, edge ? EDGE : DARK, 235, !edge);
-      }
-      const cx = x0 + 3, cy = y0 + Math.floor(h / 2);
-      if (!st.status) {
-        for (let i = 0; i < 8; i++) {
-          const a = (i / 8) * Math.PI * 2, lit = (Math.floor(now * 14) - i + 80) % 8;
-          put(cx + Math.round(Math.cos(a) * 1.6), cy + Math.round(Math.sin(a) * 1.6), lit < 3 ? L - lit : 1);
-        }
-      } else if (st.status === 'ok') { put(cx - 1, cy, L); put(cx, cy + 1, L); put(cx + 1, cy, L); put(cx + 2, cy - 1, L); }
-      else { put(cx - 1, cy - 1, L); put(cx + 1, cy + 1, L); put(cx, cy, L); put(cx + 1, cy - 1, L); put(cx - 1, cy + 1, L); }
-      if (st.p != null) for (let x = 6; x < w - 2; x++) put(x0 + x, y0 + h - 2, x - 6 < (w - 8) * st.p ? L - 1 : 1);
+    const tagBox = (st) => {
+      const { verb, thing } = tagWords(st), S = bounds(), below = !b || b.side !== 'below';
+      const w = Math.round(36 + (verb ? G.textW(verb, TAG_VERB) + 7 : 0) + G.textW(thing, TAG_THING) + 14);
+      const y = below ? m.y + k.R * 1.32 : m.y - k.R * 1.5 - TAG_H;
+      return { w, h: TAG_H, x: clamp(m.x - w / 2, S.l + 8, Math.max(S.l + 8, S.r - w - 8)), y: clamp(y, S.t + 8, Math.max(S.t + 8, S.b - TAG_H - 8)) };
     };
-    const drawChipText = (ctx, env, st) => {
-      const g = chipGeom(st), t = g.t, P = k.P, pop = clamp((st.age - 0.08) / 0.15, 0, 1) * (1 - clamp((st.out - 0.45) / 0.3, 0, 1));
-      if (pop <= 0) return;
-      const x = (g.x0 + 6) * P, y = (g.y0 * P) + (g.h * P - CH * t) / 2 + t * 0.5;
-      const p1 = new Path2D(), p2 = new Path2D(), split = st.label.length;
-      const chipEmoji = [];
-      for (let j = 0; j < g.text.length; j++) {
-        const em = emojiAt(g.text, j);
-        if (em) {
-          const eg = emojiGlyph(em.cluster);
-          if (eg) for (let q = 0; q < eg.length; q += 5) chipEmoji.push(x + (j * CW + eg[q]) * t, y + eg[q + 1] * t, eg[q + 2], eg[q + 3], eg[q + 4]);
-          j += em.n - 1;
-          continue;
-        }
-        const gl = glyph(g.text[j]);
-        for (let q = 0; q < gl.length; q += 3) (j < split ? p1 : p2).rect(x + (j * CW + gl[q]) * t, y + gl[q + 1] * t, t * 0.82, t * 0.82);
-      }
+    const drawTag = (ctx, st) => {
+      const g = tagBox(st), { verb, thing } = tagWords(st), fail = st.status === 'fail';
+      const u = clamp(st.age / 0.2, 0, 1), alpha = u * (1 - (st.status ? clamp((st.out - 0.45) / 0.3, 0, 1) : 0));
+      if (alpha <= 0) return;
       ctx.save();
-      ctx.globalAlpha = pop;
-      ctx.shadowColor = css(RIM, 0.7); ctx.shadowBlur = t * 3;
-      ctx.fillStyle = css(HOT); ctx.fill(p1);
-      ctx.fillStyle = css(PAL[L - 2]); ctx.fill(p2);
-      for (let q = 0; q < chipEmoji.length; q += 5) { ctx.fillStyle = `rgb(${chipEmoji[q + 2]},${chipEmoji[q + 3]},${chipEmoji[q + 4]})`; ctx.fillRect(chipEmoji[q], chipEmoji[q + 1], t * 0.82, t * 0.82); }
+      ctx.globalAlpha *= alpha;
+      // It lands in three small steps.
+      ctx.translate(0, pen.reduced ? 0 : -Math.round((1 - u) * 3) * 3);
+      G.chrome(ctx, g.x, g.y, g.w, g.h, { edge: fail ? G.CORAL : G.ACC });
+      const sx = g.x + 20, sy = g.y + g.h / 2;
+      if (!st.status) {
+        const head = Math.floor(now * 14) % 8;
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * Math.PI * 2 - Math.PI / 2, d = (head - i + 8) % 8;
+          ctx.fillStyle = d === 0 ? G.HOT : d < 3 ? G.ACC : G.DEEP;
+          ctx.fillRect(Math.round(sx + Math.cos(a) * 5) - 1, Math.round(sy + Math.sin(a) * 5) - 1, 2, 2);
+        }
+        // Its progress along the bottom edge when known, else a light running along it.
+        const run = g.w - 32;
+        ctx.save(); ctx.shadowColor = G.rgba(G.ACC, 0.8); ctx.shadowBlur = 6; ctx.fillStyle = G.ACC;
+        if (st.p != null) ctx.fillRect(g.x + 16, g.y + g.h - 1.5, run * clamp(st.p, 0, 1), 1.5);
+        else ctx.fillRect(g.x + 16 + (run - 14) * (pen.reduced ? 0.3 : (now * 0.9) % 1), g.y + g.h - 1.5, 14, 1.5);
+        ctx.restore();
+      } else if (!fail) {
+        ctx.fillStyle = G.ACC;
+        for (const [dx, dy] of [[-4, 0], [-3, 1], [-2, 2], [-1, 3], [0, 4], [1, 3], [2, 2], [3, 1], [4, 0], [5, -1], [6, -2]]) ctx.fillRect(sx + dx - 1, sy + dy - 1, 2, 2);
+      } else {
+        ctx.fillStyle = G.CORAL;
+        for (let q = -4; q <= 4; q += 2) { ctx.fillRect(sx + q - 1, sy + q - 1, 2, 2); ctx.fillRect(sx + q - 1, sy - q - 1, 2, 2); }
+      }
+      let tx = g.x + 36;
+      if (verb) tx += G.typed(ctx, verb, tx, sy + 0.5, TAG_VERB, G.DIM, (st.age - 0.08) / 0.25) + 7;
+      G.typed(ctx, thing, tx, sy + 0.5, TAG_THING, fail ? G.CORAL : G.TEXT, (st.age - 0.2) / 0.35);
       ctx.restore();
     };
 
@@ -867,7 +809,7 @@
           for (let i = 0; i < 40 && k.presence !== 'shown'; i++) await new Promise((r) => setTimeout(r, 50));
           if (!pen.held) {
             const [ox, oy] = tipOff();
-            pen.home = [station.x ?? m.x, station.y ?? m.y]; pen.tip = [m.x - ox, m.y - oy]; pen.held = true;
+            pen.home = [station.x ?? m.x, station.y ?? m.y]; pen.follow = !!station.byCursor; pen.tip = [m.x - ox, m.y - oy]; pen.held = true;
             presence.summoned = true; fol.on = false; station.moving = station.rush = false; m.drive = penDrive;
           }
           if (k.form !== 'cursor') await k.morph?.('cursor');
@@ -899,6 +841,8 @@
           if (!pen.held) return;
           penRelease();
           api.place(hx, hy);
+          // It was following the cursor before the drawing: carry on, or it treats the cursor as in its way and hops off.
+          if (pen.follow && presence.ptr) station.byCursor = presence.ptr.slice();
           presence.lastActive = now;
           if (k.userForm && k.userForm !== k.form) await k.morph?.(k.userForm);
         },
@@ -1022,7 +966,7 @@
       pose: (dt) => {
         lookAt = null;
         if (now < actUntil && !tool) { lastPose = null; return null; }
-        const tp = tool ? tool.def.pose(tool, C) : null;
+        const tp0 = tool ? tool.def.pose(tool, C) : null, tp = tp0 && { ...tp0, arms: 0, tl: undefined, tr: undefined };
         const bp = bubblePose(dt);
         let p = tp ?? bp;
         if (tp && bp && b?.kind === 'speech' && mouthT > 0) p = { ...tp, mouth: bp.mouth };
@@ -1169,26 +1113,21 @@
           const dx = lookAt[0] - m.x, dy = lookAt[1] - m.y, dd = Math.hypot(dx, dy) || 1, s = Math.min(1, dd / 120);
           face.lookX = R.damp(face.lookX, (dx / dd) * s, 9, dt); face.lookY = R.damp(face.lookY, (dy / dd) * s, 9, dt);
         }
-        for (let i = glyphParts.length - 1; i >= 0; i--) { const g = glyphParts[i]; g.y += g.vy * dt; g.vy *= 0.97; g.life -= dt * 1.2; if (g.life <= 0) glyphParts.splice(i, 1); }
         for (let i = dying.length - 1; i >= 0; i--) {
           step(dying[i], dt, env);
           if (dying[i].closing > 0.35) { dying[i].closed.resolve(); dying.splice(i, 1); }
         }
       },
-      gridUnder: () => { if (tool && stage()) tool.def.grid?.(tool, C); },
-      gridOver: () => {
-        if (!stage()) return;
-        if (tool) { tool.def.top?.(tool, C); drawChip(tool); }
-        for (const g of glyphParts) {
-          const gx = Math.round(g.x / k.P), gy = Math.round(g.y / k.P), lv = g.life > 0.4 ? L : L - 2;
-          put(gx - 1, gy, lv); put(gx, gy, lv); put(gx + 1, gy, lv);
-          if (g.g === '+') { put(gx, gy - 1, lv); put(gx, gy + 1, lv); }
-        }
-        for (const bb of dying) drawBubbleGrid(bb);
-        if (b) drawBubbleGrid(b);
+      gridOver: () => {},
+      // The area drawn off the grid (bubbles, their tails, the task tag), so the patch on screen covers it.
+      extent: () => {
+        if (!stage()) return null;
+        let e = null;
+        const add = (x0, y0, x1, y1) => { e = e ? [Math.min(e[0], x0), Math.min(e[1], y0), Math.max(e[2], x1), Math.max(e[3], y1)] : [x0, y0, x1, y1]; };
+        for (const bb of [b, ...dying]) if (bb) { add(bb.x.x - 8, bb.y.x - 8, bb.x.x + bb.w.x * 1.08 + 8, bb.y.x + bb.h.x * 1.08 + 8); add(bb.tail.x.x - 8, bb.tail.y.x - 8, bb.tail.x.x + 8, bb.tail.y.x + 8); }
+        if (tool) { const g = tagBox(tool); add(g.x, g.y - 10, g.x + g.w, g.y + g.h); }
+        return e;
       },
-      // Drawing beyond the LED grid (a tool's screen effects) needs the whole screen.
-      wide: () => !!tool,
       // The body is drawn snapped to its grid cell while it follows (10-dither.js): bubbles riding with it move too.
       shift: (dx, dy) => {
         for (const bb of [b, ...dying]) {
@@ -1199,21 +1138,12 @@
         }
       },
       // Nothing drawn outside the LED grid this frame, so the grid alone decides whether the picture changed.
-      quiet: () => !b && !dying.length && !tool && !glyphParts.length,
+      quiet: () => !b && !dying.length && !tool,
       over: (ctx, env) => {
         if (!stage()) return;
-        if (tool) {
-          ctx.save();
-          if (b?.grid) {
-            const P = k.P, g = b.grid;
-            ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.rect((g.x0 - 2) * P, (g.y0 - 2) * P, (g.x1 - g.x0 + 5) * P, (g.y1 - g.y0 + 5) * P);
-            ctx.clip('evenodd');
-          }
-          tool.def.over?.(tool, C, ctx); drawChipText(ctx, env, tool);
-          ctx.restore();
-        }
-        for (const bb of dying) drawText(ctx, env, bb);
-        if (b) drawText(ctx, env, b);
+        for (const bb of dying) { drawBubble(ctx, bb); drawText(ctx, env, bb); }
+        if (b) { drawBubble(ctx, b); drawText(ctx, env, b); }
+        if (tool) drawTag(ctx, tool);
       },
     };
     return self;

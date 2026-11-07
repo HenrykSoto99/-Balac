@@ -126,6 +126,19 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   console.log('draw tool tests: passed');
 }
 
+// Regression: a borrowed real click landed on the Sidekick's bubble instead of the app (and its Cmd+A selected the
+// overlay). The overlay goes click-through before the helper acts, and back after, even when acting fails.
+{
+  fs.writeFileSync(log, '');
+  const seen = [];
+  const t = createTools({ allowActions: () => true, ui: (m) => { if (m.kind === 'hands') seen.push({ on: m.on, acted: fs.readFileSync(log, 'utf8').includes('["act"') }); }, ask: async () => false, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test' }).tools;
+  await t.find((x) => x.name === 'act_in_app').execute({ target: 'TextEdit', steps: [{ do: 'key', key: 'return' }] }, ctx);
+  assert.deepEqual(seen, [{ on: true, acted: false }, { on: false, acted: true }], 'click-through on before acting, off after');
+  seen.length = 0;
+  await t.find((x) => x.name === 'act_in_app').execute({ target: 'NoSuchAppRoamiesTest', steps: [{ do: 'key', key: 'return' }] }, ctx).catch(() => {});
+  assert.equal(seen.at(-1)?.on, false, 'click-through released after a failed act');
+}
+
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('hands tests: passed');
 
@@ -141,3 +154,4 @@ console.log('hands tests: passed');
   assert.equal(frontLine(null), '');
   console.log('front line tests: passed');
 }
+

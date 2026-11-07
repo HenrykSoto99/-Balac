@@ -824,6 +824,13 @@
             rect = [Math.max(0, Math.floor((dx0 - a - tox) / a) * a + tox), Math.max(0, Math.floor((dy0 - a - toy) / a) * a + toy),
               Math.min(gw, Math.ceil((dx1 + 1 + a - tox) / a) * a + tox), Math.min(gh, Math.ceil((dy1 + 1 + a - toy) / a) * a + toy)];
           }
+          // What the plugin draws off the grid (glass bubbles, tags, cards) widens the patch to cover it, glow and all.
+          const ext = clear && rect ? plug?.extent?.() : null;
+          if (ext) {
+            const a = Math.ceil(20 / P);
+            rect = [Math.max(0, Math.min(rect[0], Math.floor(ext[0] / P) - a)), Math.max(0, Math.min(rect[1], Math.floor(ext[1] / P) - a)),
+              Math.min(gw, Math.max(rect[2], Math.ceil(ext[2] / P) + a)), Math.min(gh, Math.max(rect[3], Math.ceil(ext[3] / P) + a))];
+          }
           ready = true;
           if (!rect) return null;
           // A fingerprint of the picture: the lit cells, where the patch sits and the glide offset. NaN (never equal)

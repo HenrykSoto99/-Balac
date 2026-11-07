@@ -10,7 +10,9 @@
   @font-face { font-family: "Doto"; src: url("onboarding/fonts/doto.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
   /* Sized and moved by core.js to cover just what's drawn. */
-  canvas { position: fixed; left: 0; top: 0; display: block; cursor: grab; touch-action: none; transform-origin: 0 0; will-change: transform; }
+  canvas { position: fixed; left: 0; top: 0; display: block; cursor: grab; touch-action: none; transform-origin: 0 0; will-change: transform;
+    /* Never selectable: a stray triple-click or Select All tints a selected canvas solid grey over its whole box. */
+    -webkit-user-select: none; user-select: none; }
   canvas:active { cursor: grabbing; }
 </style>
 </head>
@@ -20,6 +22,7 @@
 <script src="roamies/markdown.js"></script>
 <script src="roamies/sfx.js"></script>
 <script src="roamies/voice-out.js"></script>
+<script src="roamies/glass.js"></script>
 <script src="roamies/agent.js"></script>
 <script src="roamies/agent-tools.js"></script>
 <script src="roamies/agent-cards.js"></script>

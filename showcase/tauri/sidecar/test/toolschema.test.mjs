@@ -41,3 +41,8 @@ console.log('tool schema ok');
   assert.equal(typedAddress('Safari', [{ do: 'fill', field: 'Email', text: 'a@b.com' }, ...go('example.com')]), null);
   console.log('typed address ok');
 }
+
+// Regression: a YouTube search typed into the search box failed and re-ran the old search; the search URL works.
+assert.match(tools.find((t) => t.name === 'act_in_app').description, /youtube\.com\/results\?search_query=/);
+// ...but when the user asks for the page's own search box, it uses the box.
+assert.match(tools.find((t) => t.name === 'act_in_app').description, /unless the user asks you to use the box: then fill it/);

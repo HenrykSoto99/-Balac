@@ -41,3 +41,19 @@ for (const who of ['anime', 'sarah', 'adrian', 'ken']) for (const size of ['defa
 }
 assert.ok(!looks.some((m) => m[1] === 'ken'), 'Ken is not a pickable look');
 console.log('looks tests: passed');
+
+// Regression: a selected stage canvas showed as a grey box around the Roamie (WebKit tints selected canvases).
+assert.match(src('../../../desktop.html'), /canvas \{[^}]*-webkit-user-select: none; user-select: none;[^}]*\}/);
+
+// Regression: after a drawing the Sidekick stopped following the cursor and hopped away from it instead.
+{
+  const agent = src('../../../roamies/agent.js'), rel = agent.slice(agent.indexOf('async release()'), agent.indexOf('place: (x, y) =>'));
+  assert.match(agent, /pen\.follow = !!station\.byCursor/, 'take() remembers whether it was following the cursor');
+  assert.match(rel, /if \(pen\.follow && presence\.ptr\) station\.byCursor = presence\.ptr\.slice\(\)/, 'release() goes back to following');
+}
+
+// The bubbles, tags and step list draw with glass.js, so the overlay loads it before them.
+{
+  const page = src('../../../desktop.html'), at = (f) => page.indexOf(`roamies/${f}`);
+  assert.ok(at('glass.js') > 0 && at('glass.js') < at('agent.js') && at('glass.js') < at('agent-cards.js'), 'desktop.html loads glass.js before agent.js and agent-cards.js');
+}

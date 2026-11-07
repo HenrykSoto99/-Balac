@@ -14,4 +14,10 @@ assert.match(side, /with draw/, 'the prompt says when to draw');
 const tools = readFileSync(fileURLToPath(new URL('../tools.mjs', import.meta.url)), 'utf8');
 assert.match(side, /remember_commitment[^\n]*shows their reminders list on screen by itself, so don't also draw a list or note/, 'the memory line says saved items show by themselves');
 assert.match(tools, /remember_commitment or update_commitment already show on their reminders list by themselves: never draw a list or note of them/, 'the draw tool says saved items are not drawn again');
+// Regression: every web search opened the card, because web answers always came as points plus sources. A quick fact
+// is just said; the card is only for answers that break down into points.
+assert.match(side, /An answer from the web is said like any other: a quick fact[^\n]*no points and no sources\. Only when the answer is genuinely a list/, 'web answers are spoken unless they are a list');
+const host = readFileSync(fileURLToPath(new URL('../../../roamies/host.js', import.meta.url)), 'utf8');
+const webCase = host.slice(host.indexOf("if (e.anim.tool === 'web')"), host.indexOf('jobs.push', host.indexOf("if (e.anim.tool === 'web')")));
+assert.ok(webCase && !/panel\(\)\?\.open/.test(webCase), 'a web lookup does not open the card by itself');
 console.log('prompt tests: passed');

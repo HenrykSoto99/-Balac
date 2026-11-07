@@ -242,35 +242,37 @@ const trail = {
   end() { this.settle(); this.send(true); this.steps = []; this.open.clear(); this.errors = []; toolNames.clear(); },
 };
 
-// Which animation each tool call plays, and what its label shows.
+// Which animation each tool call plays, and what its tag says: label is what it's doing, detail what on
+// ("running" "npm test"). The tag draws the verb dim and the thing bright.
 const base = (p) => path.basename(String(p ?? ''));
-function anim(name, args) {
+const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return String(u ?? ''); } };
+function anim(name, args = {}) {
   switch (name) {
     // A quiet "looking" tag while it captures, no camera show on top of the screen.
     case 'take_screenshot': {
       const t = String(args.target ?? 'screen').trim();
-      const app = t === 'screen' || t === 'front' || t.startsWith('window:') ? '' : t.slice(0, 18);
-      return { tool: 'look', variant: app ? 'window' : 'screen', label: app ? `looking at ${app}` : 'looking at your screen', detail: '' };
+      const app = t === 'screen' || t === 'front' || t.startsWith('window:') ? '' : t.slice(0, 24);
+      return { tool: 'look', variant: app ? 'window' : 'screen', label: 'looking at', detail: app || 'your screen' };
     }
-    case 'list_windows': return { tool: 'read', variant: 'many', detail: 'windows' };
-    case 'read_window': return { tool: 'read', variant: 'search', detail: String(args.target ?? 'front').slice(0, 18) };
-    case 'act_in_app': return { tool: 'write', variant: 'edit', detail: String(args.target ?? 'front').slice(0, 18) };
+    case 'list_windows': return { tool: 'read', variant: 'many', label: 'checking', detail: 'your windows' };
+    case 'read_window': return { tool: 'read', variant: 'search', label: 'reading', detail: String(args.target ?? 'front').slice(0, 24) };
+    case 'act_in_app': return { tool: 'write', variant: 'edit', label: 'working in', detail: String(args.target ?? 'front').slice(0, 24) };
     case 'draw': return null; // the drawing is its own thing, not a tool prop
     case 'plan_steps': return null; // drawn as the step trail, not a tool prop
-    case 'read_file': return { tool: 'read', variant: 'file', detail: base(args.path) };
-    case 'list_files': return { tool: 'read', variant: 'many', detail: base(args.dir) + '/' };
-    case 'search_files': return { tool: 'read', variant: 'search', detail: `"${String(args.pattern).slice(0, 18)}"` };
-    case 'write_file': return { tool: 'write', variant: existsSync(expand(args.path ?? '')) ? 'edit' : 'create', detail: base(args.path) };
-    case 'run_command': return { tool: 'run', variant: 'progress', detail: String(args.command).slice(0, 24) };
-    case 'fetch_url': { let h = ''; try { h = new URL(args.url).hostname; } catch {} return { tool: 'web', variant: 'fetch', detail: h }; }
-    case 'web_search': return { tool: 'web', variant: 'search', detail: 'web' };
-    case 'remember_commitment': return { tool: 'write', variant: 'create', detail: 'reminder' };
-    case 'forget_fact': return { tool: 'write', variant: 'crumble', detail: 'memory' };
-    case 'update_commitment': return { tool: 'write', variant: 'edit', detail: 'reminder' };
+    case 'read_file': return { tool: 'read', variant: 'file', label: 'reading', detail: base(args.path) };
+    case 'list_files': return { tool: 'read', variant: 'many', label: 'looking in', detail: base(args.dir) + '/' };
+    case 'search_files': return { tool: 'read', variant: 'search', label: 'searching for', detail: `"${String(args.pattern).slice(0, 24)}"` };
+    case 'write_file': { const edit = existsSync(expand(args.path ?? '')); return { tool: 'write', variant: edit ? 'edit' : 'create', label: edit ? 'editing' : 'creating', detail: base(args.path) }; }
+    case 'run_command': return { tool: 'run', variant: 'progress', label: 'running', detail: String(args.command).slice(0, 40) };
+    case 'fetch_url': return { tool: 'web', variant: 'fetch', label: 'reading', detail: host(args.url) };
+    case 'web_search': return { tool: 'web', variant: 'search', label: 'searching', detail: 'the web' };
+    case 'remember_commitment': return { tool: 'write', variant: 'create', label: 'saving', detail: 'a reminder' };
+    case 'forget_fact': return { tool: 'write', variant: 'crumble', label: 'forgetting', detail: 'that' };
+    case 'update_commitment': return { tool: 'write', variant: 'edit', label: 'updating', detail: 'a reminder' };
     case 'open': {
       const t = String(args.target ?? '');
-      if (/^https?:\/\//i.test(t)) { let h = t; try { h = new URL(t).hostname; } catch {} return { tool: 'web', variant: 'fetch', detail: h }; }
-      return { tool: 'run', variant: 'ok', detail: `open ${base(t)}`.slice(0, 24) };
+      if (/^https?:\/\//i.test(t)) return { tool: 'web', variant: 'fetch', label: 'opening', detail: host(t) };
+      return { tool: 'run', variant: 'ok', label: 'opening', detail: base(t).slice(0, 32) };
     }
     default: return null;
   }
@@ -289,7 +291,7 @@ const SLOW_TOOLS = new Set(['fetch_url', 'take_screenshot', 'read_window', 'act_
 const VOICE_ON = () => config.replies === 'voice' && speech.on;
 const replyStyle = () => (VOICE_ON() ? VOICE_STYLE : TEXT_STYLE);
 const TEXT_STYLE = `You talk through small speech bubbles, so keep replies short: one to three sentences unless asked for detail. Light markdown shows properly (**bold** for the key word, \`code\` for commands and file names, [links](https://…)), but skip headings and tables in a bubble, and never narrate actions like *waves*. One exception: when you search the web or fetch a page, or the answer is genuinely a list, it shows on a card beside you instead of a bubble. Then start with a one-sentence answer, follow with 3 to 6 short points as "- " lines (one fact each, under 20 words), and if you used the web this turn, end with a line "Sources: " and the site names as [name](url) links. Markdown renders on the card (bold, \`code\`, links, headings, tables, code blocks), so use what helps, but no preamble. Everything else stays a short bubble with no "- " lines. An emoji now and then is fine; the bubbles show them. `;
-const VOICE_STYLE = `You talk out loud: what you write is spoken in your voice and shown in a small bubble, so write for the ear. Say one to three short sentences, the way you'd talk to a friend: plain words, contractions, about 6 to 20 words each. What you say has no markdown, emoji, links, file paths or code; name the site, file or app instead. Say numbers, times and money the way people say them. Anything to read rather than hear goes below what you say and is never read out: "- " lines for points, options or steps (3 to 6, one fact each, under 20 words), "> " lines for a draft they'll send or copy (an email, message or post), and a \`\`\` block for code. What they asked to hear (a story, a joke, an explanation, advice) is spoken, not put on screen: say it, short (a story in 4 to 6 sentences). When you search the web or fetch a page, or the answer is genuinely a list, say the answer in one or two sentences, then the "- " points, then, if you used the web, a line "Sources: " with the site names as [name](url) links: it shows on a card beside you and only your sentences are spoken. Never say "here's a list" or read out what's on screen; a few words pointing to it are enough ("the steps are on screen").
+const VOICE_STYLE = `You talk out loud: what you write is spoken in your voice and shown in a small bubble, so write for the ear. Say one to three short sentences, the way you'd talk to a friend: plain words, contractions, about 6 to 20 words each. What you say has no markdown, emoji, links, file paths or code; name the site, file or app instead. Say numbers, times and money the way people say them. Anything to read rather than hear goes below what you say and is never read out: "- " lines for points, options or steps (3 to 6, one fact each, under 20 words), "> " lines for a draft they'll send or copy (an email, message or post), and a \`\`\` block for code. What they asked to hear (a story, a joke, an explanation, advice) is spoken, not put on screen: say it, short (a story in 4 to 6 sentences). An answer from the web is said like any other: a quick fact (a score, a date, the weather, who someone is) is just your sentences, no points and no sources. Only when the answer is genuinely a list, steps or a breakdown that's easier to read than hear, say it in one or two sentences, then the "- " points, then, if you used the web, a line "Sources: " with the site names as [name](url) links: those show on a card beside you and only your sentences are spoken. Never say "here's a list" or read out what's on screen; a few words pointing to it are enough ("the steps are on screen").
 Your voice carries feeling: start a sentence with a cue in square brackets when the moment calls for it, and it's performed, never shown or read out. Moods: ${VOICE_CUES.emotions.join(', ')}; soften or strengthen one with slightly, very or extremely ("[slightly sad]"), or pair two ("[warm and curious]"). How it's said, placed right before the words: ${VOICE_CUES.tones.join(', ')} ("It's [emphasis] today."). Sounds, followed by the sound in words: ${VOICE_CUES.sounds.join(', ')} ("[chuckling] Heh, fair enough.", "[sighing] Long day."). Pauses and background: ${VOICE_CUES.effects.join(', ')}. You can also describe the delivery in a few plain words when no single cue fits ("[quietly, a little embarrassed]", "[bright and bouncy]"). Act it: your voice really performs these, so let the feeling show. Match what's really happening: laugh at something funny, go gentle with bad news, whisper a secret, hurry when they're in a rush, light up at good news. Most replies want a cue somewhere, often on the first sentence, but at most one mood and one sound per sentence, never stack three, never use one just to fill, and keep shouting, screaming, sobbing and the background effects for when they truly fit.
 Before anything slow (searching the web, fetching or reading a page or file, looking at the screen, acting in an app, running a command), first say one short beat of 2 to 6 words that shows you heard them ("On it, checking Paris."), then call the tool in the same reply, so they're never left in silence. No beat when you answer straight away; never describe your steps; don't repeat the beat after the tool, go straight to the answer. In longer work, one short line before each new stage, not before every call.
 `;

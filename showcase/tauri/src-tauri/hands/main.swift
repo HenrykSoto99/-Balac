@@ -22,6 +22,7 @@ import UniformTypeIdentifiers
 
 setvbuf(stdout, nil, _IOLBF, 0)
 func out(_ o: [String: Any]) -> Never {
+    giveBack()
     let d = (try? JSONSerialization.data(withJSONObject: o)) ?? Data("{}".utf8)
     print(String(data: d, encoding: .utf8) ?? "{}")
     exit(0)
@@ -708,8 +709,17 @@ func sendScroll(_ e: CGEvent) { if inBackground { e.location = bgPoint; e.postTo
 /// A click without the cursor: focuses the text field at that spot, or presses the nearest pressable thing there.
 /// False when nothing there can be focused or pressed (then the real cursor is needed).
 func bgClick(_ pid: pid_t, _ p: CGPoint) -> Bool {
-    var el: AXUIElement?
-    guard AXUIElementCopyElementAtPosition(AXUIElementCreateApplication(pid), Float(p.x), Float(p.y), &el) == .success, var cur = el else { return false }
+    // Chromium answers hit tests late: the first answer can be the last one asked about, or a group the size of the whole
+    // page (pressing that clicks the middle of the page). Ask again until it names something small that sits right here.
+    let maxArea = (bgWin.map { $0.w * $0.h } ?? 1_000_000) * 0.25
+    let small = { (e: AXUIElement) -> Bool in frame(e).map { $0.insetBy(dx: -1, dy: -1).contains(p) && $0.width * $0.height <= maxArea } ?? false }
+    var hit: AXUIElement?
+    for _ in 0..<4 {
+        var el: AXUIElement?
+        if AXUIElementCopyElementAtPosition(AXUIElementCreateApplication(pid), Float(p.x), Float(p.y), &el) == .success, let e = el, small(e) { hit = e; break }
+        Thread.sleep(forTimeInterval: 0.08)
+    }
+    guard var cur = hit else { return false }
     for _ in 0..<6 {
         let role = str(cur, kAXRoleAttribute) ?? ""
         if ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSecureTextField"].contains(role) {
@@ -717,7 +727,7 @@ func bgClick(_ pid: pid_t, _ p: CGPoint) -> Bool {
         }
         if ["AXWebArea", "AXWindow", "AXScrollArea", "AXApplication"].contains(role) { return false }
         var names: CFArray?
-        if AXUIElementCopyActionNames(cur, &names) == .success, let n = names as? [String], n.contains(kAXPressAction as String),
+        if small(cur), AXUIElementCopyActionNames(cur, &names) == .success, let n = names as? [String], n.contains(kAXPressAction as String),
            AXUIElementPerformAction(cur, kAXPressAction as CFString) == .success { return true }
         guard let up = attr(cur, kAXParentAttribute) else { return false }
         cur = up as! AXUIElement
@@ -753,16 +763,24 @@ func borrowEnd(_ saved: (CGPoint?, NSRunningApplication?), _ w: Win) {
     if let prev = saved.1, prev.processIdentifier != w.pid, !isRoamies(prev.processIdentifier) { prev.activate(options: []) }
     progress(["ev": "return"])
 }
-/// Runs body with the real cursor and keyboard, then gives them back to the user.
+/// What to give back once this run ends, after a step took the real cursor and keyboard.
+var borrowed: (CGPoint?, NSRunningApplication?)? = nil
+/// Runs body with the real cursor and keyboard. They stay borrowed (the app in front) until the run ends: an app in the
+/// background ignores keys sent to it, so a Return after a borrowed fill did nothing and the search never ran.
 @discardableResult
 func withRealCursor<T>(_ body: () -> T) -> T? {
     guard BG, !fgActive, let w = bgWin, let app = bgApp else { return body() }
     usedRealCursor = true
     guard let saved = borrowBegin() else { userBusy = true; return nil }
-    fgActive = true
-    defer { fgActive = false; borrowEnd(saved, w) }
+    borrowed = saved; fgActive = true
     _ = bringToFront(w, app)
     return body()
+}
+/// Gives the cursor and the front app back, if a step borrowed them.
+func giveBack() {
+    guard let saved = borrowed, let w = bgWin else { return }
+    borrowed = nil; fgActive = false
+    borrowEnd(saved, w)
 }
 /// Saves the document in that window without bringing its app forward: AppleScript's save, which document-based
 /// apps (TextEdit, Pages, Numbers, Preview…) support. Only documents that already have a file (no Save dialog).
@@ -1472,8 +1490,19 @@ case "act":
             guard isEditable(focusedEl(app)) else {
                 out(["ok": false, "error": "Step \(i + 1): the cursor isn't in a text field, so typing would go nowhere. Use {do:'fill', field, text} to fill a field by its label.", "done": done])
             }
-            emitStep(i, "type", focusedEl(app), text: s["text"] as? String ?? "")
-            typeText(s["text"] as? String ?? ""); done.append("typed text")
+            let text = s["text"] as? String ?? "", into = focusedEl(app), before = into.flatMap { str($0, kAXValueAttribute) }
+            emitStep(i, "type", into, text: text)
+            typeText(text)
+            // Typing the app dropped (some ignore keys sent in the background) must stop here: a following
+            // Return would submit whatever the field held before.
+            if let into, let before, !text.isEmpty, axRole(into) != "AXSecureTextField", str(into, kAXSubroleAttribute) != "AXSecureTextField" {
+                Thread.sleep(forTimeInterval: 0.12)
+                let now = str(into, kAXValueAttribute) ?? before
+                if now == before, !fold(now).contains(fold(text).prefix(40)) {
+                    out(["ok": false, "error": "Step \(i + 1): typed, but the text field still shows \"\(now.prefix(80))\", so I stopped before the next step. Use {do:'fill', field, text} instead, or the open tool for a web address or a site's search results page.", "done": done])
+                }
+            }
+            done.append("typed text")
         case "fill":
             // A form field by its label, placeholder or id: put the cursor in it, replace its text, check it took.
             let text = s["text"] as? String ?? ""
@@ -1595,10 +1624,7 @@ case "act":
                     last = pageText(app, w, cap: 4000).joined(separator: "|")
                     if last == before { usedRealCursor = true; fgActive = false }
                 }
-                var borrow = BG && usedRealCursor && !fgActive
-                var saved: (CGPoint?, NSRunningApplication?) = (nil, nil)
-                if borrow { if let sv = borrowBegin() { saved = sv; fgActive = true; _ = bringToFront(w, app) } else { borrow = false; userBusy = true; usedRealCursor = false } }
-                defer { if borrow { fgActive = false; borrowEnd(saved, w) } }
+                if BG, usedRealCursor, !fgActive, withRealCursor({ true }) == nil { usedRealCursor = false }
                 while Date() < deadline, same < 2 {
                     for _ in 0..<4 {
                         moveTo(p)

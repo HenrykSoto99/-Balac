@@ -183,7 +183,8 @@
     } else if (live.length) {
       if (t - lastLive >= 1 / 31) { lastLive = t; paint(clampR(live.reduce((u, m) => union(u, grow(markBox(m), 28)), null)), t); }
     }
-    if (full || live.length) raf = requestAnimationFrame(render);
+    // touch() while drawing (text still typing in) may have asked for the next frame already: one frame, never two.
+    if ((full || live.length) && !raf) raf = requestAnimationFrame(render);
   }
   async function tween(dur, f) {
     if (reduced() || dur <= 0) { f(1); touch(); return; }
@@ -205,6 +206,7 @@
   const colorOf = (m, color) => { const rc = m.recolor; return rc && now() - rc < 0.5 ? mixHex(m.color0, color, (now() - rc) / 0.5) : color; };
   function pen(base, lit, m, pts, p, color, o = {}) {
     if (p <= 0 || !pts || pts.length < 2) return;
+    if (p < 1) touch(0.1);
     const key = o.key || 'o', w = o.w || 3.6;
     const ol = (m.__ol ??= {})[key]?.src === pts ? m.__ol[key] : (m.__ol[key] = { src: pts, ...outline(pts, w) });
     const k = Math.max(1, Math.round((pts.length - 1) * clamp(p, 0, 1)));
@@ -231,6 +233,8 @@
     c.save(); c.font = font; c.textBaseline = o.baseline || 'alphabetic'; c.textAlign = 'left';
     const full = c.measureText(str).width, x0 = o.anchor === 'middle' ? x - full / 2 : o.anchor === 'end' ? x - full : x;
     const n = Math.floor(str.length * clamp(u, 0, 1));
+    // Still typing in: keep repainting until it's all there (a card stopped after 1.5 s, freezing long text mid-word).
+    if (n < str.length) touch(0.1);
     if (o.rim) { c.lineWidth = o.rim; c.strokeStyle = EDGE; c.lineJoin = 'round'; c.strokeText(str.slice(0, n), x0, y); }
     if (n >= str.length || o.land === false) { c.fillStyle = color; c.fillText(str.slice(0, n), x0, y); }
     else { const head = str.slice(0, Math.max(0, n - 2)); c.fillStyle = color; c.fillText(head, x0, y); c.fillStyle = '#ffffff'; c.fillText(str.slice(head.length, n), x0 + c.measureText(head).width, y); }
@@ -244,7 +248,11 @@
     if (textW(str, font) <= maxW) return str;
     let lo = 0, hi = str.length;
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (textW(`${str.slice(0, mid).trimEnd()}…`, font) <= maxW) lo = mid; else hi = mid - 1; }
-    return `${str.slice(0, lo).trimEnd()}…`;
+    // End on a whole word when one is close, rather than mid-word.
+    let cut = str.slice(0, lo);
+    const sp = cut.lastIndexOf(' ');
+    if (lo < str.length && str[lo] !== ' ' && sp > cut.length * 0.6) cut = cut.slice(0, sp);
+    return `${cut.trimEnd()}…`;
   }
   // Lines of at most w px. A word wider than a line (a link, a long name) is broken across lines; past max rows the
   // last one ends in an ellipsis.
@@ -271,7 +279,9 @@
   let fontsOk = null;
   const fontsReady = () => (fontsOk ??= Promise.race([Promise.all([`500 13px ${MONO}`, `700 11px ${MONO}`, `800 16px ${DOTO}`].map((f) => document.fonts?.load(f))), sleep(1500)]).catch(() => {}));
   function wrapped(c, rows, x, y, lh, font, color, u) {
-    let left = Math.floor(rows.reduce((s, r) => s + r.length + 1, 0) * clamp(u, 0, 1));
+    const total = rows.reduce((s, r) => s + r.length + 1, 0);
+    let left = Math.floor(total * clamp(u, 0, 1));
+    if (left < total) touch(0.1);
     rows.forEach((r, i) => { const k = Math.min(r.length, left); left -= r.length + 1; if (k > 0) typed(c, r.slice(0, k), x, y + i * lh, font, color, 1); });
   }
 
@@ -529,27 +539,36 @@
   };
 
   // ---------------------------------------------------------------- cards and diagrams on calm space
-  // Beside the front window (sent as global bounds), else down the right edge; never on another card or a screen mark.
+  // Beside the front window (sent as global bounds), else on the screen, filling from the left: the first card goes in the
+  // leftmost free column and each next one just right of those already up (top to bottom in each column, columns left
+  // to right); never on another card or a screen mark.
   let winRect = null;
   function place(w, h, part) {
     const S = scr(), top = S[1] + 12, bot = S[3] - 64; // room for the caption
     // Cards keep a small gap from each other (their boxes already include the shadow), marks a bigger one.
     const taken = [...marks.filter((m) => m.alive && m.card).map((m) => grow(markBox(m), 6)), ...markedNow().map((r) => grow(r, 10)), ...pillsNow()];
+    const roomL = !!winRect && winRect[0] - S[0] >= w + 28, roomR = !!winRect && S[2] - (winRect[0] + winRect[2]) >= w + 28;
+    // A window that fills the screen leaves no room beside it: then cards go over it like on an empty screen.
+    const overWin = !winRect || (!roomL && !roomR);
+    const fits = (x) => x >= S[0] + 8 && x + w <= S[2] - 8 && (overWin || x >= winRect[0] + winRect[2] || x + w <= winRect[0]);
     const xs = [];
-    if (winRect) {
-      if (S[2] - (winRect[0] + winRect[2]) >= w + 28) xs.push(Math.min(S[2] - w - 12, winRect[0] + winRect[2] + 20));
-      if (winRect[0] - S[0] >= w + 28) xs.push(Math.max(S[0] + 12, winRect[0] - w - 20));
-    }
-    // Also just right of each card already up, so a second column packs beside the first instead of landing on the window.
-    for (const m of marks) if (m.alive && m.card) { const b = markBox(m), x = b[0] + b[2] + 8; if (x + w <= S[2] - 8 && (!winRect || x >= winRect[0] + winRect[2] || x + w <= winRect[0])) xs.push(x); }
-    xs.push(S[2] - w - 16, S[0] + 16);
+    if (roomL || overWin) xs.push(S[0] + 16);
+    for (const b of marks.filter((m) => m.alive && m.card).map(markBox).sort((a, q) => a[0] - q[0])) { const x = b[0] + b[2] + 8; if (fits(x)) xs.push(x); }
+    if (roomR) xs.push(winRect[0] + winRect[2] + 20);
+    xs.push(S[0] + 16, S[2] - w - 16);
     for (const x of xs) for (let y = top; y + h <= bot; y += 12) { const r = [x, y, w, h]; if (!taken.some((q) => overlap(r, q) > 0)) return r; }
-    return [S[2] - w - 16, top, w, h];
+    // Too tall to fit between the top and the caption: the first column where it covers nothing else, from the top.
+    for (const x of xs) { const r = [x, top, w, h]; if (!taken.some((q) => overlap(r, q) > 0)) return r; }
+    return [S[0] + 16, top, w, h];
   }
   // A card opening: the cursor drags its corner out. Returns the card mark; draw(b, l, t, x, y) paints its insides.
+  // Taller than the screen allows: it opens at the tallest it may be and its insides scroll (wheel or trackpad), so
+  // nothing in it is ever cut off.
   async function card(m, w, h, inner, o = {}) {
+    const full = h;
+    h = Math.min(full, maxCardH());
     const [x, y] = place(w, h, m.part), bar = o.bar === false ? 0 : 26;
-    const c = add({ z: 2, part: m.part, card: true, kind: m.kind, cw: 0, ch: 0, p: 0, done: 0, w, h, color: tone(m.tone), live: o.live, box: () => [x - 4, y - 4, w + 8, h + 14],
+    const c = add({ z: 2, part: m.part, card: true, kind: m.kind, cw: 0, ch: 0, p: 0, done: 0, w, h, sy: 0, scrollMax: Math.max(0, full - h), color: tone(m.tone), live: o.live, box: () => [x - 4, y - 4, w + 8, h + 14],
       draw(b, l, t) {
         if (this.cw < 4) return;
         chrome(b, x, y, this.cw, this.ch, { edge: o.edge ? colorOf(this, this.color) : ACC });
@@ -565,11 +584,18 @@
         }
         // A last guard: nothing inside a card is drawn outside it.
         for (const c of [b, l]) { c.save(); c.beginPath(); c.rect(x + 2, y + bar + 1, w - 4, h - bar - 3); c.clip(); }
-        try { inner.call(this, b, l, t, x, y + bar, t - this.done); } finally { b.restore(); l.restore(); }
+        try { inner.call(this, b, l, t, x, y + bar - this.sy, t - this.done); } finally { b.restore(); l.restore(); }
+        if (this.scrollMax > 0) {
+          const top = y + bar + 6, len = h - bar - 12, th = Math.max(18, (len * h) / full), ty = top + (len - th) * (this.sy / this.scrollMax);
+          b.fillStyle = rgba(ACC, 0.15); b.fillRect(x + w - 7, top, 2, len);
+          b.fillStyle = ACC; b.fillRect(x + w - 7, ty, 2, th);
+        }
       },
       hits() {
         const out = bar ? [{ rect: [x + w - 28, y + 2, 26, 22], kind: 'close', part: m.part }, { rect: [x, y, w - 30, bar], kind: 'drag', part: m.part }] : [{ rect: [x, y, w, Math.min(h, 24)], kind: 'drag', part: m.part }];
-        return [...(this.more?.() ?? []), ...out, { rect: [x, y, w, h], kind: 'card', part: m.part }];
+        // Links scrolled out of view can't be clicked.
+        const more = (this.more?.() ?? []).filter((q) => q.rect[1] >= y + bar && q.rect[1] + q.rect[3] <= y + h);
+        return [...more, ...out, { rect: [x, y, w, h], kind: 'card', part: m.part }];
       },
     });
     await fly(x, y); sfx('expand');
@@ -598,42 +624,60 @@
   const loadIcons = (list) => (list ?? []).map((s) => { const o = { ...s }; if (s.icon) { o.img = new Image(); o.img.onload = () => touch(); o.img.src = s.icon; } return o; });
   const CARDS_DRAW = {
     async card(m) {
-      const w = 340, HEAD = `800 22px ${DOTO}`, heads = m.heading ? wrapRows(m.heading, w - 40, HEAD, 2) : [], srcs = loadIcons(m.sources);
-      const head = heads.length ? heads.length * 26 + 14 : 0, room = Math.floor((maxCardH() - 58 - head - (srcs.length ? 30 : 0)) / 19);
-      const items = (m.items ?? []).map((it) => wrapRows(it, w - 64, BODY, 3));
-      const itemRows = items.reduce((s2, r) => s2 + r.length, 0), rows = m.text ? wrapRows(m.text, w - 40, BODY, Math.max(2, room - itemRows)) : [];
-      while (items.length && rows.length + items.reduce((s2, r) => s2 + r.length, 0) > room) items.pop();
-      const h = 26 + 18 + head + rows.length * 19 + items.reduce((s2, r) => s2 + r.length * 19 + 6, 0) + (srcs.length ? 30 : 0) + 14;
+      const HEAD = `800 22px ${DOTO}`, srcs = loadIcons(m.sources);
+      // Everything shown: laid out 340 wide, then 440 and 560 while it's taller than the screen allows; past that it scrolls.
+      const lay = (w) => {
+        const heads = m.heading ? wrapRows(m.heading, w - 40, HEAD) : [], head = heads.length ? heads.length * 26 + 14 : 0;
+        const rows = m.text ? wrapRows(m.text, w - 40, BODY) : [], items = (m.items ?? []).map((it) => wrapRows(it, w - 64, BODY));
+        const h = 26 + 18 + head + rows.length * 19 + (rows.length && items.length ? 10 : 0) + items.reduce((s2, r) => s2 + r.length * 19 + 6, 0) + (srcs.length ? 30 : 0) + 14;
+        return { w, heads, head, rows, items, h };
+      };
+      let L = lay(340);
+      for (const wide of [440, 560]) if (L.h > maxCardH()) L = lay(wide);
+      const { w, heads, head, rows, items, h } = L, gap = rows.length && items.length ? 10 : 0;
       const ticks = items.map((_, i) => handLine([0, 0], [8, 0], { jitter: 0.3 }));
       let hits = [];
       const c = await card(m, w, h, function (b, l, t, x, y, age) {
         let yy = y + 18;
         heads.forEach((r, i) => typed(b, r, x + 20, yy + 18 + i * 26, HEAD, TEXT, (age - i * 0.3) / 0.6)); yy += head;
-        wrapped(b, rows, x + 20, yy + 6, 19, BODY, TEXT, (age - 0.2) / (0.4 + rows.join(' ').length * 0.012)); yy += rows.length * 19;
+        wrapped(b, rows, x + 20, yy + 6, 19, BODY, TEXT, (age - 0.2) / (0.4 + rows.join(' ').length * 0.012)); yy += rows.length * 19 + gap;
         items.forEach((r, i) => { const a = age - 0.4 - i * 0.25; if (a <= 0) return; pen(b, l, this, ticks[i].map(([px, py]) => [px + x + 24, py + yy + 1]), clamp(a / 0.2, 0, 1), this.color, { key: 'k' + i, w: 2.6 }); wrapped(b, r, x + 40, yy + 6, 19, BODY, TEXT, a / 0.5); yy += r.length * 19 + 6; });
         if (srcs.length) hits = sourcesRow(b, srcs, x + 20, y + h - 26 - 18, w - 40, age - 0.6);
       }, { title: m.title || 'answer' });
       c.more = () => hits.map((q) => ({ ...q, part: m.part }));
     },
     async note(m) {
-      const w = 210, rows = wrapRows(m.text, w - 28, `500 13px ${MONO}`, Math.floor((maxCardH() - 40) / 19)), h = 40 + rows.length * 19;
+      // All of it; a long note goes wider rather than very tall.
+      const narrow = wrapRows(m.text, 210 - 28, `500 13px ${MONO}`), w = narrow.length > 12 ? 320 : 210;
+      const rows = w === 210 ? narrow : wrapRows(m.text, w - 28, `500 13px ${MONO}`), h = 40 + rows.length * 19;
       await card(m, w, h, function (b, l, t, x, y, age) { b.fillStyle = colorOf(this, this.color); b.fillRect(x + 8, y + 8, w - 16, 3); wrapped(b, rows, x + 14, y + 32, 19, `500 13px ${MONO}`, TEXT, age / (0.3 + m.text.length * 0.025)); }, { bar: false, edge: true });
       sfx('page');
     },
     async list(m) {
-      const w = 280, TITLE = `800 20px ${DOTO}`, title = ellipsize(m.title || 'list', w - 36, TITLE);
-      const items = m.items.map((it) => wrapRows(it, w - 58, BODY, 2)), tops = [];
-      let yy = 50; for (const r of items) { tops.push(yy); yy += r.length * 19 + 11; }
-      const h = 26 + yy + 6, rings = items.map(() => loop(0, 0, 12, 12, { pad: 0, r: 6, over: 0.1 }));
+      const TITLE = `800 20px ${DOTO}`;
+      // The whole title and every point in full: 280 wide, wider while a point runs past three lines or it's too tall.
+      const lay = (w) => {
+        const title = wrapRows(m.title || 'list', w - 36, TITLE), items = m.items.map((it) => wrapRows(it, w - 58, BODY)), tops = [];
+        let yy = 50 + (title.length - 1) * 24; for (const r of items) { tops.push(yy); yy += r.length * 19 + 11; }
+        return { w, title, items, tops, h: 26 + yy + 6 };
+      };
+      let L = lay(280);
+      for (const wide of [360, 440]) if (L.h > maxCardH() || L.items.some((r) => r.length > 3)) L = lay(wide);
+      const { w, title, items, tops, h } = L, rings = items.map(() => loop(0, 0, 12, 12, { pad: 0, r: 6, over: 0.1 }));
       await card(m, w, h, function (b, l, t, x, y, age) {
-        typed(b, title, x + 18, y + 30, TITLE, TEXT, age / 0.4);
+        title.forEach((r, i) => typed(b, r, x + 18, y + 30 + i * 24, TITLE, TEXT, (age - i * 0.2) / 0.4));
         items.forEach((r, i) => { const a = age - 0.3 - i * 0.26; if (a <= 0) return; pen(b, l, this, rings[i].map(([px, py]) => [px + x + 18, py + y + tops[i]]), clamp(a / 0.3, 0, 1), this.color, { key: 'r' + i, w: 2.4 }); wrapped(b, r, x + 40, y + tops[i] + 11, 19, BODY, TEXT, a / 0.4); });
       }, { title: 'list' });
       for (let i = 0; i < items.length; i++) { touch(0.5); await sleep(260); }
     },
     async clip(m) {
-      const w = 320, rows = wrapRows(m.text, w - 36, `400 12px ${MONO}`, 10), h = 26 + 62 + rows.length * 18, title = ellipsize(m.title, w - 36, `800 18px ${DOTO}`);
-      await card(m, w, h, function (b, l, t, x, y, age) { typed(b, title, x + 18, y + 30, `800 18px ${DOTO}`, TEXT, age / 0.5); wrapped(b, rows, x + 18, y + 56, 18, `400 12px ${MONO}`, DIM, (age - 0.3) / 1.2); }, { title: m.label || 'clipping' });
+      const TF = `800 18px ${DOTO}`, CF = `400 12px ${MONO}`;
+      // The whole title and text: 320 wide, 420 when long.
+      const lay = (w) => { const title = wrapRows(m.title, w - 36, TF), rows = wrapRows(m.text, w - 36, CF); return { w, title, rows, h: 26 + 62 + (title.length - 1) * 22 + rows.length * 18 }; };
+      let L = lay(320);
+      if (L.h > maxCardH() || L.rows.length > 14) L = lay(420);
+      const { w, title, rows, h } = L, top = 56 + (title.length - 1) * 22;
+      await card(m, w, h, function (b, l, t, x, y, age) { title.forEach((r, i) => typed(b, r, x + 18, y + 30 + i * 22, TF, TEXT, (age - i * 0.2) / 0.5)); wrapped(b, rows, x + 18, y + top, 18, CF, DIM, (age - 0.3) / 1.2); }, { title: m.label || 'clipping' });
     },
     async sources(m) {
       const srcs = loadIcons(m.sources), w = 360, h = 26 + 40; let hits = [];
@@ -641,7 +685,11 @@
       c.more = () => hits.map((q) => ({ ...q, part: m.part }));
     },
     async photo(m) {
-      const w = 264, ph = 192, h = 26 + ph + 52, cells = [];
+      const w = 264, ph = 192, cells = [], cap = m.text || m.title || m.query || '';
+      // The whole caption: a short one big, a long one in body type; the credit under it.
+      const long = cap.length > 60, CAPF = long ? `400 12px ${MONO}` : `800 16px ${DOTO}`, capLh = long ? 17 : 20;
+      const capRows = cap ? wrapRows(cap, w - 24, CAPF) : [], credRows = m.credit ? wrapRows(m.credit, w - 24, `400 10px ${MONO}`) : [];
+      const h = 26 + ph + 12 + capRows.length * capLh + credRows.length * 14 + 14;
       let ready = false;
       if (m.src && !m.missing) {
         const img = new Image();
@@ -656,19 +704,18 @@
         };
         img.src = m.src;
       }
-      const cap = m.text || m.title || m.query || '';
       const c = await card(m, w, h, function (b, l, t, x, y, age) {
         const u = clamp(age / 1, 0, 1);
         if (ready) for (const [gx, gy, v] of cells) { if ((B4[(gy % 4) * 4 + (gx % 4)] + 0.5) / 16 > u * 1.05) continue; b.fillStyle = LED[v]; b.fillRect(x + 12 + gx * 3, y + 10 + gy * 3, 3, 3); }
         else { b.fillStyle = 'rgba(14,92,96,0.25)'; b.fillRect(x + 12, y + 10, w - 24, ph - 12); typed(b, m.missing ? 'no picture found' : 'loading…', x + w / 2, y + ph / 2, SMALL, DIM, 1, { anchor: 'middle' }); }
-        typed(b, ellipsize(cap, w - 24, `800 16px ${DOTO}`), x + w / 2, y + ph + 22, `800 16px ${DOTO}`, TEXT, (age - 0.6) / 0.5, { anchor: 'middle' });
-        if (m.credit) typed(b, ellipsize(m.credit, w - 24, `400 10px ${MONO}`), x + w / 2, y + ph + 40, `400 10px ${MONO}`, DIM, (age - 0.8) / 0.4, { anchor: 'middle' });
+        capRows.forEach((r, i) => typed(b, r, x + w / 2, y + ph + 22 + i * capLh, CAPF, TEXT, (age - 0.6 - i * 0.15) / 0.5, { anchor: 'middle' }));
+        credRows.forEach((r, i) => typed(b, r, x + w / 2, y + ph + 22 + capRows.length * capLh + i * 14, `400 10px ${MONO}`, DIM, (age - 0.8) / 0.4, { anchor: 'middle' }));
       }, { title: 'photo' });
       sfx('scan');
       return c;
     },
     async graph(m) {
-      const w = 360, h = 26 + 250, gx0 = 46, gy0 = 22, gw = w - gx0 - 22, gh = 168;
+      const w = 360, gx0 = 46, gy0 = 22, gw = w - gx0 - 22, gh = 168;
       const all = [...(m.plots ?? []).flatMap((p) => p.points), ...(m.dots ?? []).map((d) => [d.x, d.y])];
       const xr = m.x_range ?? [Math.min(...all.map((p) => p[0])), Math.max(...all.map((p) => p[0]))], yr = m.y_range ?? [Math.min(0, ...all.map((p) => p[1])), Math.max(...all.map((p) => p[1]))];
       const sx = (v) => gx0 + ((v - xr[0]) / ((xr[1] - xr[0]) || 1)) * gw, sy = (v) => gy0 + gh - ((v - yr[0]) / ((yr[1] - yr[0]) || 1)) * gh;
@@ -677,6 +724,9 @@
       const dots = (m.dots ?? []).map((d) => ({ ...d, pts: loop(sx(d.x) - 5, sy(d.y) - 5, 10, 10, { pad: 0, r: 5 }), p: 0 }));
       const fmt = (v) => (Math.abs(v) >= 1000 ? `${Math.round(v / 100) / 10}k` : String(Math.round(v * 10) / 10));
       const keys = plots.filter((p) => p.label).map((p) => [p.tone, p.label]);
+      // Keys flow onto more rows rather than being left out.
+      const kAt = []; { let kx = gx0, kr = 0; for (const [, words] of keys) { const kw = textW(words, SMALL) + 30; if (kx > gx0 && kx + kw - 16 > w - 10) { kr++; kx = gx0; } kAt.push([kx, kr]); kx += kw; } }
+      const h = 26 + 250 + Math.max(0, (kAt.at(-1)?.[1] ?? 0) * 18);
       let ax = 0;
       const c = await card(m, w, h, function (b, l, t, x, y) {
         const off = (pts) => pts.map(([px, py]) => [px + x, py + y]);
@@ -689,8 +739,8 @@
           b.textAlign = 'left';
         }
         plots.forEach((p, i) => pen(b, l, this, O.plots[i], p.p, tone(p.tone), { key: 'p' + i }));
-        dots.forEach((d, i) => { pen(b, l, this, O.dots[i], d.p, HOT, { key: 'd' + i, w: 2.6 }); if (d.p >= 1 && d.label) { const lab = ellipsize(d.label, 130, SMALL), lx = Math.min(x + sx(d.x) + 9, x + w - 12 - textW(lab, SMALL)); typed(b, lab, lx, y + sy(d.y) - 8, SMALL, TEXT, 1); } });
-        let kx = x + gx0; for (const [tn, words0] of keys) { const words = ellipsize(words0, 110, SMALL); if (kx + textW(words, SMALL) + 14 > x + w - 10) break; b.fillStyle = tone(tn); b.beginPath(); b.arc(kx + 4, y + gy0 + gh + 38, 4, 0, Math.PI * 2); b.fill(); typed(b, words, kx + 14, y + gy0 + gh + 42, SMALL, DIM, 1); kx += textW(words, SMALL) + 30; }
+        dots.forEach((d, i) => { pen(b, l, this, O.dots[i], d.p, HOT, { key: 'd' + i, w: 2.6 }); if (d.p >= 1 && d.label) { const lab = ellipsize(d.label, w - 40, SMALL), lx = Math.min(x + sx(d.x) + 9, x + w - 12 - textW(lab, SMALL)); typed(b, lab, lx, y + sy(d.y) - 8, SMALL, TEXT, 1); } });
+        keys.forEach(([tn, words], i) => { const [kx, kr] = kAt[i], ky = y + gy0 + gh + 38 + kr * 18; b.fillStyle = tone(tn); b.beginPath(); b.arc(x + kx + 4, ky, 4, 0, Math.PI * 2); b.fill(); typed(b, words, x + kx + 14, ky + 4, SMALL, DIM, 1); });
       }, { title: m.title || 'graph' });
       const [x, y] = [markBox(c)[0] + 4, markBox(c)[1] + 4 + 26];
       await trace(axes.map(([px, py]) => [px + x, py + y]), 0.7, (e) => (ax = e));
@@ -705,7 +755,11 @@
       await card(m, w, h, function (b, l, t, x, y, age) { m.keys.forEach((k, i) => { const [kx, r, text] = at0[i], ky = y + 20 + r * 22; b.fillStyle = tone(k.tone); b.beginPath(); b.arc(x + kx + 4, ky - 4, 4, 0, Math.PI * 2); b.fill(); typed(b, text, x + kx + 14, ky, SMALL, DIM, age / 0.4); }); }, { bar: false });
     },
     async timeline(m) {
-      const ev = m.events, w = clamp(ev.length * 82, 320, 620), h = 26 + 120, ty = 58;
+      const ev = m.events, w = clamp(ev.length * 82, 320, 620), gap = ev.length > 1 ? (w - 60) / (ev.length - 1) : w - 40;
+      // Each event's words in full, wrapped to its column; the line moves down to make room for the tallest one above it.
+      const words = ev.map((e) => wrapRows(e.text, Math.min(w - 20, Math.max(64, gap * 2 - 14)), SMALL));
+      const upN = Math.max(1, ...words.filter((_, i) => i % 2 === 0).map((r) => r.length)), downN = Math.max(1, ...words.filter((_, i) => i % 2).map((r) => r.length));
+      const ty = 58 + (upN - 1) * 13, h = 26 + ty + 62 + (downN - 1) * 13;
       const xs = ev.map((_, i) => 30 + ((w - 60) * i) / Math.max(1, ev.length - 1)), line = handLine([16, ty], [w - 16, ty], { jitter: 0.5, bow: 0.006 });
       let lp = 0; const shown = [];
       const c = await card(m, w, h, function (b, l, t, x, y) {
@@ -716,9 +770,9 @@
           chip(b, px - 7, y + ty - 7, 14, 14, '', a, { color: this.color });
           // Centred on its dot, but never past the card's edges.
           const inCard = (str, font) => { const tw = textW(str, font); return clamp(px, x + 10 + tw / 2, x + w - 10 - tw / 2); };
-          const gap = ev.length > 1 ? (w - 60) / (ev.length - 1) : w - 40, when = `800 15px ${DOTO}`, words = ellipsize(e.text, Math.max(60, gap * 1.6), SMALL);
+          const when = `800 15px ${DOTO}`, rows = words[i], n = rows.length;
           typed(b, e.when, inCard(e.when, when), y + ty + (up ? -18 : 34), when, TEXT, a / 0.3, { anchor: 'middle' });
-          typed(b, words, inCard(words, SMALL), y + ty + (up ? -36 : 50), SMALL, DIM, (a - 0.1) / 0.4, { anchor: 'middle' });
+          rows.forEach((r, k) => typed(b, r, inCard(r, SMALL), y + ty + (up ? -36 - (n - 1 - k) * 13 : 50 + k * 13), SMALL, DIM, (a - 0.1 - k * 0.1) / 0.4, { anchor: 'middle' }));
         });
       }, { title: m.title || 'timeline' });
       const [x, y] = [markBox(c)[0] + 4, markBox(c)[1] + 4 + 26];
@@ -837,7 +891,9 @@
   }
   const ATOM_TONE = { O: 'coral', N: 'sky', S: 'amber', P: 'lilac', F: 'lime', Cl: 'lime', Br: 'coral', I: 'lilac' };
   async function drawMolecule(m) {
-    const mol = m.mol, { pos, rings } = layoutMolecule(mol), w = 320, h = 26 + 270, bw = w - 48, bh = 214;
+    const mol = m.mol, { pos, rings } = layoutMolecule(mol), w = 320, bw = w - 48, bh = 214;
+    const cap = m.label || m.text || '', CAPF = `800 16px ${DOTO}`, capRows = cap ? wrapRows(cap, w - 24, CAPF) : [];
+    const h = 26 + 270 + Math.max(0, capRows.length - 1) * 20;
     const bx = boxOf(pos), s = Math.min(bw / Math.max(bx[2], 1), bh / Math.max(bx[3], 1), 34);
     const P2 = pos.map(([x, y]) => [24 + (x - bx[0]) * s + (bw - bx[2] * s) / 2, 18 + (y - bx[1]) * s + (bh - bx[3] * s) / 2]);
     // Carbons are the skeleton's corners (unlabelled, as chemists draw them); everything else is named with its hydrogens.
@@ -864,7 +920,6 @@
       strokes.push(loop(c[0] - rad, c[1] - rad, 2 * rad, 2 * rad, { pad: 0, r: rad, over: 0.08 })); bondOf.push(null);
     }
     const ps = strokes.map(() => 0), born = [];
-    const cap = m.label || m.text || '';
     const c = await card(m, w, h, function (b, l, t, x, y, age) {
       this.__s ??= strokes.map((q) => q.map(([px, py]) => [px + x, py + y]));
       this.__s.forEach((q, i) => pen(b, l, this, q, ps[i], this.color, { key: 'b' + i, w: 2.6 }));
@@ -873,7 +928,7 @@
         const [px, py] = [P2[i][0] + x, P2[i][1] + y], a = mol.atoms[i];
         typed(b, lab, px, py + 4, `700 13px ${MONO}`, tone(ATOM_TONE[a.el] || 'white'), (t - born[i]) / 0.25, { anchor: 'middle', rim: 4, land: false });
       });
-      if (cap) typed(b, ellipsize(cap, w - 24, `800 16px ${DOTO}`), x + w / 2, y + h - 26 - 14, `800 16px ${DOTO}`, TEXT, (age - 0.5) / 0.5, { anchor: 'middle' });
+      capRows.forEach((r, i) => typed(b, r, x + w / 2, y + 256 + i * 20, CAPF, TEXT, (age - 0.5 - i * 0.15) / 0.5, { anchor: 'middle' }));
     }, { title: 'molecule' });
     const [x, y] = [markBox(c)[0] + 4, markBox(c)[1] + 4 + 26];
     // Bonds are short and close together: the pen hops straight to each one instead of gliding there.
@@ -893,16 +948,17 @@
 
   // ---------------------------------------------------------------- the welcome tour: job tickets and a goal medal
   async function drawTicket(m) {
-    const w = 270, rows = m.text ? wrapRows(m.text, w - 40, `400 12px ${MONO}`, 3) : [], btn = m.action ? 36 : 0, h = 64 + rows.length * 17 + btn + 14;
-    const k = 1.05, btnText = ellipsize(m.label || 'Try it', w - 80, CHIP(k)), realBw = Math.round(textW(btnText, CHIP(k)) + 34), title = ellipsize(m.title, w - 36 - (m.n != null ? 34 : 0), `800 18px ${DOTO}`);
+    const w = 270, TF = `800 18px ${DOTO}`, titles = wrapRows(m.title, w - 36 - (m.n != null ? 34 : 0), TF), off = (titles.length - 1) * 22;
+    const rows = m.text ? wrapRows(m.text, w - 40, `400 12px ${MONO}`) : [], btn = m.action ? 36 : 0, h = 64 + off + rows.length * 17 + btn + 14;
+    const k = 1.05, btnText = ellipsize(m.label || 'Try it', w - 80, CHIP(k)), realBw = Math.round(textW(btnText, CHIP(k)) + 34);
     let hover = false, down = 0, br = null;
     const c = await card(m, w, h, function (b, l, t, x, y, age) {
       // a ticket: notches on both sides, a dashed tear line, a big number
-      b.fillStyle = 'rgba(3,14,16,1)'; for (const sx of [x - 1, x + w - 9]) b.fillRect(sx, y + 36, 10, 10);
-      b.fillStyle = DEEP; for (let dx = x + 14; dx < x + w - 14; dx += 8) b.fillRect(dx, y + 41, 4, 1);
-      typed(b, title, x + 18, y + 26, `800 18px ${DOTO}`, TEXT, age / 0.4);
+      b.fillStyle = 'rgba(3,14,16,1)'; for (const sx of [x - 1, x + w - 9]) b.fillRect(sx, y + 36 + off, 10, 10);
+      b.fillStyle = DEEP; for (let dx = x + 14; dx < x + w - 14; dx += 8) b.fillRect(dx, y + 41 + off, 4, 1);
+      titles.forEach((r, i) => typed(b, r, x + 18, y + 26 + i * 22, TF, TEXT, (age - i * 0.2) / 0.4));
       if (m.n != null) typed(b, String(m.n).padStart(2, '0'), x + w - 18, y + 26, `800 18px ${DOTO}`, MID, 1, { anchor: 'end' });
-      wrapped(b, rows, x + 18, y + 64, 17, `400 12px ${MONO}`, DIM, (age - 0.2) / 0.8);
+      wrapped(b, rows, x + 18, y + 64 + off, 17, `400 12px ${MONO}`, DIM, (age - 0.2) / 0.8);
       if (m.action) { br = [x + 18, y + h - btn - 10, realBw, 30]; chip(b, br[0], br[1], br[2], br[3], btnText, age - 0.5, { k, color: this.color, hover, down: now() - down < 0.15 }); }
     }, { bar: false, edge: true });
     c.more = () => (br ? [{ rect: br, kind: 'button', part: m.part }] : []);
@@ -910,17 +966,18 @@
     sfx('page');
   }
   async function drawMedal(m) {
-    const w = 230, h = 250, ring = loop(0, 0, 120, 120, { pad: 0, r: 60, over: 0.12 }), star = (() => { const pts = []; for (let i = 0; i <= 10; i++) { const a = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? 16 : 36; pts.push([Math.cos(a) * r, Math.sin(a) * r]); } return handPath(pts, 0.6); })();
+    const w = 230, ring = loop(0, 0, 120, 120, { pad: 0, r: 60, over: 0.12 }), star = (() => { const pts = []; for (let i = 0; i <= 10; i++) { const a = -Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? 16 : 36; pts.push([Math.cos(a) * r, Math.sin(a) * r]); } return handPath(pts, 0.6); })();
     let rp = 0, sp = 0;
-    const rows = wrapRows(m.text, w - 40, `600 12px ${MONO}`, 3);
+    const goal = wrapRows((m.title || 'your goal').toUpperCase(), w - 30, `600 10px ${MONO}`), rows = wrapRows(m.text, w - 40, `600 12px ${MONO}`);
+    const goff = (goal.length - 1) * 14, h = 250 + goff + Math.max(0, rows.length - 3) * 17;
     const c = await card(m, w, h, function (b, l, t, x, y, age) {
       const cx = x + w / 2, cy = y + 86;
       // ribbon
       b.fillStyle = DEEP; b.beginPath(); b.moveTo(cx - 34, y + 6); b.lineTo(cx - 8, y + 40); b.lineTo(cx - 20, y + 44); b.closePath(); b.fill(); b.beginPath(); b.moveTo(cx + 34, y + 6); b.lineTo(cx + 8, y + 40); b.lineTo(cx + 20, y + 44); b.closePath(); b.fill();
       this.__r ??= ring.map(([px, py]) => [px + cx - 60, py + cy - 60]); this.__st ??= star.map(([px, py]) => [px + cx, py + cy]);
       pen(b, l, this, this.__r, rp, tone('amber'), { key: 'r' }); pen(b, l, this, this.__st, sp, tone('amber'), { key: 's', w: 3 });
-      typed(b, ellipsize((m.title || 'your goal').toUpperCase(), w - 30, `600 10px ${MONO}`), cx, y + 168, `600 10px ${MONO}`, DIM, (age - 0.6) / 0.4, { anchor: 'middle' });
-      wrapped(b, rows.map((r) => r), x + 20, y + 190, 17, `600 12px ${MONO}`, TEXT, (age - 0.8) / 0.8);
+      goal.forEach((r, i) => typed(b, r, cx, y + 168 + i * 14, `600 10px ${MONO}`, DIM, (age - 0.6) / 0.4, { anchor: 'middle' }));
+      wrapped(b, rows, x + 20, y + 190 + goff, 17, `600 12px ${MONO}`, TEXT, (age - 0.8) / 0.8);
       if (sp >= 1 && !reduced()) { const g = (Math.sin(t * 2) + 1) / 2; l.fillStyle = rgba(tone('amber'), 0.25 * g); l.fillRect(cx - 2, cy - 48, 4, 4); }
     }, { bar: false, edge: true, live: () => sp >= 1 });
     c.color = tone('amber');
@@ -1135,7 +1192,7 @@
     const tw = REM_W - 40 - (whenW ? whenW + 12 : 0) - 16, rows = [];
     let yy = 26 + 8;
     const head = (label, n, gap) => { if (gap) yy += 8; rows.push({ head: label, n, gap, y: yy, h: 26 }); yy += 26; };
-    const item = (i) => { const lines = wrapRows(i.text, tw, BODY, 2), h = lines.length * 19 + 10; rows.push({ i, lines, when: remWhen(i), y: yy, h }); yy += h; };
+    const item = (i) => { const lines = wrapRows(i.text, tw, BODY, 3), h = lines.length * 19 + 10; rows.push({ i, lines, when: remWhen(i), y: yy, h }); yy += h; };
     head('Today', today.filter((i) => !i.done).length);
     if (today.length) today.forEach(item); else { rows.push({ note: later.length ? 'Nothing due today' : 'Nothing on your list yet', y: yy, h: 26 }); yy += 26; }
     if (later.length) { head('Later', later.length, true); later.forEach(item); }
@@ -1295,7 +1352,13 @@
     setHover(hitAt(e.clientX, e.clientY));
   }, true);
   addEventListener('pointerup', (e) => { if (drag) { drag = null; e.stopPropagation(); touch(0.2); } }, true);
-  addEventListener('wheel', (e) => { if (ours(e)) e.stopPropagation(); }, true);
+  addEventListener('wheel', (e) => {
+    if (!ours(e)) return;
+    e.stopPropagation();
+    // Over a card too tall for the screen: scroll its insides.
+    const m = hitAt(e.clientX, e.clientY)?.m;
+    if (m?.scrollMax > 0) { e.preventDefault(); m.sy = clamp(m.sy + e.deltaY, 0, m.scrollMax); touch(0.3); }
+  }, { capture: true, passive: false });
 
   // ---------------------------------------------------------------- the host's way in (host.js)
   R.inkHit = (x, y) => !!drag || !!hitAt(x, y);

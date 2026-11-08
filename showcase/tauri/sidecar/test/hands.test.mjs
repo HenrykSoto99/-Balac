@@ -89,6 +89,8 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   assert.equal(sent[0].beats[0].voiced, true);
   assert.deepEqual(spoken, ['[warm] Open Format first.', 'Then pick High.'], 'each line is spoken when its step starts');
   assert.match(res, /Drew p1 target “Format”, p2 target “High”\..*Beat 1: Test clicked\..*Beat 2: Test clicked\./);
+  // Regression: after a walkthrough the reply said each step again. The result quotes what was already said, last.
+  assert.match(res, /Already said out loud as it drew: "Open Format first\." "Then pick High\." Don't repeat or rephrase any of that in your reply/);
   // An explanation without waits: each beat goes out as soon as its own places are found (the first marks draw while
   // the rest are looked up), all spoken in order, and the same words are looked up once.
   sent.length = 0; spoken.length = 0; fs.writeFileSync(log, '');

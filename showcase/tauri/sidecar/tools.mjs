@@ -453,7 +453,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     } finally { ink.active--; }
     if (windowBound()) { [ink.win, ink.page] = await Promise.all([frontWin(), frontPage()]); ink.front = ink.win?.key ?? ''; watchStale(); if (ink.win) watchClicks(true); }
     const list = parts.describe(drawn);
-    return [drawn.length ? `Drew ${list}.` : edits.length ? 'Edited the drawing.' : 'Done.', ...notes, edits.length || drawn.length ? `On screen now: ${parts.describe() || 'nothing'}.` : ''].filter(Boolean).join(' ');
+    // The lines were already said (and captioned) as it drew. Said here, right before the reply is written, so the
+    // reply doesn't say them again: models restated each step after a walkthrough even with the rule in the prompt.
+    const spoken = said.filter(Boolean);
+    const heard = spoken.length ? `Already said out loud as it drew: ${spoken.map((s) => `"${s}"`).join(' ')} Don't repeat or rephrase any of that in your reply: add nothing, or one short sentence they haven't heard yet (a question, or what comes after).` : '';
+    return [drawn.length ? `Drew ${list}.` : edits.length ? 'Edited the drawing.' : 'Done.', ...notes, edits.length || drawn.length ? `On screen now: ${parts.describe() || 'nothing'}.` : '', heard].filter(Boolean).join(' ');
   }
   // From the overlay: a segment started drawing, a wait ended, a card was closed, a button was clicked.
   const inkEvents = {

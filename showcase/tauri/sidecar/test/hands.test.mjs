@@ -216,31 +216,30 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   // then loads another page, keys or a swipe. Read as the browser's address, or the title in other apps.
   const front = (w) => fs.writeFileSync(path.join(dir, 'front.json'), JSON.stringify({ id: 7, app: 'Brave Browser', bounds: [0, 0, 800, 600], ...w }));
   const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Gone within a few seconds (the helper is a separate process, slow on CI runners).
+  const gone = async () => { for (let i = 0; i < 50 && made.ink.describe(); i++) await settle(100); return made.ink.describe(); };
   front({ title: 'Repo', url: 'https://github.com/a/b' });
   await graph();
   made.ink.userClick({ x: 300, y: 200, role: 'AXGroup', app: 'Brave Browser', acts: false });
-  await settle(900);
+  await settle(2000);
   assert.match(made.ink.describe(), /graph/, 'a click that changed nothing leaves it');
   made.ink.userClick({ x: 300, y: 200, role: 'AXGroup', app: 'Brave Browser', acts: false });
   front({ title: 'Repo', url: 'https://github.com/a/b/issues' });
-  await settle(900);
-  assert.equal(made.ink.describe(), '', 'a script-driven click that loaded another page');
+  assert.equal(await gone(), '', 'a script-driven click that loaded another page');
   front({ title: 'Repo', url: 'https://github.com/a/b' });
   await graph();
   front({ title: 'Repo', url: 'https://github.com/a/b#readme' });
-  await settle(1800);
+  await settle(2500);
   assert.match(made.ink.describe(), /graph/, 'a jump within the page is the same page');
   front({ title: 'Other', url: 'https://example.com/' });
-  await settle(1800);
-  assert.equal(made.ink.describe(), '', 'another page with no click at all (keys, a swipe back)');
+  assert.equal(await gone(), '', 'another page with no click at all (keys, a swipe back)');
   front({ app: 'Mail', title: '(3) Inbox' });
   await graph();
   front({ app: 'Mail', title: '(4) Inbox' });
-  await settle(1800);
+  await settle(2500);
   assert.match(made.ink.describe(), /graph/, 'an unread count in the title is the same view');
   front({ app: 'Mail', title: 'Sent' });
-  await settle(1800);
-  assert.equal(made.ink.describe(), '', 'another mailbox (a new title) is a new view');
+  assert.equal(await gone(), '', 'another mailbox (a new title) is a new view');
   fs.rmSync(path.join(dir, 'front.json'));
 }
 fs.rmSync(dir, { recursive: true, force: true });

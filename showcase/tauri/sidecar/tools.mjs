@@ -279,8 +279,11 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       if (!windowBound()) { clearInterval(ink.watch); ink.watch = null; watchClicks(false); return; }
       const [k, page] = await Promise.all([frontKey(), frontPage()]);
       if (!windowBound()) return;
-      if (k && ink.front && k !== ink.front) screenChanged('window');
-      else if (page && ink.page && page !== ink.page) screenChanged('page');
+      // Not read when it was drawn (the helper was slow): what's there now is what it's about.
+      if (!ink.front && k) ink.front = k;
+      if (!ink.page && page) ink.page = page;
+      if (k && k !== ink.front) screenChanged('window');
+      else if (page && page !== ink.page) screenChanged('page');
     }, 1500);
     ink.watch.unref?.();
   }

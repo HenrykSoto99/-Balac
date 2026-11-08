@@ -17,7 +17,7 @@ let o = { ok: true, window: win };
 if (a[0] === 'act') { const p = JSON.parse(a[1]); o = p.app === 'NoSuchAppRoamiesTest' ? { ok: false, error: 'No matching window is open.' } : { ok: true, done: p.steps.map((s) => s.do), window: win }; }
 if (a[0] === 'find-text') o = { ok: true, matches: [{ text: a[2], match: 'exact', role: 'button', bounds: [100, 100, 80, 24], window: win }] };
 if (a[0] === 'ui') o = { ok: true, window: win, controls: [], texts: [], note: 'Nothing to list.' };
-if (a[0] === 'front') o = { ok: true, app: win.app, title: win.title, ...(win.url ? { url: win.url } : {}) };
+if (a[0] === 'front') { if (win.slowFront) { const t = Date.now(); while (Date.now() - t < 2000); } o = { ok: true, app: win.app, title: win.title, ...(win.url ? { url: win.url } : {}) }; }
 if (a[0] === 'capture') { fs.writeFileSync(a[1], 'x'); o = { ok: true, file: a[1], window: win, pixels: [800, 600] }; }
 console.log(JSON.stringify(o));
 `, { mode: 0o755 });
@@ -240,6 +240,15 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   assert.match(made.ink.describe(), /graph/, 'an unread count in the title is the same view');
   front({ app: 'Mail', title: 'Sent' });
   assert.equal(await gone(), '', 'another mailbox (a new title) is a new view');
+  // The page couldn't be read when it was drawn (a slow helper): the next look takes it as the start, so a later
+  // change still clears it instead of never counting.
+  front({ app: 'Mail', title: 'Inbox', slowFront: true }); // reading the page times out while it draws
+  await graph();
+  front({ app: 'Mail', title: 'Inbox' });
+  await settle(2500);
+  assert.match(made.ink.describe(), /graph/, 'still there');
+  front({ app: 'Mail', title: 'Drafts' });
+  assert.equal(await gone(), '', 'a change after a missed first read still clears it');
   fs.rmSync(path.join(dir, 'front.json'));
 }
 fs.rmSync(dir, { recursive: true, force: true });

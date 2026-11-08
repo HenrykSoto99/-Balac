@@ -284,16 +284,22 @@ cases('read-only loopholes', cmd, [
   const home = fs.realpathSync(fs.mkdtempSync(nodePath.join(os.tmpdir(), 'roamies-safety-')));
   fs.mkdirSync(nodePath.join(home, '.ssh')); fs.writeFileSync(nodePath.join(home, '.ssh', 'id_rsa'), 'key');
   fs.writeFileSync(nodePath.join(home, 'notes.txt'), 'hi');
-  fs.symlinkSync(nodePath.join(home, '.ssh', 'id_rsa'), nodePath.join(home, 'harmless.txt'));
-  fs.symlinkSync(nodePath.join(home, '.zshrc'), nodePath.join(home, 'later.txt')); // dangling: .zshrc doesn't exist yet
-  fs.mkdirSync(nodePath.join(home, 'proj')); fs.symlinkSync(nodePath.join(home, '.ssh'), nodePath.join(home, 'proj', 'keys'));
+  let links = true; // Windows may not allow symlinks without extra rights: those cases are skipped there
+  try {
+    fs.symlinkSync(nodePath.join(home, '.ssh', 'id_rsa'), nodePath.join(home, 'harmless.txt'));
+    fs.symlinkSync(nodePath.join(home, '.zshrc'), nodePath.join(home, 'later.txt')); // dangling: .zshrc doesn't exist yet
+    fs.mkdirSync(nodePath.join(home, 'proj')); fs.symlinkSync(nodePath.join(home, '.ssh'), nodePath.join(home, 'proj', 'keys'), 'dir');
+  } catch (e) { if (process.platform !== 'win32') throw e; links = false; console.log('symlink cases skipped:', e.code); }
   const c = (x) => classifyCommand(x, home);
-  cases('wildcards and symlinks', c, [
-    ['cat ~/.ss*/id_*', BLOCK], ['cat ~/.ssh/id_*', BLOCK], ['cat ~/*.txt', BLOCK], ['cat ~/no*thing', SAFE], ['ls ~/*.md', SAFE],
-    ['cat ~/**/id_rsa', BLOCK], ['cat ~/**/notes.txt', ASK], ['cat ~/harmless.txt', BLOCK], ['cat ~/notes.txt', SAFE], ['cat ~/proj/keys/id_rsa', BLOCK],
+  cases('wildcards', c, [
+    ['cat ~/.ss*/id_*', BLOCK], ['cat ~/.ssh/id_*', BLOCK], ['cat ~/no*thing', SAFE], ['ls ~/*.md', SAFE],
+    ['cat ~/**/id_rsa', BLOCK], ['cat ~/**/notes.txt', ASK], ['cat ~/notes.txt', SAFE],
   ]);
-  cases('symlinked reads', (p) => checkRead(p, home), [['~/harmless.txt', BLOCK], ['~/proj/keys', BLOCK], ['~/notes.txt', SAFE]]);
-  cases('symlinked writes', (p) => checkWrite(p, home), [['~/later.txt', BLOCK], ['~/proj/keys/new', BLOCK], ['~/fresh.txt', SAFE]]);
+  if (links) {
+    cases('symlinks', c, [['cat ~/*.txt', BLOCK], ['cat ~/harmless.txt', BLOCK], ['cat ~/proj/keys/id_rsa', BLOCK]]);
+    cases('symlinked reads', (p) => checkRead(p, home), [['~/harmless.txt', BLOCK], ['~/proj/keys', BLOCK], ['~/notes.txt', SAFE]]);
+    cases('symlinked writes', (p) => checkWrite(p, home), [['~/later.txt', BLOCK], ['~/proj/keys/new', BLOCK], ['~/fresh.txt', SAFE]]);
+  }
   fs.rmSync(home, { recursive: true, force: true });
 }
 // Addresses off the public internet, however they're written, and links that use them.

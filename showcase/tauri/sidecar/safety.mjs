@@ -62,7 +62,9 @@ function realOf(abs, depth = 0) {
   return abs;
 }
 // The same path and where it really leads: every rule is checked against both.
-const bothOf = (abs) => { const r = realOf(abs); return r === abs ? [abs] : [abs, r]; };
+// Windows puts a drive on a /-path (/tmp → D:/tmp) and may change letter case: that's the same path, not a link.
+const samePath = (a, b) => { const k = (p) => (process.platform === 'win32' ? p.replace(/^[a-z]:(?=\/)/i, '').toLowerCase() : p); return k(a) === k(b); };
+const bothOf = (abs) => { const r = realOf(abs); return samePath(r, abs) ? [abs] : [abs, r]; };
 
 // Buttons that delete, pay, send or sign out: Sidekick needs the user's yes before clicking one,
 // even if it was asked to "show" it. Kept in sync with RISKY in hands/main.swift.

@@ -1007,6 +1007,7 @@ function installUpdate() {
   send({ type: 'update', install: true });
 }
 function onUpdateStatus(m) {
+  logLine('update_status', { state: String(m.state ?? ''), ...(m.version ? { version: String(m.version) } : {}), manual: !!update.manual });
   const manual = update.manual;
   update.checking = false;
   update.result = m.state === 'none' ? { ok: true, at: Date.now() } : m.state === 'error' ? { ok: false, error: String(m.error ?? 'unknown error').slice(0, 120) } : null;

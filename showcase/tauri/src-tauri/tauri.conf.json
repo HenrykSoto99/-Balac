@@ -39,7 +39,8 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ0MEI0NTJGMEY1NkNGNUYKUldSZnoxWVBMMFVMMUlXK2ROU3YyaDJVZy9scW56d081dEZwelE0SFBQeFVSVXRVYnZyY3BSd0cK",
       "endpoints": [
-        "https://github.com/KenKaiii/Roamies/releases/latest/download/latest.json"
+        "https://github.com/KenKaiii/Roamies/releases/latest/download/latest.json",
+        "https://raw.githubusercontent.com/KenKaiii/Roamies/updates/latest.json"
       ],
       "windows": {
         "installMode": "passive"

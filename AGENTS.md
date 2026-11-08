@@ -28,6 +28,8 @@ macOS DMG (Apple silicon and Intel) and an unsigned Windows installer into a dra
   Add a test case with every rule change.
 - In-app updates read `latest.json` from the newest published release, signed with the key in the
   `TAURI_SIGNING_PRIVATE_KEY` secret. Keep `plugins.updater.pubkey` in `tauri.conf.json` matching it.
+  When GitHub's release links fail, the updater falls back to the copy on the `updates` branch, which
+  `.github/workflows/update-feed.yml` writes whenever a release is published; downloads go through the API.
 
 - CI lives in `.github/workflows/ci.yml` and must stay green.
 - Never commit with `--no-verify`.

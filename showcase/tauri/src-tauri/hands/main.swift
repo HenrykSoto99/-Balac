@@ -700,6 +700,12 @@ func pageText(_ app: AXUIElement, _ w: Win, cap: Int = 1800, scan: TextScan? = n
 }
 
 /// After a click or key press the page may be loading: re-read until the controls stop changing (max ~1.2 s).
+/// The waits (by index) that come right after a click or key, so they can end once the page has reacted.
+func reactWaits(_ dos: [String]) -> Set<Int> {
+    let reacts: Set<String> = ["click", "click_text", "press_button", "key", "click_at", "choose"]
+    return Set(dos.indices.filter { $0 >= 1 && dos[$0] == "wait" && reacts.contains(dos[$0 - 1]) })
+}
+
 func settle(_ app: AXUIElement, _ w: Win) -> [(AXUIElement, [String: Any])] {
     var prev: [String] = [], cur = walk(app, w)
     for _ in 0..<4 {
@@ -1252,6 +1258,11 @@ case "--self-test":
     check("the whole label matches", matchScore("speed", "speed") == 0)
     check("a whole word in a label matches", matchScore("save changes", "save") == 1 && matchScore("speed:", "speed") == 1 && matchScore("next \u{2192}", "next") == 1)
     check("an amount with symbols matches", matchScore("total $1,250", "$1,250") == 1)
+    // Waits after a click or key end early once the page reacts, wherever they are; others always run in full.
+    check("wait after a click, before a screenshot, can end early", reactWaits(["click_at", "wait", "take_screenshot"]) == [1])
+    check("wait at the end after a key can end early", reactWaits(["fill", "key", "wait"]) == [2])
+    check("a wait first or after typing runs in full", reactWaits(["wait", "type", "wait", "read_window"]).isEmpty)
+    check("each wait after a click counts", reactWaits(["click_at", "wait", "click_at", "wait", "take_screenshot"]) == [1, 3])
     exit(bad == 0 ? 0 : 1)
 
 case "trusted":
@@ -1445,15 +1456,14 @@ case "act":
         guard let id = s["id"] as? Int, id >= 1, id <= controls.count else { return nil }
         return controls[id - 1]
     }
-    // A wait at the very end, after a click or key ("click Sign in, wait 2"), is there for the page to react. It ends
+    // A wait right after a click or key ("click Sign in, wait 2, screenshot") is there for the page to react. It ends
     // as soon as the page has changed from how it was before that action and has held still; if nothing changes it
     // waits the full time, as before.
     func pageSig() -> String {
         let cur = resolve(target) ?? w
         return "\(cur.id)|\(cur.title)#" + walk(cur.pid == w.pid ? app : axApp(cur), cur).map { "\($0.1["role"] ?? "")|\($0.1["label"] ?? "")" }.joined(separator: ";")
     }
-    let reacts: Set<String> = ["click", "click_text", "press_button", "key", "click_at", "choose"]
-    let tailWait = steps.count >= 2 && (steps.last?["do"] as? String) == "wait" && reacts.contains(steps[steps.count - 2]["do"] as? String ?? "")
+    let earlyWaits = reactWaits(steps.map { $0["do"] as? String ?? "" })
     var sigBefore: String?
     var clickedSpot = false
     for (i, s) in steps.enumerated() {
@@ -1466,7 +1476,7 @@ case "act":
                 out(["ok": false, "error": "Step \(i + 1) needs the real mouse, but the user was typing or using the mouse, so I didn't take over (their keys would have gone into \(w.app)). Nothing after it ran. Tell them, and offer to finish when they're free.", "done": done])
             }
         }
-        if tailWait, i == steps.count - 2 { sigBefore = pageSig() }
+        if earlyWaits.contains(i + 1) { sigBefore = pageSig() }
         // A click at a spot only vouches for the typing that follows it (keys like cmd+a and waits in between are fine);
         // any step that moves focus elsewhere ends it.
         if !["click_at", "key", "wait", "type"].contains(what) { clickedSpot = false }
@@ -1744,7 +1754,8 @@ case "act":
             clickedSpot = true
         case "wait":
             let secs = min(5, (s["seconds"] as? Double) ?? 0.5)
-            if let before = sigBefore, i == steps.count - 1 {
+            if let before = sigBefore, earlyWaits.contains(i) {
+                defer { sigBefore = nil }
                 let end = Date().addingTimeInterval(secs)
                 var last = "", same = 0
                 while Date() < end {

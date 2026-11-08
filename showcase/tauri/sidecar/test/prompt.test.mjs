@@ -20,4 +20,7 @@ assert.match(side, /An answer from the web is said like any other: a quick fact[
 const host = readFileSync(fileURLToPath(new URL('../../../roamies/host.js', import.meta.url)), 'utf8');
 const webCase = host.slice(host.indexOf("if (e.anim.tool === 'web')"), host.indexOf('jobs.push', host.indexOf("if (e.anim.tool === 'web')")));
 assert.ok(webCase && !/panel\(\)\?\.open/.test(webCase), 'a web lookup does not open the card by itself');
+// Regression: "how are you? draw something" drew first and said "I'm doing great" only after it, and the drawing's
+// silent write held up the first words. The prompt asks for a short line before draw.
+assert.match(side, /Before you call draw, write one short line first: the answer to anything they said or asked besides the drawing/, 'a line comes before the drawing');
 console.log('prompt tests: passed');

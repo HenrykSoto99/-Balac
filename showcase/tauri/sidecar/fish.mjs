@@ -22,8 +22,8 @@ export const RATE = 44100;
 
 // The voice's settings: balanced latency measured as fast as "low" (~0.4 s) with better quality. Loudness isn't
 // normalized: that flattened a whisper and a shout to the same level (1-8 dB apart; 10-28 dB without it, no clipping).
-export const startRequest = (voice) => ({
-  text: '', reference_id: voice, format: 'pcm', sample_rate: RATE, latency: 'balanced',
+export const startRequest = (voice, rate = RATE) => ({
+  text: '', reference_id: voice, format: 'pcm', sample_rate: rate, latency: 'balanced',
   temperature: 0.7, top_p: 0.7, chunk_length: 100, normalize: true, condition_on_previous_chunks: true,
   prosody: { speed: 1, volume: 0, normalize_loudness: false },
 });
@@ -48,8 +48,8 @@ export async function fishAccount(key, { fetchImpl = fetch, timeout = 6000 } = {
  * of onEnd when it fails (heard = whether any audio had arrived, so a caller can retry on another model).
  */
 export class FishVoice {
-  constructor({ key, voice = DEFAULT_VOICE, model = FISH_MODELS[0], WebSocketImpl = globalThis.WebSocket, onAudio, onEnd, onError, openTimeout = 6000, audioTimeout = 8000 }) {
-    Object.assign(this, { key, voice, model, WebSocketImpl, onAudio, onEnd, onError, openTimeout, audioTimeout });
+  constructor({ key, voice = DEFAULT_VOICE, model = FISH_MODELS[0], rate = RATE, WebSocketImpl = globalThis.WebSocket, onAudio, onEnd, onError, openTimeout = 6000, audioTimeout = 8000 }) {
+    Object.assign(this, { key, voice, model, rate, WebSocketImpl, onAudio, onEnd, onError, openTimeout, audioTimeout });
     this.queue = []; // encoded messages waiting for the socket to open
     this.state = 'new'; // new → opening → open → ending → done
     this.heard = false;
@@ -71,7 +71,7 @@ export class FishVoice {
       if (this.state === 'done') return;
       this.state = this.state === 'ending' ? 'ending' : 'open';
       this.clear();
-      ws.send(encode({ event: 'start', request: startRequest(this.voice) }));
+      ws.send(encode({ event: 'start', request: startRequest(this.voice, this.rate) }));
       for (const m of this.queue.splice(0)) ws.send(m);
       if (this.said) this.arm(this.audioTimeout, 'Fish Audio stopped sending audio');
     };

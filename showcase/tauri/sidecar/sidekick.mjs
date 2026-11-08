@@ -5,7 +5,7 @@
 // in:  {type:'menu', id} {type:'answer', id, text} {type:'ui_ready'}
 // out: {type:'menu', items} {type:'ui', msg} {type:'overlays', ids}
 import { Agent } from '@kenkaiiii/gg-agent';
-import { ClaudeCodeAgent } from './claudecode.mjs';
+import { ClaudeCodeAgent, closeSpare } from './claudecode.mjs';
 import { SAFE, checkDrawAction, checkLink, redactArgs } from './safety.mjs';
 import { agentEvents } from './agentstream.mjs';
 import {
@@ -312,7 +312,7 @@ Their facts are theirs: never invent ${userName}'s details (a name, address, acc
 Anything that goes to other people (an email, message, post, comment, invite) is a draft until ${userName} has seen that exact text and said yes, unless they dictated it word for word: write it, show it, then wait.
 You can really help: look at the screen or just one app's window, open apps, websites and files, read and search files, fetch web pages, and, when the user has allowed it, write files, run shell commands${process.platform === 'darwin' ? ' and work other apps for them: fill in forms, type, click buttons (read_window, then act_in_app)' : ''}. Whether that's allowed right now is in the <live-state> block.
 When they mention a specific app ("my browser", "this form", "Figma"), screenshot that app, not the whole screen.
-Show, don't just tell. When they ask how to do something in an app (${process.platform === 'darwin' ? '"how do I add a layer mask"' : 'a how-to'}), walk them through it with draw: one beat per step in one call, each marking the control with a target and wait 'click'. When they ask what they're looking at or where something is, mark it on screen with draw (ring, frame, label, point) instead of describing where it is. When a picture explains it better (a concept, numbers over time, a comparison, a molecule, a machine), draw cards on calm space while you explain (card, graph, timeline, photo, molecule, model). Each beat's line is spoken and captioned while its marks draw, so don't repeat those lines in your reply: finish with one short line or nothing. Use a fresh look for each request (earlier marks clear by themselves); to change something already drawn ("make that red", "move it", "never mind"), edit it by its part id.
+Show, don't just tell. When they ask how to do something in an app (${process.platform === 'darwin' ? '"how do I add a layer mask"' : 'a how-to'}), walk them through it with draw: one beat per step in one call, each marking the control with a target and wait 'click'. When they ask what they're looking at or where something is, mark it on screen with draw (ring, frame, label, point) instead of describing where it is. When a picture explains it better (a concept, numbers over time, a comparison, a molecule, a machine), draw cards on calm space while you explain (card, graph, timeline, photo, molecule, model). Before you call draw, write one short line first: the answer to anything they said or asked besides the drawing ("I'm good, thanks!"), or what you're about to show. It's said while the drawing is made, so they hear you straight away and in order. Each beat's line is spoken and captioned while its marks draw, so don't repeat those lines in your reply: finish with one short line or nothing. Use a fresh look for each request (earlier marks clear by themselves); to change something already drawn ("make that red", "move it", "never mind"), edit it by its part id.
 Be fast: every tool call is a round trip, so use as few as the task needs. To point at or click something whose exact words you know (the user said them, or you've seen them), use draw or act_in_app click_text with that text right away, with no read_window or screenshot first. Don't guess words: for "the version number" or "the settings icon" you don't know what's written, so look first. Put several steps in one act_in_app call. Forms: one act_in_app call with a fill step per field (field = its label or placeholder as shown), choose for dropdowns, fill for typed dates; a field that opens a calendar is clicked, then its month arrows and day are clicked with click_text. Check the field values in the result before saying it's done. When act_in_app shows the page after a click, use that instead of reading again. read_window and act_in_app results include the text on screen, so read pages from them; screenshot only when you need to see something words can't tell you (images, layout, colours).
 Trust your earlier answers: screenshots and window reads are trimmed from the conversation after a while to save space, so an earlier answer may rest on something you can no longer see. That doesn't make it wrong; never "correct" or take back an earlier answer for that reason.
 The screen keeps changing: ${userName} switches pages, tabs, apps and windows between messages. For every new request about the screen ("this page", "here", "where's X"), work from a fresh look (draw or click_text with text, read_window or a screenshot made now), never from what you saw for an earlier request. If they say you marked the wrong thing, look again before retrying.
@@ -445,7 +445,7 @@ function makeAgent(cc) {
   if (cc) {
     const sid = session?.id;
     agent = new ClaudeCodeAgent({
-      ...common, executable: cc.executable, env: cc.env, cwd: HOME,
+      ...common, executable: cc.executable, env: cc.env, cwd: HOME, keepWarm: true,
       resume: ccResume?.session === sid ? ccResume.state : null,
       onResume: (state) => { ccResume = { session: sid, state }; },
     });
@@ -655,21 +655,34 @@ function logUsage(rec) {
   menu();
 }
 let lastReply = '', lastFailed = false;
-async function prompt(text, image = null, note = '') {
+// The agent for the next request, made or rebuilt if needed: null when ready, else what to tell the user.
+async function readyAgent() {
   await resumed;
   await fishKeyLoaded;
   await refreshAuth();
-  if (!ensureModel()) return say(`Sign in to an AI provider first: the Model page in ${PANEL}. Then ask me again!`, 'concerned');
+  if (!ensureModel()) return `Sign in to an AI provider first: the Model page in ${PANEL}. Then ask me again!`;
   if (!session) { session = newSession(config.provider, config.model); liveBlocks.clear(); agent = null; pruneSessions(); }
   if (agentStale && agent) { agent = null; }
   agentStale = false;
   let cc;
-  try { cc = await claudeCodeRoute(); } catch (e) { return say(e.message, 'concerned'); }
+  try { cc = await claudeCodeRoute(); } catch (e) { return e.message; }
   if (agent && agentRoute !== (cc ? 'claude-code' : 'api')) agent = null; // signed in or out of Claude meanwhile
   if (!agent) {
     try { const c = await credsFor(); credsBaseUrl = c.baseUrl; credsAccountId = c.accountId; } catch { credsBaseUrl = undefined; credsAccountId = undefined; }
     makeAgent(cc);
   }
+  return null;
+}
+// About to be asked (talk keys down, the ask bubble open): Claude Code starts now instead of after the words
+// arrive. Queued like a request, so it never swaps the agent under one that's running.
+function warmUp() {
+  running = running.then(async () => { if (!busy && !(await readyAgent())) agent?.warm?.(); }).catch(() => {});
+}
+// The front window, looked up when the talk keys are let go: the words take a moment more to arrive.
+let frontSoon = null;
+async function prompt(text, image = null, note = '') {
+  const problem = await readyAgent();
+  if (problem) return say(problem, 'concerned');
   busy = true; quiet = false;
   if (!intro && !text.startsWith('(')) activity.asked(text);
   menu();
@@ -707,15 +720,19 @@ async function prompt(text, image = null, note = '') {
     const turn = nextTurn();
     logLine('request', { turn, model: config.model, chars: text.length, image: !!image, session: session?.id });
     const use = { t: Date.now(), model: config.model, calls: 0, tools: 0, in: 0, cacheRead: 0, cacheWrite: 0, out: 0 };
-    frontNow = await whereNow();
+    const soon = frontSoon; frontSoon = null;
+    frontNow = soon && Date.now() - soon.at < 8000 ? await soon.p : await whereNow();
     const stamped = `[${stampNow()}] ${text}`;
     // An area snap rides along as an image in the same message.
     const content = image ? [{ type: 'text', text: `${stamped}\n(Attached: the area of the screen I ${note ? 'marked' : 'selected'}.${note ? ` ${note}` : ''})` }, image] : stamped;
     lastReply = ''; lastFailed = false; lastInput = null;
     let fresh = false; // the reply that matters is the last turn's text (after any tool calls)
+    let writing = null; // the beat timer while a tool call is being written
+    const doneWriting = () => { clearTimeout(writing); writing = null; };
     for await (const e of agentEvents(agent.prompt(content))) {
       if (e.type === 'text_delta') { reply.push(e.text); if (fresh) { lastReply = ''; fresh = false; } lastReply += e.text; }
       else if (e.type === 'turn_end') {
+        doneWriting();
         fresh = true;
         reply.endTurn();
         spoken?.flush();
@@ -729,7 +746,15 @@ async function prompt(text, image = null, note = '') {
         if (process.env.ROAMIES_USAGE) console.error(`[usage] in=${u.inputTokens ?? '?'} cacheRead=${u.cacheRead ?? 0} cacheWrite=${u.cacheWrite ?? 0} out=${u.outputTokens ?? '?'}`);
       }
       else if (e.type === 'thinking_delta') ui({ kind: 'agent', e: { type: 'thinking', text: e.text } });
+      // The opening line's last sentence waits for more text before it's spoken; a tool call starting means none is
+      // coming, so say it now rather than once the call has fully streamed (a drawing can take 15 s on some models).
+      else if (e.type === 'toolcall_delta') {
+        spoken?.flush();
+        // Still writing a tool call after a second with nothing said (a drawing on a slow model): a short beat.
+        writing ??= setTimeout(() => { if (busy && turnVoice === voice) voice?.beat(); }, 1000); // not after the request ended
+      }
       else if (e.type === 'tool_call_start') {
+        doneWriting();
         spoken?.flush(); // a beat before a tool is said now, not after the tool
         releaseBeat(true);
         if (SLOW_TOOLS.has(e.name)) voice?.beat(); // nothing said yet: "One sec." so it's never silent
@@ -750,6 +775,7 @@ async function prompt(text, image = null, note = '') {
       else if (e.type === 'server_tool_result') { ui({ kind: 'agent', e: { type: 'tool_end', id: e.toolUseId ?? e.id, isError: false } }); activity.end(e.toolUseId ?? e.id, false); panel(); }
       else if (e.type === 'error') throw e.error;
     }
+    doneWriting();
     reply.finish();
     const held = cues?.flush(); if (held) showText(held);
     releaseBeat(false);
@@ -1142,8 +1168,13 @@ const startVoiceDownload = () => {
 };
 const PRIVACY = { microphone: 'Privacy_Microphone', speech: 'Privacy_SpeechRecognition' };
 function onVoice(m) {
-  if (m.type === 'voice_state' && m.state === 'listening') { interruptQuietly(); speech.stop(); } // talking over it stops it
-  else if (m.type === 'voice' && m.text?.trim()) onSpoken(m.text.trim(), m.area);
+  if (m.type === 'voice_state' && m.state === 'listening') { interruptQuietly(); speech.stop(); warmUp(); } // talking over it stops it
+  else if (m.type === 'voice_state' && m.state === 'processing') frontSoon = { at: Date.now(), p: whereNow() };
+  else if (m.type === 'voice' && m.text?.trim()) {
+    // Key release to the words arriving (mic tail and the recogniser finishing), to see what that step costs.
+    if (typeof m.ms === 'number') logLine('voice_final', { ms: m.ms, via: String(m.via ?? ''), chars: m.text.trim().length });
+    onSpoken(m.text.trim(), m.area);
+  }
   else if (m.type === 'voice_state' && m.state === 'idle' && snap?.waitingVoice) snap.waitingVoice = false;
   else if (m.type === 'voice_error') {
     if (m.code === 'nothing_heard' && snap) { snap.waitingVoice = false; return; }
@@ -1169,6 +1200,7 @@ const overlays = () => send({ type: 'overlays', ids: ['sidekick'] });
 async function onMenu(id) {
   if (id === 'show') ui({ kind: 'summon', show: true });
   else if (id === 'ask') {
+    warmUp();
     const text = await ask({ placeholder: 'Ask me anything…' });
     if (text?.trim()) enqueue(text.trim());
   } else if (id === 'stop') { const cancelled = busy; endIntro(); controller?.abort(); speech.stop(); ink.stop(cancelled); }
@@ -1460,6 +1492,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'login_item_status') onLoginStatus(m);
 }).on('close', () => {
   // The app quit (or is restarting for an update): let the last saves land first, but never hang.
+  closeSpare();
   Promise.race([flushWrites(), new Promise((r) => setTimeout(r, 3000))]).finally(() => process.exit(0));
 });
 
@@ -1473,6 +1506,8 @@ let retired = (async () => {
 await retired;
 await refreshAuth();
 ensureModel();
+// The first request after launch gets a warm Claude Code too.
+if (config.onboarded) warmUp();
 // Due commitments turn into a nudge, but only when Sidekick isn't mid-conversation.
 async function remindTick() {
   if (busy || loggingIn || onboarding) { reminderRetry(); return; }

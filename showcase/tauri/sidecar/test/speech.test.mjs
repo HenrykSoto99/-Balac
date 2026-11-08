@@ -102,3 +102,17 @@ console.log('speech text tests: passed');
   assert.equal(f.push('[quietly, a little embarrassed] Oops, I missed that. ') + f.push('[bright and bouncy] You did it!'), 'Oops, I missed that. You did it!');
   assert.equal(speakable('[bright and bouncy] You did it!'), '[bright and bouncy] You did it!');
 }
+
+// A line that ends the text before a tool call is held until flush; the request loop flushes when the call starts
+// streaming, not when it's done (a slow drawing kept "On it." silent for 15 s).
+{
+  const out = [];
+  const s = new SpeechText((t) => out.push(t));
+  s.push('On it, drawing the engine now.');
+  assert.deepEqual(out, [], 'a finished last sentence waits for more text');
+  s.flush();
+  assert.deepEqual(out, ['On it, drawing the engine now.']);
+  const { readFileSync } = await import('node:fs');
+  const side = readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
+  assert.match(side, /e\.type === 'toolcall_delta'\) \{\s*spoken\?\.flush\(\)/, 'speech is flushed as soon as a tool call starts streaming');
+}

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { createSpeaker, BEATS } from '../speaker.mjs';
+import { createSpeaker, BEATS, bundledBeats } from '../speaker.mjs';
+import { FISH_MODELS } from '../fish.mjs';
+import { readFileSync } from 'node:fs';
 
 // A FishVoice stand-in the test drives by hand.
 const made = [];
@@ -10,10 +12,10 @@ class FakeVoice {
   end() { this.ended = true; }
   abort() { this.aborted = true; }
 }
-const setup = (acct = { ok: true, credit: 4.5 }, beatPhrases = []) => {
+const setup = (acct = { ok: true, credit: 4.5 }, beatPhrases = [], bundled = () => null) => {
   made.length = 0;
   const out = [], problems = [];
-  const sp = createSpeaker({ emit: (m) => out.push(m), onProblem: (p) => problems.push(p), FishVoiceImpl: FakeVoice, account: async () => acct, beatPhrases });
+  const sp = createSpeaker({ emit: (m) => out.push(m), onProblem: (p) => problems.push(p), FishVoiceImpl: FakeVoice, account: async () => acct, beatPhrases, bundled });
   return { sp, out, problems };
 };
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -94,7 +96,9 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
   assert.equal(sp.ready, BEATS.length);
   const r = sp.start(), n = made.length;
   assert.equal(r.beat(), true);
-  assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, rate: 44100, pcm: Buffer.from([0, 0]).toString('base64') });
+  const played = out.at(-1);
+  assert.deepEqual({ ...played, pcm: undefined }, { kind: 'speech', id: r.id, rate: 44100, pcm: undefined });
+  assert.ok(BEATS.some((_, i) => played.pcm === Buffer.from([i, 0]).toString('base64')), 'one of the made beats');
   assert.equal(made.length, n, 'no extra socket for the beat');
   assert.deepEqual(made.at(-1).said, [], 'the beat came from the cache, not the live socket');
   assert.equal(r.beat(), false, 'once per reply');
@@ -167,3 +171,39 @@ console.log('speaker tests: passed');
   assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, end: true, chars: 12 });
   console.log('speech pacing tests: passed');
 }
+
+{ // At least 30 short beats, one or two words each, picked at random with no repeat among the last few.
+  assert.ok(BEATS.length >= 30, 'plenty of beats');
+  assert.equal(new Set(BEATS).size, BEATS.length, 'no duplicates');
+  for (const b of BEATS) assert.ok(b.replace(/[.,!]/g, '').trim().split(/\s+/).length <= 2, `${b} is one or two words`);
+  const { sp, out } = setup(undefined, BEATS);
+  sp.setKey('k'); await tick();
+  for (let i = 0; i < BEATS.length; i++) { const w = made.at(-1); w.onAudio(new Uint8Array([i, 1])); w.onEnd(); await tick(); await tick(); }
+  const seen = [];
+  for (let i = 0; i < 40; i++) { const r = sp.start(); r.beat(); seen.push(out.at(-1).pcm); r.abort(); }
+  for (let i = 0; i < seen.length; i++) assert.ok(!seen.slice(Math.max(0, i - 8), i).includes(seen[i]), 'no repeat within 8');
+  assert.ok(new Set(seen).size > 12, 'they vary');
+}
+console.log('speaker beat variety: passed');
+
+{ // Beats shipped with the app play at their own rate, and none are made over Fish for them.
+  const clip = { rate: 24000, pcm: Buffer.from([7, 7]).toString('base64') };
+  const { sp, out } = setup(undefined, BEATS, () => new Map(BEATS.map((b) => [b, clip])));
+  sp.setKey('k'); await tick(); await tick();
+  assert.equal(made.filter((v) => v.said.length).length, 0, 'no beat is recorded at run time');
+  const r = sp.start();
+  assert.equal(r.beat(), true);
+  assert.deepEqual(out.at(-1), { kind: 'speech', id: r.id, rate: 24000, pcm: clip.pcm });
+}
+{ // Every look's voice has every beat recorded, in both paid models (re-run beats/make.mjs after changing BEATS).
+  const side = readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8');
+  const { DEFAULT_VOICE } = await import('../fish.mjs');
+  const voices = [DEFAULT_VOICE, ...[...side.matchAll(/\['\w+', '[^']+', '([0-9a-f]{32})'\]/g)].map((m) => m[1])];
+  const get = bundledBeats();
+  for (const v of voices) for (const m of FISH_MODELS) {
+    const set = get(v, m);
+    assert.ok(set, `beats for ${v} on ${m}`);
+    for (const b of BEATS) assert.ok(set.get(b)?.pcm.length > 1000, `"${b}" in ${v} on ${m}`);
+  }
+}
+console.log('bundled beats: passed');

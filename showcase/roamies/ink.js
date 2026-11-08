@@ -685,31 +685,45 @@
       c.more = () => hits.map((q) => ({ ...q, part: m.part }));
     },
     async photo(m) {
-      const w = 264, ph = 192, cells = [], cap = m.text || m.title || m.query || '';
+      const cells = [], cap = m.text || m.title || m.query || '';
+      // The picture first (at most 4 s), so the card takes its shape and nothing is cropped.
+      const img = m.src && !m.missing ? await new Promise((res) => {
+        const i = new Image(), t = setTimeout(() => res(null), 4000);
+        i.onload = () => { clearTimeout(t); res(i.naturalWidth && i.naturalHeight ? i : null); };
+        i.onerror = () => { clearTimeout(t); res(null); };
+        i.src = m.src;
+      }) : null;
+      // About the area of a 240 × 192 frame in the picture's own proportions, no wider than 360 or taller than 300.
+      const a = img ? img.naturalWidth / img.naturalHeight : 4 / 3;
+      let iw = Math.sqrt(240 * 192 * a), ih = iw / a;
+      const maxH = Math.min(300, maxCardH() - 150);
+      if (iw > 360) { iw = 360; ih = iw / a; }
+      if (ih > maxH) { ih = maxH; iw = ih * a; }
+      const gw = Math.max(1, Math.floor(iw / 3)), gh = Math.max(1, Math.floor(ih / 3)), pw = gw * 3, ph = gh * 3;
+      // Never narrower than 240, so the caption has room; a narrow picture sits centred.
+      const w = Math.max(240, pw + 24), ix = Math.round((w - pw) / 2);
       // The whole caption: a short one big, a long one in body type; the credit under it.
       const long = cap.length > 60, CAPF = long ? `400 12px ${MONO}` : `800 16px ${DOTO}`, capLh = long ? 17 : 20;
       const capRows = cap ? wrapRows(cap, w - 24, CAPF) : [], credRows = m.credit ? wrapRows(m.credit, w - 24, `400 10px ${MONO}`) : [];
-      const h = 26 + ph + 12 + capRows.length * capLh + credRows.length * 14 + 14;
+      // 12 above the picture, 12 between it and the caption, as at its sides.
+      const capY = 12 + ph + 12 + (long ? 12 : 15), credY = capRows.length ? capY + (capRows.length - 1) * capLh + 16 : 12 + ph + 12 + 10;
+      const h = 26 + 12 + ph + 12 + capRows.length * capLh + credRows.length * 14 + 12;
       let ready = false;
-      if (m.src && !m.missing) {
-        const img = new Image();
-        img.onload = () => {
-          const gw = Math.floor((w - 24) / 3), gh = Math.floor(ph / 3), cv = document.createElement('canvas'); cv.width = gw; cv.height = gh;
-          const c2 = cv.getContext('2d', { willReadFrequently: true }), s = Math.max(gw / img.naturalWidth, gh / img.naturalHeight);
-          c2.drawImage(img, (gw - img.naturalWidth * s) / 2, (gh - img.naturalHeight * s) / 2, img.naturalWidth * s, img.naturalHeight * s);
-          const d = c2.getImageData(0, 0, gw, gh).data;
-          // Into the Sidekick's five LED levels with an ordered dither.
-          for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) { const i = (gy * gw + gx) * 4, lum = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) / 255, v = clamp(lum + (B4[(gy % 4) * 4 + (gx % 4)] / 16 - 0.5) * 0.22, 0, 0.999); cells.push([gx, gy, Math.floor(v * 5)]); }
-          ready = true; touch();
-        };
-        img.src = m.src;
+      if (img) {
+        const cv = document.createElement('canvas'); cv.width = gw; cv.height = gh;
+        const c2 = cv.getContext('2d', { willReadFrequently: true });
+        c2.drawImage(img, 0, 0, gw, gh); // the frame has the picture's proportions: all of it, none cut off
+        const d = c2.getImageData(0, 0, gw, gh).data;
+        // Into the Sidekick's five LED levels with an ordered dither.
+        for (let gy = 0; gy < gh; gy++) for (let gx = 0; gx < gw; gx++) { const i = (gy * gw + gx) * 4, lum = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) / 255, v = clamp(lum + (B4[(gy % 4) * 4 + (gx % 4)] / 16 - 0.5) * 0.22, 0, 0.999); cells.push([gx, gy, Math.floor(v * 5)]); }
+        ready = true;
       }
       const c = await card(m, w, h, function (b, l, t, x, y, age) {
         const u = clamp(age / 1, 0, 1);
-        if (ready) for (const [gx, gy, v] of cells) { if ((B4[(gy % 4) * 4 + (gx % 4)] + 0.5) / 16 > u * 1.05) continue; b.fillStyle = LED[v]; b.fillRect(x + 12 + gx * 3, y + 10 + gy * 3, 3, 3); }
-        else { b.fillStyle = 'rgba(14,92,96,0.25)'; b.fillRect(x + 12, y + 10, w - 24, ph - 12); typed(b, m.missing ? 'no picture found' : 'loading…', x + w / 2, y + ph / 2, SMALL, DIM, 1, { anchor: 'middle' }); }
-        capRows.forEach((r, i) => typed(b, r, x + w / 2, y + ph + 22 + i * capLh, CAPF, TEXT, (age - 0.6 - i * 0.15) / 0.5, { anchor: 'middle' }));
-        credRows.forEach((r, i) => typed(b, r, x + w / 2, y + ph + 22 + capRows.length * capLh + i * 14, `400 10px ${MONO}`, DIM, (age - 0.8) / 0.4, { anchor: 'middle' }));
+        if (ready) for (const [gx, gy, v] of cells) { if ((B4[(gy % 4) * 4 + (gx % 4)] + 0.5) / 16 > u * 1.05) continue; b.fillStyle = LED[v]; b.fillRect(x + ix + gx * 3, y + 12 + gy * 3, 3, 3); }
+        else { b.fillStyle = 'rgba(14,92,96,0.25)'; b.fillRect(x + ix, y + 12, pw, ph); typed(b, 'no picture found', x + w / 2, y + 12 + ph / 2, SMALL, DIM, 1, { anchor: 'middle' }); }
+        capRows.forEach((r, i) => typed(b, r, x + w / 2, y + capY + i * capLh, CAPF, TEXT, (age - 0.6 - i * 0.15) / 0.5, { anchor: 'middle' }));
+        credRows.forEach((r, i) => typed(b, r, x + w / 2, y + credY + i * 14, `400 10px ${MONO}`, DIM, (age - 0.8) / 0.4, { anchor: 'middle' }));
       }, { title: 'photo' });
       sfx('scan');
       return c;

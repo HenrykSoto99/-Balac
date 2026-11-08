@@ -250,7 +250,7 @@ fn handle_voice(app: &AppHandle, msg: Value) {
         Some("final") => {
             to_overlays(app, &ui);
             // area: the part of the screen marked with the pen while talking (a PNG, its rect and the strokes).
-            to_sidecar(app, &json!({ "type": "voice", "text": msg.get("text"), "area": msg.get("area") }));
+            to_sidecar(app, &json!({ "type": "voice", "text": msg.get("text"), "area": msg.get("area"), "ms": msg.get("ms"), "via": msg.get("via") }));
         }
         Some("error") => {
             let mut m = msg.clone();

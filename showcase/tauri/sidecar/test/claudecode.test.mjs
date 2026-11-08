@@ -1,7 +1,7 @@
 // The Claude Code route ("Sign in with Claude"), driven by a stubbed SDK query. Run: npm test
 import assert from 'node:assert/strict';
 import { z } from 'zod';
-import { ClaudeCodeAgent, fingerprint, resumeId } from '../claudecode.mjs';
+import { ClaudeCodeAgent, closeSpare, fingerprint, resumeId } from '../claudecode.mjs';
 import { agentEvents } from '../agentstream.mjs';
 
 const SESSION = 'sess-1', TOOL_ID = 'toolu_1', MSG1 = 'msg_1', MSG2 = 'msg_2';
@@ -120,5 +120,45 @@ for await (const e of agentEvents(stopped.prompt('go'))) stopTypes.push(e.type);
 assert.deepEqual(stopTypes, ['agent_done']);
 assert.equal(stopper.calls.interrupts, 1, 'Claude Code is interrupted');
 assert.equal(stopped.getMessages().at(-1).content[0].isError, true, 'the open tool call is closed');
+
+// Warm spare: once a run ends, the next one's Claude Code is started ahead (same options, the session to resume)
+// and the next prompt takes it instead of starting one; its tools still go through our bridge.
+{
+  const cold = fakeQuery(toolRun), warmed = fakeQuery(toolRun), starts = [];
+  let closes = 0;
+  const startup = async ({ options }) => { starts.push(options); return { query: (prompt) => warmed.query({ prompt, options }), close: () => { closes++; } }; };
+  const opts = { model: 'claude-haiku-5-5', system: 'You are Roamie.', tools: [readFile], executable: '/bin/claude', cwd: '/', env: {}, onRateLimit: () => {}, keepWarm: true, query: cold.query, startup };
+  const a = new ClaudeCodeAgent(opts);
+  ran.length = 0;
+  for await (const _ of agentEvents(a.prompt('one'))) {}
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(starts.length, 1, 'a spare is started when the run ends');
+  assert.equal(starts[0].resume, SESSION, 'the spare continues the same session');
+  const types2 = [];
+  for await (const e of agentEvents(a.prompt('two'))) types2.push(e.type);
+  assert.ok(warmed.calls.options, 'the next prompt runs on the spare');
+  assert.equal(cold.calls.inputs.length, 1, 'no second cold start');
+  assert.ok(types2.includes('tool_call_end') && types2.at(-1) === 'agent_done', 'tool events still arrive through the spare');
+  assert.deepEqual(ran, ['~/a.txt', '~/a.txt'], 'the spare served our tool');
+  a.warm();
+  const b = new ClaudeCodeAgent({ ...opts, model: 'claude-sonnet-5-5', query: fakeQuery(toolRun).query });
+  for await (const _ of agentEvents(b.prompt('other model'))) {}
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(closes >= 1, 'a spare made for other options is closed, not used');
+  closeSpare();
+}
+// A spare that died while waiting: the prompt falls back to a fresh start.
+{
+  const cold = fakeQuery(toolRun);
+  const dead = { query: () => Object.assign((async function* () { throw new Error('process exited'); })(), { interrupt: async () => {}, close: () => {} }), close: () => {} };
+  const opts = { model: 'm', system: 's', tools: [readFile], executable: '/bin/claude', cwd: '/', env: {}, onRateLimit: () => {}, keepWarm: true, query: cold.query, startup: async () => dead };
+  const c = new ClaudeCodeAgent(opts);
+  c.warm();
+  const types3 = [];
+  for await (const e of agentEvents(c.prompt('hi'))) types3.push(e.type);
+  assert.equal(types3.at(-1), 'agent_done', 'the run still completes');
+  assert.equal(cold.calls.inputs.length, 1, 'it started Claude Code afresh');
+  closeSpare();
+}
 
 console.log('claudecode ok');

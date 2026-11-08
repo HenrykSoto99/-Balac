@@ -6,17 +6,55 @@
 //   audio, the rest stays text only.
 // - Each reply has its own id, so audio from one that was stopped can never play over the next.
 // - Beats: when something slow starts (a web search, a page, the screen) and the model hasn't said anything,
-//   a short "One sec." plays so it's never silent. They're made once in the voice and
-//   kept, so they play instantly.
+//   a short line ("One sec.", "On it." and 32 more, picked at random) plays so it's never silent. They're made once
+//   in the voice and kept, so they play instantly.
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DEFAULT_VOICE, FISH_MODELS, FREE_MODEL, FishVoice, RATE, fishAccount } from './fish.mjs';
 
-export const BEATS = ['One sec.', 'On it.', 'Sure, one sec.', 'Give me a sec.'];
+// One or two words each, so a beat never sounds canned; any of them must fit before a search, a page, the screen or a drawing.
+export const BEATS = [
+  'One sec.', 'On it.', 'Hang on.', 'Hold on.', 'Got it.', 'Okay.', 'Sure.', 'Right.', 'Alright.', 'Gotcha.',
+  'Checking.', "Let's see.", 'Sure thing.', 'Coming up.', 'Sec.', 'One moment.', 'Bear with.', 'Hmm, okay.', 'Got you.', 'Right, sec.',
+  'Sure, sec.', 'Okay, sec.', 'Roger.', 'Yep.', 'Yep, sec.', 'Two secs.', 'Hold tight.', 'Mm-hmm.', 'Will do.', 'Righto.',
+  'Moment.', 'Okay, checking.', 'Sure, checking.', 'Okie-dokie.',
+];
+const RECENT = 8; // a beat isn't picked again until this many others have played
 
-export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, FishVoiceImpl = FishVoice, account = fishAccount, beatPhrases = BEATS }) {
+// The beats shipped with the app (beats/make.mjs), next to this file or the bundle: (voice, model) → Map of phrase →
+// { rate, pcm } (base64), or null for a voice or model not recorded. The free tier uses the S2.1 Pro takes.
+export function bundledBeats(dir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'beats')) {
+  let index = null;
+  try { index = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8')); } catch { return () => null; }
+  const sets = new Map();
+  return (voice, model) => {
+    const k = `${voice}:${model === FREE_MODEL ? 's2.1-pro' : model}`, set = index.sets?.[k];
+    if (!set) return null;
+    if (!sets.has(k)) {
+      let all = null;
+      try { all = fs.readFileSync(path.join(dir, set.file)); } catch {}
+      sets.set(k, all && new Map(Object.entries(set.beats).map(([phrase, [at, n]]) => [phrase, { rate: index.rate, pcm: all.subarray(at, at + n).toString('base64') }])));
+    }
+    return sets.get(k);
+  };
+}
+
+export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, FishVoiceImpl = FishVoice, account = fishAccount, beatPhrases = BEATS, bundled = bundledBeats() }) {
   let key = null, voice = DEFAULT_VOICE, pref = FISH_MODELS[0], model = pref, seq = 0, current = null, checking = null;
   // The pick and the cheaper ones after it (FISH_MODELS runs from priciest to free).
   const chain = () => FISH_MODELS.slice(Math.max(0, FISH_MODELS.indexOf(pref)));
-  let beats = new Map(), beatN = 0, warming = null; // phrase → [base64 PCM chunks], for the current key and voice
+  let beats = new Map(), recent = [], warming = null; // phrase → [base64 PCM chunks], for the current key and voice
+  // A random beat, not one of the last few: one that's already made if there is one, so it plays instantly.
+  const shipped = () => bundled(voice, model);
+  const ready = (p) => beats.has(p) || !!shipped()?.has(p);
+  const pickBeat = () => {
+    const fresh = beatPhrases.filter((p) => !recent.includes(p));
+    const pool = [fresh.filter(ready), beatPhrases.filter(ready), fresh, beatPhrases].find((x) => x.length);
+    const phrase = pool?.[Math.floor(Math.random() * pool.length)] ?? BEATS[0];
+    recent = [...recent, phrase].slice(-Math.min(RECENT, Math.max(0, beatPhrases.length - 1)));
+    return phrase;
+  };
 
   // Make the beats once, one at a time (well under Fish's concurrency limit). Failures just leave a gap:
   // that beat is then spoken live instead.
@@ -25,7 +63,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
     warming ??= (async () => {
       for (const phrase of beatPhrases) {
         if (key !== k || voice !== vo) break;
-        if (beats.has(phrase)) continue;
+        if (beats.has(phrase) || bundled(vo, model)?.has(phrase)) continue; // shipped with the app
         const chunks = await new Promise((done) => {
           const got = [];
           const v = new FishVoiceImpl({ key: k, voice: vo, model, onAudio: (pcm) => got.push(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength).toString('base64')), onEnd: () => done(got), onError: () => done(null) }).open();
@@ -68,10 +106,11 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
       beat() {
         if (done || beat || said.length || heard) return false;
         beat = true;
-        const phrase = beatPhrases[beatN++ % beatPhrases.length] ?? BEATS[0], chunks = beats.get(phrase);
-        if (!chunks) { me.say(phrase); return true; }
+        const phrase = pickBeat(), shippedBeat = shipped()?.get(phrase), chunks = beats.get(phrase);
+        if (!shippedBeat && !chunks) { me.say(phrase); return true; }
         log('speech_beat', { id, ms: Date.now() - t0 });
-        for (const pcm of chunks) emit({ kind: 'speech', id, rate: RATE, pcm });
+        if (shippedBeat) emit({ kind: 'speech', id, rate: shippedBeat.rate, pcm: shippedBeat.pcm });
+        else for (const pcm of chunks) emit({ kind: 'speech', id, rate: RATE, pcm });
         return true;
       },
       end() { if (done || ended) return; ended = true; v.end(); },
@@ -133,7 +172,7 @@ export function createSpeaker({ emit, onProblem = () => {}, log = () => {}, Fish
     },
     get pick() { return pref; },
     setVoice(v) { if ((v || DEFAULT_VOICE) !== voice) beats = new Map(); voice = v || DEFAULT_VOICE; if (key) warm(); },
-    get ready() { return beats.size; },
+    get ready() { return beats.size + beatPhrases.filter((p) => !beats.has(p) && shipped()?.has(p)).length; },
     get model() { return model; },
     get on() { return !!key; },
     check,

@@ -1,7 +1,7 @@
 // "Sign in with Claude" runs replies through Claude Code: it drives the model loop with our system prompt, and our
 // tools are served to it as an in-process MCP server. Ported from GG Coder's core/claude-code (loop, events,
 // tool-bridge), cut to what Roamies uses. ClaudeCodeAgent has the surface sidekick.mjs uses of gg-agent's Agent.
-import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import { query as sdkQuery, startup as sdkStartup } from '@anthropic-ai/claude-agent-sdk';
 import { AgentStream, argumentHints, capToolResults, unknownToolMessage } from '@kenkaiiii/gg-agent';
 import { environmentSecrets, redactValue, resolveToolSchema } from '@kenkaiiii/gg-ai';
 import { recordClaudeCodeRateLimit } from '@kenkaiiii/gg-core';
@@ -18,6 +18,7 @@ const INTERRUPT_GRACE_MS = 5_000; // how long interrupt() gets before the proces
 const INTERRUPTED_NOTE = 'Interrupted by the user before this tool call finished.';
 const STDERR_TAIL_CHARS = 4_000;
 const SYNTHETIC_MODEL = '<synthetic>';
+const SPARE_IDLE_MS = 5 * 60_000; // a warm process unused this long is let go (it holds ~250 MB)
 
 export const stripToolPrefix = (name) => (name.startsWith(TOOL_PREFIX) ? name.slice(TOOL_PREFIX.length) : name);
 export const effortForThinking = (level) => (!level ? undefined : level === 'ultra' ? 'max' : level);
@@ -234,7 +235,8 @@ export function createToolBridge({ tools, signal, maxToolResultChars, onEvent })
           if (tool.rawInputSchema) throw first;
           try { parsed = tool.parameters.parse(stripNulls(args)); } catch { throw first; }
         }
-        const signals = [cancel, AbortSignal.timeout(tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS), ...(signal ? [signal] : [])];
+        const sig = typeof signal === 'function' ? signal() : signal;
+        const signals = [cancel, AbortSignal.timeout(tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS), ...(sig ? [sig] : [])];
         const raw = await tool.execute(parsed, { signal: AbortSignal.any(signals), toolCallId, onUpdate: (update) => onEvent({ type: 'tool_call_update', toolCallId, update }) });
         const out = typeof raw === 'string' ? { content: raw } : raw;
         content = out.content; details = out.details;
@@ -317,56 +319,104 @@ class Channel {
 }
 const isAbortLike = (err) => /abort/i.test(err instanceof Error ? err.message : String(err)) || err?.name === 'AbortError';
 
+// ---------- warm spare ----------
+// Starting Claude Code costs ~0.7 s before the model is even asked (process, config, MCP handshake). A spare is
+// started ahead of the next request with the same options and taken by it; anything that differs (model, system
+// prompt, tools, session to resume) starts cold as before. At most one, let go after SPARE_IDLE_MS unused.
+let spare = null;
+const sha = (x) => crypto.createHash('sha256').update(typeof x === 'string' ? x : JSON.stringify(x)).digest('hex').slice(0, 16);
+const spareKey = (o, resume) => sha([o.executable, o.cwd, o.model, sha(o.system ?? ''), (o.tools ?? []).map((t) => t.name), o.maxTurns ?? 0, o.thinking ?? null, resume ?? null, sha(o.env ?? {})]);
+export function closeSpare() {
+  const s = spare; spare = null;
+  if (!s) return;
+  clearTimeout(s.timer);
+  s.warm.then((w) => w?.close()).catch(() => {});
+}
+// Everything a query is started with; `link` carries what's only known once a request takes it.
+function sdkOptions(o, resume, link) {
+  const bridge = createToolBridge({ tools: o.tools ?? [], signal: () => link.signal, onEvent: (event) => link.onEvent?.(event) });
+  const abortController = new AbortController();
+  const effort = effortForThinking(o.thinking);
+  const options = {
+    cwd: o.cwd,
+    model: o.model,
+    systemPrompt: { type: 'custom', prompt: o.system ?? '' },
+    tools: [], // none of Claude Code's own tools: only ours, through the bridge (and its safety checks)
+    settingSources: [],
+    strictMcpConfig: true,
+    mcpServers: { [MCP_SERVER]: bridge.config },
+    allowedTools: bridge.allowedTools(),
+    canUseTool: async (name, toolInput) => (name.startsWith(TOOL_PREFIX) ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'deny', message: `${name} is not available in Roamies.` }),
+    includePartialMessages: true,
+    pathToClaudeCodeExecutable: o.executable,
+    env: o.env,
+    abortController,
+    stderr: (d) => link.stderr?.(d),
+    ...(resume ? { resume } : {}),
+    ...(o.maxTurns ? { maxTurns: o.maxTurns } : {}),
+    ...(effort ? { thinking: { type: 'adaptive' }, effort } : { thinking: { type: 'disabled' } }),
+  };
+  return { bridge, abortController, options };
+}
+/** Starts a spare for a next request with these options, unless one is already waiting for exactly that. */
+export function warmSpare(o, resume) {
+  const key = spareKey(o, resume);
+  if (spare?.key === key) { clearTimeout(spare.timer); spare.timer = setTimeout(closeSpare, SPARE_IDLE_MS); spare.timer.unref?.(); return; }
+  closeSpare();
+  const link = {}, made = sdkOptions(o, resume, link);
+  const warm = Promise.resolve().then(() => (o.startup ?? sdkStartup)({ options: made.options })).catch(() => null);
+  spare = { key, link, ...made, warm, timer: setTimeout(closeSpare, SPARE_IDLE_MS) };
+  spare.timer.unref?.();
+}
+function takeSpare(o, resume) {
+  const s = spare;
+  if (!s) return null;
+  spare = null; clearTimeout(s.timer);
+  if (s.key === spareKey(o, resume)) return s;
+  s.warm.then((w) => w?.close()).catch(() => {});
+  return null;
+}
+
 // One run: `messages` ends with the pending user turn(s); assistant and tool messages are appended to it.
 async function* claudeCodeLoop(messages, o) {
-  const channel = new Channel(), input = new Channel();
+  const channel = new Channel();
   let aborted = !!o.signal?.aborted, stderrTail = '';
-  const bridge = createToolBridge({ tools: o.tools ?? [], signal: o.signal, onEvent: (event) => channel.push({ kind: 'event', event }) });
-  const mapper = new SdkMessageMapper({ messages, takeResult: (id) => bridge.takeResult(id), onSessionId: o.onSessionId, onRateLimit: o.onRateLimit });
-
   let start = messages.length;
   while (start > 0 && messages[start - 1].role === 'user') start--;
   const prior = messages.slice(0, start);
   const first = messages.slice(start).flatMap((m) => toSdkUserContent(m.content));
   if (!o.resume && prior.some((m) => m.role !== 'system')) first.unshift({ type: 'text', text: renderTranscript(prior, MAX_SEED_CHARS) });
   if (!first.length) first.push({ type: 'text', text: 'Continue.' });
-  input.push(toSdkUserMessage(first));
 
-  const abortController = new AbortController();
-  const effort = effortForThinking(o.thinking);
-  const q = (o.query ?? sdkQuery)({
-    prompt: input,
-    options: {
-      cwd: o.cwd,
-      model: o.model,
-      systemPrompt: { type: 'custom', prompt: o.system ?? '' },
-      tools: [], // none of Claude Code's own tools: only ours, through the bridge (and its safety checks)
-      settingSources: [],
-      strictMcpConfig: true,
-      mcpServers: { [MCP_SERVER]: bridge.config },
-      allowedTools: bridge.allowedTools(),
-      canUseTool: async (name, toolInput) => (name.startsWith(TOOL_PREFIX) ? { behavior: 'allow', updatedInput: toolInput } : { behavior: 'deny', message: `${name} is not available in Roamies.` }),
-      includePartialMessages: true,
-      pathToClaudeCodeExecutable: o.executable,
-      env: o.env,
-      abortController,
-      stderr: (d) => { stderrTail = (stderrTail + d).slice(-STDERR_TAIL_CHARS); },
-      ...(o.resume ? { resume: o.resume } : {}),
-      ...(o.maxTurns ? { maxTurns: o.maxTurns } : {}),
-      ...(effort ? { thinking: { type: 'adaptive' }, effort } : { thinking: { type: 'disabled' } }),
-    },
-  });
-  void (async () => {
-    try { for await (const message of q) channel.push({ kind: 'sdk', message }); channel.push({ kind: 'end' }); }
-    catch (error) { channel.push({ kind: 'error', error }); }
-  })();
+  // A warm spare if one was started for exactly this; else (or if it turns out dead) a fresh process.
+  const link = { signal: o.signal, onEvent: (event) => channel.push({ kind: 'event', event }), stderr: (d) => { stderrTail = (stderrTail + d).slice(-STDERR_TAIL_CHARS); } };
+  let run, input, q, warmUsed = false;
+  const begin = async (s) => {
+    const fresh = {};
+    run = s ?? { link: fresh, ...sdkOptions(o, o.resume, fresh) };
+    Object.assign(run.link, link);
+    input = new Channel();
+    input.push(toSdkUserMessage(first));
+    const w = s ? await s.warm : null;
+    warmUsed = !!w;
+    q = w ? w.query(input) : (o.query ?? sdkQuery)({ prompt: input, options: run.options });
+    if (aborted) { input.end(); q.interrupt().catch(() => {}); }
+    let seen = false;
+    try { for await (const message of q) { seen = true; channel.push({ kind: 'sdk', message }); } channel.push({ kind: 'end' }); }
+    catch (error) {
+      if (warmUsed && !seen && !aborted) { try { q.close(); } catch {} return begin(null); } // the spare died while parked
+      channel.push({ kind: 'error', error });
+    }
+  };
+  const mapper = new SdkMessageMapper({ messages, takeResult: (id) => run.bridge.takeResult(id), onSessionId: o.onSessionId, onRateLimit: o.onRateLimit });
+  void begin(o.keepWarm ? takeSpare(o, o.resume) : null);
 
   let killTimer;
   const onAbort = () => {
     aborted = true;
-    input.end();
-    q.interrupt().catch(() => {});
-    killTimer = setTimeout(() => abortController.abort(), INTERRUPT_GRACE_MS);
+    input?.end();
+    q?.interrupt().catch(() => {});
+    killTimer = setTimeout(() => run?.abortController.abort(), INTERRUPT_GRACE_MS);
     channel.push({ kind: 'wake' });
   };
   if (aborted) onAbort(); else o.signal?.addEventListener('abort', onAbort, { once: true });
@@ -395,9 +445,9 @@ async function* claudeCodeLoop(messages, o) {
     }
   } finally {
     o.signal?.removeEventListener('abort', onAbort);
-    input.end(); channel.end();
+    input?.end(); channel.end();
     if (killTimer) clearTimeout(killTimer);
-    q.close();
+    q?.close();
   }
   if (aborted) mapper.pairDanglingToolCalls(INTERRUPTED_NOTE);
   if (hitMaxTurns) yield { type: 'max_turns', totalTurns: mapper.turn, maxTurns: o.maxTurns ?? 0 };
@@ -434,6 +484,11 @@ export class ClaudeCodeAgent {
     this.messages = [...(options.system ? [{ role: 'system', content: options.system }] : []), ...(options.priorMessages ?? [])];
   }
   getMessages() { return [...this.messages]; }
+  /** keepWarm only: start a Claude Code process now for the next prompt, so it doesn't wait for one to start. */
+  warm() {
+    if (!this.options.keepWarm || this.#running) return;
+    warmSpare(this.options, resumeId(this.resume, [...this.messages, { role: 'user', content: '' }]));
+  }
   setSignal(signal) { this.options = { ...this.options, signal }; }
   prompt(content) {
     if (this.#running) throw new Error('Agent is already running');
@@ -461,6 +516,7 @@ export class ClaudeCodeAgent {
         this.resume = { sessionId, count: history.length, anchor: fingerprint(history.at(-1)) };
         o.onResume?.(this.resume);
       }
+      if (o.keepWarm) warmSpare(o, resumeId(this.resume, [...this.messages, { role: 'user', content: '' }]));
     }
   }
 }

@@ -257,6 +257,8 @@ final class Voice {
 
     private var phase = Phase.idle
     private var chordAt = 0.0, listenAt = 0.0, heardAt = 0.0, voiceAt = 0.0, levelAt = 0.0, releasedAt: Double?
+    // When talking ended and what finished the words (the recogniser, its 2.5 s cap): sent with them, for timing.
+    private var finishedAt = 0.0, endedVia = ""
     private var blocked = false, prevChord = false, authorizing = false, reportEmpty = false, failed = false
     private var engine: AVAudioEngine?
     // Kept across sessions (same mic, usually), so later takes start at the right boost.
@@ -400,17 +402,18 @@ final class Voice {
         let shown = phase != .armed
         reportEmpty = shown && !failed
         phase = .finishing
+        finishedAt = uptime(); endedVia = "recognizer"
         wave.think()
         wave.setHidden(true)
         ink.capture { [weak self] in self?.wave.setHidden(false) }
         if shown { emit(["type": "state", "state": "processing"]) }
-        guard let r = rec, !failed else { stopAudio(); finalize(); return }
+        guard let r = rec, !failed else { stopAudio(); endedVia = "failed"; finalize(); return }
         // Keep the mic open a moment after release so a word said while letting go isn't clipped.
         let tail = Timer(timeInterval: 0.3, repeats: false) { [weak self] _ in
             guard let self, self.phase == .finishing, self.rec === r else { return }
             self.stopAudio()
             r.end()
-            let t = Timer(timeInterval: 2.5, repeats: false) { [weak self] _ in self?.finalize() }
+            let t = Timer(timeInterval: 2.5, repeats: false) { [weak self] _ in self?.endedVia = "cap"; self?.finalize() }
             RunLoop.main.add(t, forMode: .common)
             self.finishTimer = t
         }
@@ -444,7 +447,7 @@ final class Voice {
         }
         // What was marked on screen while talking rides along with the words.
         ink.take { area in
-            var msg: [String: Any] = ["type": "final", "text": text]
+            var msg: [String: Any] = ["type": "final", "text": text, "ms": Int(((uptime() - self.finishedAt) * 1000).rounded()), "via": self.endedVia]
             if let area { msg["area"] = area }
             log("sent what was said\(area == nil ? "" : ", with the circled area")")
             emit(msg)

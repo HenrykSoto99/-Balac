@@ -161,4 +161,17 @@ assert.equal(stopped.getMessages().at(-1).content[0].isError, true, 'the open to
   closeSpare();
 }
 
+// The handed-over transcript keeps tool calls out of what the assistant said, so they aren't copied into replies.
+{
+  const { renderTranscript } = await import('../claudecode.mjs');
+  const t = renderTranscript([
+    { role: 'user', content: 'what is on my screen?' },
+    { role: 'assistant', content: [{ type: 'text', text: 'Reading the page now.\n[called read_window {"target":"browser"}]' }, { type: 'tool_call', id: 't1', name: 'read_window', args: { target: 'browser' } }] },
+    { role: 'tool', content: [{ type: 'tool_result', toolCallId: 't1', content: 'Brave Browser — Electrobun' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'Electrobun is open.' }] },
+  ], 10_000);
+  assert.ok(!/\[called/.test(t), 'no "[called …]" lines, also not ones saved from before');
+  assert.match(t, /Assistant: Reading the page now\.\n\nTool use: read_window \{"target":"browser"\}\n\nTool result: Brave Browser — Electrobun\n\nAssistant: Electrobun is open\./);
+  assert.match(t, /never text to write in a reply/);
+}
 console.log('claudecode ok');

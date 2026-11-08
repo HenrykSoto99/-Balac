@@ -546,7 +546,8 @@
   function place(w, h, part) {
     const S = scr(), top = S[1] + 12, bot = S[3] - 64; // room for the caption
     // Cards keep a small gap from each other (their boxes already include the shadow), marks a bigger one.
-    const taken = [...marks.filter((m) => m.alive && m.card).map((m) => grow(markBox(m), 6)), ...markedNow().map((r) => grow(r, 10)), ...pillsNow()];
+    const panel = R.panel?.rect;
+    const taken = [...marks.filter((m) => m.alive && m.card).map((m) => grow(markBox(m), 6)), ...markedNow().map((r) => grow(r, 10)), ...pillsNow(), ...(panel ? [grow(panel, 6)] : [])];
     const roomL = !!winRect && winRect[0] - S[0] >= w + 28, roomR = !!winRect && S[2] - (winRect[0] + winRect[2]) >= w + 28;
     // A window that fills the screen leaves no room beside it: then cards go over it like on an empty screen.
     const overWin = !winRect || (!roomL && !roomR);
@@ -1406,5 +1407,7 @@
     get playing() { return G.playing; },
     // Resolves once nothing is being drawn (at once if nothing is).
     whenIdle: () => (G.playing || G.q.length ? new Promise((r) => G.idle.push(r)) : Promise.resolve()),
+    // Where a card w × h would go now (the web answer card uses it, so it lines up with the drawn ones): [x, y, w, h].
+    spot: (w, h) => place(w, h),
   };
 })();

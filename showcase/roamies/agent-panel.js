@@ -1,7 +1,7 @@
 // The research card: when an answer comes from the web (a search or a fetched page) or turns into a list, it
 // streams into this card instead of the Roamie's speech bubble, as a one-line answer, points and the sites
-// it used, with full markdown (markdown.js). It opens just past the cursor and then stays put
-// while the Roamie keeps following the cursor. Drag it by its top bar; later cards open where it was left.
+// it used, with full markdown (markdown.js). It opens where the drawn cards go (the next free spot from the left,
+// beside the window) and stays put while the Roamie keeps following the cursor. Drag it by its top bar.
 // Real type in the setup guide's look (pixel frame, Martian Mono), scrollable, closable, links open in the browser.
 // The overlay is click-through, so the host asks Roamie.panelHit(x, y) whether the cursor is over it.
 // API: Roamie.panel.open({ status, near }) .status(text) .append(text) .end() .fail(text) .close() .isOpen .onLink
@@ -35,7 +35,7 @@
 .rp-x { all: unset; width: 26px; height: 26px; display: grid; place-items: center; color: var(--ink-3); cursor: pointer; flex: none; }
 .rp-x:hover { color: var(--ink); background: #0d2a2a; }
 .rp-x:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.rp-body { overflow-y: auto; padding: 12px 16px 14px; min-height: 0; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line-hi) transparent; }
+.rp-body { overflow-y: auto; overflow-x: hidden; overflow-wrap: anywhere; min-width: 0; padding: 12px 16px 14px; min-height: 0; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line-hi) transparent; }
 .rp-body > :first-child { margin-top: 0; }
 .rp-body p { margin: 0 0 8px; }
 .rp-body p.lead { font-weight: 600; font-size: 13.5px; line-height: 1.5; color: var(--ink); margin-bottom: 10px; }
@@ -122,10 +122,8 @@
   };
 
   let el = null, body = null, statusEl = null, text = '', streaming = false, raf = 0, closeTimer = 0, hovered = false, follow = true, drag = null;
-  // Where the user last dragged it (kept between launches); otherwise it opens beside the cursor.
-  const POS_KEY = 'roamies.cardPos';
-  let userPos = null;
-  try { userPos = JSON.parse(localStorage.getItem(POS_KEY) ?? 'null'); } catch { userPos = null; }
+  // Older versions kept where it was last dragged and opened every later card there: that spot is forgotten.
+  try { localStorage.removeItem('roamies.cardPos'); } catch {}
   const build = () => {
     el = document.createElement('section');
     el.className = 'rp';
@@ -152,12 +150,7 @@
       e.preventDefault();
     });
     head.addEventListener('pointermove', (e) => { if (drag) moveTo(e.clientX - drag.dx, e.clientY - drag.dy); });
-    const drop = () => {
-      if (!drag) return;
-      drag = null; el.classList.remove('drag');
-      userPos = { x: parseFloat(el.style.left), y: parseFloat(el.style.top) };
-      try { localStorage.setItem(POS_KEY, JSON.stringify(userPos)); } catch {}
-    };
+    const drop = () => { if (!drag) return; drag = null; el.classList.remove('drag'); };
     head.addEventListener('pointerup', drop);
     head.addEventListener('pointercancel', drop);
     // Links open in the browser (through the sidecar's safety check), never inside this overlay.
@@ -191,11 +184,15 @@
     el.style.left = `${Math.round(Math.max(B.l, Math.min(x, B.r - w)))}px`;
     el.style.top = `${Math.round(Math.max(B.t, Math.min(y, B.b - h)))}px`;
   };
-  // Where the user left it; otherwise just past the cursor and the Sidekick beside it (right of them, else left).
+  // Where the drawn cards go: the next free spot from the left, beside the window (room kept for it to grow to about
+  // 320 tall as the answer streams in). Without the drawing layer: just past the cursor and the Sidekick.
+  const GROWS_TO = 320;
   const place = (near) => {
     const B = bounds(), w = el.offsetWidth;
     el.style.maxHeight = `${Math.min(B.b - B.t, 560)}px`;
-    if (userPos) return moveTo(userPos.x, userPos.y);
+    el.style.transformOrigin = 'top left';
+    const spot = R.ink?.spot?.(w, GROWS_TO);
+    if (spot) return moveTo(spot[0], spot[1]);
     if (!near) return moveTo(B.l + 8, B.t + 8);
     const [cx, cy] = near.cursor, a = near.buddy;
     const right = Math.max(cx, a ? a.x + a.r : cx) + 24, left = Math.min(cx, a ? a.x - a.r : cx) - 24 - w;
@@ -216,6 +213,8 @@
     // Still looking things up or writing: the Sidekick stays out (following the cursor) until it's done.
     get working() { return api.isOpen && streaming; },
     get center() { if (!api.isOpen) return null; const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; },
+    // Where it is, so drawn cards keep off it: [x, y, w, h], or null when it's closed.
+    get rect() { if (!api.isOpen) return null; const r = el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; },
     open({ status = 'Searching the web', near } = {}) {
       clearTimeout(closeTimer);
       if (!el) build();

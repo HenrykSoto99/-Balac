@@ -72,16 +72,23 @@ export function toSdkUserContent(content) {
 }
 const toSdkUserMessage = (content) => ({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
 
-function messageText(m) {
-  if (typeof m.content === 'string') return m.content;
-  const lines = [];
+// A tool call copied into a reply as text by an earlier session: not part of what was said.
+const ECHOED = /^[ \t]*(?:\[called [\w.-]+(?: [^\n]*)?\]|Tool (?:use|result): [^\n]*)[ \t]*$/gm;
+// One message as transcript entries: what was said under its role; each tool call and result as its own entry, never
+// inside the assistant's words (models copied "[called …]" lines from there into their replies, and they were spoken).
+function messageEntries(m) {
+  const label = ROLE_LABEL[m.role];
+  if (typeof m.content === 'string') return [[label, m.content.replace(ECHOED, '')]];
+  const out = [], said = [];
+  const flush = () => { if (said.length) out.push([label, said.join('\n').replace(ECHOED, '')]); said.length = 0; };
   for (const p of m.content) {
-    if (p.type === 'text') lines.push(p.text);
-    else if (p.type === 'tool_call') lines.push(`[called ${p.name} ${JSON.stringify(p.args)}]`);
-    else if (p.type === 'tool_result') lines.push(`[${p.isError ? 'error' : 'result'}] ${resultText(p.content)}`);
-    else if (p.type === 'image' || p.type === 'video') lines.push(`[${p.type}]`);
+    if (p.type === 'text') said.push(p.text);
+    else if (p.type === 'image' || p.type === 'video') said.push(`(${p.type})`);
+    else if (p.type === 'tool_call') { flush(); out.push(['Tool use', `${p.name} ${JSON.stringify(p.args)}`]); }
+    else if (p.type === 'tool_result') { flush(); out.push([p.isError ? 'Tool error' : 'Tool result', resultText(p.content)]); }
   }
-  return lines.join('\n');
+  flush();
+  return out;
 }
 const ROLE_LABEL = { system: 'System', user: 'User', assistant: 'Assistant', tool: 'Tool' };
 // Our history as one text block, for a fresh Claude Code session that never saw it. Keeps the newest messages.
@@ -91,14 +98,13 @@ export function renderTranscript(messages, maxChars) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.role === 'system') continue;
-    const text = messageText(m).trim();
-    if (!text) continue;
-    const entry = `${ROLE_LABEL[m.role]}: ${text}`;
-    if (used + entry.length > maxChars) { dropped = i + 1; break; }
-    entries.unshift(entry); used += entry.length + 2;
+    const mine = messageEntries(m).map(([who, text]) => [who, text.trim()]).filter(([, text]) => text).map(([who, text]) => `${who}: ${text}`).join('\n\n');
+    if (!mine) continue;
+    if (used + mine.length > maxChars) { dropped = i + 1; break; }
+    entries.unshift(mine); used += mine.length + 2;
   }
-  const head = dropped ? `[${dropped} earlier messages omitted]\n\n` : '';
-  return `<conversation_so_far>\nThis conversation started before this session. Earlier messages, oldest first:\n\n${head}${entries.join('\n\n')}\n</conversation_so_far>`;
+  const head = dropped ? `(${dropped} earlier messages omitted)\n\n` : '';
+  return `<conversation_so_far>\nThis conversation started before this session. Earlier messages, oldest first. "Tool use" and "Tool result" entries record tools you used through real tool calls: they are never text to write in a reply.\n\n${head}${entries.join('\n\n')}\n</conversation_so_far>`;
 }
 
 // Stateful, one per run. `result` messages are left to the loop.

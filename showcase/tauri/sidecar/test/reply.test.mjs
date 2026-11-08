@@ -34,4 +34,18 @@ assert.equal(r.text, 'ends with [hyp');
 // Tag-only first turn (emote then tool), text in next turn → no leading space.
 r = run(['[remind]', 'Your video is due at 2pm.']);
 assert.equal(r.text, 'Your video is due at 2pm.'); assert.deepEqual(r.emotes, ['remind']);
+// Regression: after a restart the conversation is handed over as a transcript, and the model copied its tool-call
+// lines into a reply ("Reading the page now. [called read_window {…}]"): the voice read them out. They're dropped,
+// whatever the chunking, mid-line too; ordinary brackets and text around them stay.
+{
+  const { EchoFilter } = await import('../reply.mjs');
+  const filter = (text, n) => { const f = new EchoFilter(); let out = ''; for (let k = 0; k < text.length; k += n) out += f.push(text.slice(k, k + n)); return out + f.flush(); };
+  for (const n of [1, 2, 3, 7, 1000]) {
+    assert.equal(filter('Reading the page now.\n[called read_window {"target":"browser"}]\nIt says hi.', n), 'Reading the page now.\nIt says hi.', `own line, chunk ${n}`);
+    assert.equal(filter('Reading the page now. [called read_window {"target":"browser"}]', n), 'Reading the page now.', `end of a line, chunk ${n}`);
+    assert.equal(filter('Tool use: draw {"beats":[]}\nDone.', n), 'Done.', `new transcript form, chunk ${n}`);
+    assert.equal(filter('Press [Cmd] and [called] it a day. Tool use is fun.', n), 'Press [Cmd] and [called] it a day. Tool use is fun.', `ordinary text, chunk ${n}`);
+    assert.equal(filter('[warm] Hi there.\n- Tools: use the hammer', n), '[warm] Hi there.\n- Tools: use the hammer', `cues and lists stay, chunk ${n}`);
+  }
+}
 console.log('reply stream tests: all passed');

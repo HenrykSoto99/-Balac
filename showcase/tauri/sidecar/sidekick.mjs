@@ -24,7 +24,7 @@ import {
   touchFacts, forDisk, forProvider, loadLatestSession, newSession, openCommitments, pruneSessions, saveSession, takeDueReminders, updateCommitment, writeJson,
 } from './store.mjs';
 import { foldInput, foldPrompt, memoryInput, memoryPrompt, oneShot, parseBrain, transcript } from './brain.mjs';
-import { EMOTES, ReplyStream } from './reply.mjs';
+import { EMOTES, EchoFilter, ReplyStream } from './reply.mjs';
 import { downloadModel, isReady, modelDir, sizeLabel, totalBytes } from './voicemodel.mjs';
 import { createTools, expand, fitImage, imageBlock, winOpen } from './tools.mjs';
 import { describeMarks } from './marks.mjs';
@@ -710,6 +710,7 @@ async function prompt(text, image = null, note = '') {
       if (drop && t.trim()) trimNext = true; else if (t) showText(t);
     };
     const cues = voice ? new CueFilter() : null; // voice cues are for the voice only, never shown
+    const echo = new EchoFilter(); // tool calls written out as text never reach the screen or the voice
     const reply = new ReplyStream((ev) => {
       if (spoken && ev.type === 'emote') spoken.emote(ev.action);
       if (spoken && ev.type === 'text') spoken.push(ev.text);
@@ -732,10 +733,11 @@ async function prompt(text, image = null, note = '') {
     let writing = null; // the beat timer while a tool call is being written
     const doneWriting = () => { clearTimeout(writing); writing = null; };
     for await (const e of agentEvents(agent.prompt(content))) {
-      if (e.type === 'text_delta') { reply.push(e.text); if (fresh) { lastReply = ''; fresh = false; } lastReply += e.text; }
+      if (e.type === 'text_delta') { const t = echo.push(e.text); reply.push(t); if (fresh) { lastReply = ''; fresh = false; } lastReply += t; }
       else if (e.type === 'turn_end') {
         doneWriting();
         fresh = true;
+        { const t = echo.flush(); reply.push(t); lastReply += t; }
         reply.endTurn();
         spoken?.flush();
         releaseBeat(false);
@@ -778,6 +780,7 @@ async function prompt(text, image = null, note = '') {
       else if (e.type === 'error') throw e.error;
     }
     doneWriting();
+    { const t = echo.flush(); reply.push(t); lastReply += t; }
     reply.finish();
     const held = cues?.flush(); if (held) showText(held);
     releaseBeat(false);

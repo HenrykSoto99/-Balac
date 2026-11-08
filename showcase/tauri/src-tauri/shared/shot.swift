@@ -22,6 +22,14 @@ enum Shot {
     /// rect: the area in global points (top-left origin); nil = the whole main display. maxPx: the longest side in
     /// pixels. Returns the saved image's pixel size, or nil if it couldn't (older macOS, no permission, timed out).
     static func capture(_ rect: CGRect?, to file: String, png: Bool, maxPx: Int? = nil, keep: [CGWindowID] = []) -> [Int]? {
+        guard let image = image(rect, maxPx: maxPx, keep: keep),
+              let dst = CGImageDestinationCreateWithURL(URL(fileURLWithPath: file) as CFURL, (png ? UTType.png : UTType.jpeg).identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dst, image, png ? nil : [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        return CGImageDestinationFinalize(dst) ? [image.width, image.height] : nil
+    }
+
+    /// The same capture as an image in memory (nil when it can't), for looking at pixels without a file.
+    static func image(_ rect: CGRect?, maxPx: Int? = nil, keep: [CGWindowID] = []) -> CGImage? {
         guard #available(macOS 14.0, *) else { return nil }
         let done = DispatchSemaphore(value: 0)
         let box = Box()
@@ -50,10 +58,8 @@ enum Shot {
                 _ = done.signal()
             }
         }
-        guard done.wait(timeout: .now() + 4) == .success, let image = box.image,
-              let dst = CGImageDestinationCreateWithURL(URL(fileURLWithPath: file) as CFURL, (png ? UTType.png : UTType.jpeg).identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(dst, image, png ? nil : [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
-        return CGImageDestinationFinalize(dst) ? [image.width, image.height] : nil
+        guard done.wait(timeout: .now() + 4) == .success else { return nil }
+        return box.image
     }
 
     private final class Box: @unchecked Sendable { var image: CGImage? }

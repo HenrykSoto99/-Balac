@@ -309,7 +309,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
   });
   // How each kind of place is found. retry: just after a click, when a menu or dialog may still be opening.
   function lookups(spec, retry) {
-    let live = null, shotOk = null, controls = null;
+    let live = null, shotOk = null, controls = null, fitQueue = null;
     // The same words marked twice in a segment (a ring and a connect to it): one helper round trip.
     const seen = new Map();
     return {
@@ -318,13 +318,33 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         if (!seen.has(k)) seen.set(k, this.findText(find));
         return seen.get(k);
       },
+      // Text read off the screen: words inside paragraphs, text in images and canvases, single characters (case
+      // matters). Exact boxes; [] when it isn't there (or not on a Mac).
+      async textAll(find) {
+        if (!HANDS) return [];
+        // The window the latest screenshot showed, when there's one from this request: the front app can change
+        // between looking and drawing.
+        const where = lastShot?.turn === turn && lastShot.win != null ? `window:${lastShot.win}` : spec;
+        return (await hands('ocr-find', where, String(find), 'all').catch(() => null))?.matches ?? [];
+      },
       async findText(find) {
         if (!HANDS) throw new Error('Finding words on screen is Mac only; take a screenshot and give x, y instead.');
+        // Text read off the screen: one match, or where each of several is, so the right one can be picked with within.
+        const readOne = async () => {
+          const all = await this.textAll(find);
+          if (all.length > 1) throw new Error(`"${find}" appears ${all.length} times on screen (${all.slice(0, 4).map((o) => `in "${String(o.text).slice(0, 40)}"`).join(', ')}). Add within: {x, y, w, h} (screenshot pixels round the one you mean), or every: true for all of them.`);
+          return all[0] ?? null;
+        };
+        // One character: read the screen first (labels rarely hold one letter, and the case matters).
+        if (String(find).trim().length === 1) { const o = await readOne(); if (o) return o; }
         for (let k = 0; ; k++) {
           // "front" searches every window of the front app; text is often in a window behind the frontmost one.
           const res = await hands('find-text', spec, find, 'scroll').catch((e) => (k < (retry ? 4 : 0) ? { matches: [] } : Promise.reject(e)));
           const m = pickTextMatch(res.matches, find);
           if (m) return m;
+          // Not a whole label: the exact words inside longer text, or in an image or canvas, read off the screen.
+          const o = await readOne();
+          if (o) return o;
           if (k >= (retry ? 4 : 0)) {
             const near = (res.matches ?? []).slice(0, 3).map((x) => `"${x.text.replace(/\s+/g, ' ').slice(0, 50)}"`).join(', ');
             throw new Error(`No button, label or heading reads "${find}"${near ? ` (it only appears inside longer text: ${near})` : ''}. Use the exact words shown on screen; if you don't know them, take a screenshot first.`);
@@ -338,6 +358,21 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         const c = live(n);
         if (c.offscreen) throw new Error(`"${c.label || c.role}" is further down the page. Use its text instead; that scrolls to it.`);
         return c;
+      },
+      // A box guessed from screenshot pixels, fitted to what's really drawn there. The guesses of one beat come
+      // together (its marks are found at once), so they go to the helper in one call.
+      refine(rect) {
+        if (!HANDS || spec === 'screen' && !lastShot) return Promise.resolve(null);
+        return new Promise((resolve) => {
+          fitQueue ??= { list: [] };
+          fitQueue.list.push({ rect, resolve });
+          fitQueue.timer ??= setTimeout(async () => {
+            const q = fitQueue; fitQueue = null;
+            // The window the screenshot was of: its own pixels, even where another window covers it now.
+            const res = await hands('refine', JSON.stringify(q.list.map((x) => x.rect)), ...(lastShot?.win != null ? [`window:${lastShot.win}`] : [])).catch(() => null);
+            q.list.forEach((x, i) => { const b = res?.boxes?.[i]; x.resolve(Array.isArray(b) && b.length === 4 ? b : null); });
+          }, 0);
+        });
       },
       // The controls on screen now (once per segment), for loops drawn from screenshot pixels to snap to.
       async snap(rect) {
@@ -429,7 +464,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
           if (!look || sg.after) look = lookups(spec, sg.after);
           seg = await resolveTargets(beats.slice(sg.from, sg.to), look);
           // Typing needs the original place (its words or id) to act on; resolveTargets keeps it.
-          seg.forEach((b, j) => b.marks.forEach((m, n) => { if (m.at) m.at.src = beats[sg.from + j].marks[n].at; }));
+          seg.forEach((b, j) => b.marks.forEach((m, n) => { if (m.at) m.at.src = beats[sg.from + j].marks[m.from ?? n]?.at; }));
           await prepare(seg, t, notes);
         } catch (e) {
           if (!k) throw e;
@@ -611,7 +646,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
       name: 'draw',
       description: `Draw on the user's screen while you talk. Your Roamie turns into its cursor and draws with its tip, each beat's marks paced to its spoken line (also shown as a caption). One call holds a whole explanation or walkthrough.
 beats: [{say, marks, wait?}]. say: one short line, under 20 words, spoken while that beat's marks draw (don't repeat it in your reply). Keep 1 to 4 marks per beat, in the order you mention them.
-Places (at, to, tie), best first: {text: the exact words shown on screen} (exact bounds, scrolls to it; target 'screen' searches every app); {id} from read_window, for controls without words; {x, y, w, h} pixels in your latest screenshot, for icons and areas without words: x, y is the thing's centre, and w, h its whole width and height so the loop fits it.
+Places (at, to, tie), best first: {text: the exact words shown on screen} (exact bounds, scrolls to it; target 'screen' searches every app; also words inside paragraphs, text in images or canvases, and a single character, which matches case); add every: true to mark every place that text appears (each letter s, each mention of a word), one mark per place, and within: {x, y, w, h} (screenshot pixels, x, y the centre) to keep to one part of the screen (every s in one sentence); {id} from read_window, for controls without words; {x, y, w, h} pixels in your latest screenshot, for icons, shapes and areas without words: x, y is the thing's centre, and w, h its whole width and height; the box is then fitted to what's really drawn there, so a close guess is enough.
 Which mark: one control they should click: target (with wait 'click' in a walkthrough); one thing to notice: ring (follows its shape; r sets the corner radius); a small spot or icon: point; a region or panel: frame; key words: underline (outdated ones: strike); right or wrong: check, cross; order of steps: num; a name beside something: label (text) or label on any mark; how two things relate: connect (at → to); an odd-shaped group: trace (points); scroll here: scroll (dir); one thing above all else: spotlight (sparingly); something to hover: hover with wait 'hover'; big words: write (text, size).
 Walkthroughs ("how do I…"): one beat per step, each a target on that step's control with label and wait 'click'; the next step is found after they click, on the screen as it is then.
 Explanations that a picture makes clearer go on cards beside the window (tie connects a card to what it explains): card (title, heading, text, items, sources), note (text, tone), list (title, items), clip (title, text), sources ([{name, url}]), photo (query: a thing with a Wikipedia page, or url; text = caption), graph (x_range, y_range, plots [{points, tone, label}], dots [{x, y, label}]) for numbers, timeline (events [{when, text}]) for dates, legend (keys [{tone, text}]), molecule (smiles, label) for chemistry, model (parts [{shape: box|sphere|cylinder|cone|torus, at [x,y,z], size [x,y,z], rot [deg x,y,z], tone, label}] within about -1 to 1, title) for objects and machines. Things saved with remember_commitment or update_commitment already show on their reminders list by themselves: never draw a list or note of them; list and note are for things that aren't being saved.

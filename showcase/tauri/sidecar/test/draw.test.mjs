@@ -70,6 +70,27 @@ console.log('shape radius tests: passed');
   const [s2] = await resolveTargets([{ say: 'x', marks: [{ kind: 'ring', at: { x: 10, y: 10, w: 50, h: 20 } }, { kind: 'point', at: { x: 5, y: 5 } }] }], { ...look, snap: async (r) => { asked.push(r); return [-28, 42, 100, 40]; } });
   assert.deepEqual(s2.marks[0].at.rect, [-28, 42, 100, 40], 'snapped to the control');
   assert.equal(asked.length, 1, 'only the loop with w, h snaps');
+  // A pixel guess is fitted to what's really drawn first (letters, icons, shapes); the control snap is only the fallback.
+  const fitted = [], snapped = [];
+  const fitLook = { ...look, refine: async (r) => { fitted.push(r); return r[2] === 28 ? [8, 48, 6, 6] : [-26, 43, 96, 34]; }, snap: async (r) => { snapped.push(r); return [0, 0, 1, 1]; } };
+  const [s3] = await resolveTargets([{ say: 'x', marks: [{ kind: 'ring', at: { x: 10, y: 10, w: 50, h: 20 } }, { kind: 'point', at: { x: 5, y: 5 } }] }], fitLook);
+  assert.deepEqual(s3.marks.map((m) => m.at.rect), [[-26, 43, 96, 34], [8, 48, 6, 6]], 'both fitted to the pixels');
+  assert.equal(snapped.length, 0, 'no control snap once the pixels fit');
+  const [s4] = await resolveTargets([{ say: 'x', marks: [{ kind: 'ring', at: { x: 10, y: 10, w: 50, h: 20 } }] }], { ...fitLook, refine: async () => null });
+  assert.deepEqual(s4.marks[0].at.rect, [0, 0, 1, 1], 'nothing clear in the pixels: the control snap still helps');
+  // every: one mark per place the text appears, in reading order; none at all is an error.
+  const many = { ...look, textAll: async (t) => (t === 's' ? [{ bounds: [10, 20, 7, 9] }, { bounds: [30, 20, 7, 9] }, { bounds: [12, 50, 7, 9] }] : []) };
+  const [s5] = await resolveTargets([{ say: 'x', marks: [{ kind: 'ring', at: { text: 's', every: true } }, { kind: 'label', text: 'hi', at: { x: 1, y: 1 } }] }], many);
+  assert.deepEqual(s5.marks.map((m) => [m.kind, m.at.rect]), [['ring', [10, 20, 7, 9]], ['ring', [30, 20, 7, 9]], ['ring', [12, 50, 7, 9]], ['label', [-12, 28, 28, 28]]]);
+  await assert.rejects(resolveTargets([{ say: 'x', marks: [{ kind: 'ring', at: { text: 'zz', every: true } }] }], many), /"zz" isn't on screen/);
+  // within: only the matches in that part of the screenshot (pixel maps x*2, y*2+40, so 0..15 px covers x 0..30, y 40..70).
+  const [s6] = await resolveTargets([{ say: 'x', marks: [{ kind: 'ring', at: { text: 's', every: true, within: { x: 7.5, y: 7.5, w: 15, h: 15 } } }] }], many);
+  assert.deepEqual(s6.marks.map((m) => m.at.rect), [[10, 20, 7, 9]].filter(() => false).concat([[12, 50, 7, 9]]), 'only the s inside the area');
+  // Regression: text that appears more than once asks for within, but within without every was ignored, so the same
+  // error came back every time. Now it picks the one in that area.
+  const [s7] = await resolveTargets([{ say: 'x', marks: [{ kind: 'ring', at: { text: 's', within: { x: 7.5, y: 7.5, w: 15, h: 15 } } }] }], many);
+  assert.deepEqual(s7.marks.map((m) => m.at.rect), [[12, 50, 7, 9]], 'within alone: the one in that area');
+  assert.ok(DrawArgs.safeParse({ beats: [{ say: 'x', marks: [{ kind: 'ring', at: { text: 's', every: true } }] }] }).success, 'every is in the schema');
   console.log('draw target tests: passed');
 }
 

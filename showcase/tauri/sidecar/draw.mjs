@@ -21,7 +21,8 @@ const num = z.number();
 const pair = z.array(num).length(2);
 const triple = z.array(num).length(3);
 const Target = z.object({
-  text: z.string().min(1).max(80).optional(), id: z.number().int().optional(),
+  text: z.string().min(1).max(80).optional(), every: z.boolean().optional(), within: z.object({ x: num, y: num, w: num, h: num }).optional(),
+  id: z.number().int().optional(),
   x: num.optional(), y: num.optional(), w: num.optional(), h: num.optional(),
 });
 const Mark = z.object({
@@ -133,9 +134,10 @@ export async function resolveTarget(t, look, r) {
     if (t.w != null && t.h != null && t.w > 0 && t.h > 0) {
       const a = await look.pixel(t.x - t.w / 2, t.y - t.h / 2), b = await look.pixel(t.x + t.w / 2, t.y + t.h / 2);
       rect = [a[0], a[1], b[0] - a[0], b[1] - a[1]];
-      // A guess a few pixels off a real button or field takes that control's exact box.
-      rect = (await look.snap?.(rect)) ?? rect;
-    } else { const a = await look.pixel(t.x, t.y); rect = [a[0] - 14, a[1] - 14, 28, 28]; }
+      // Fitted to what's really drawn there (an icon, a shape, a word, a letter); else the button or field it's a few
+      // pixels off. Models' pixel guesses are often a letter or a few points out.
+      rect = (await look.refine?.(rect)) ?? (await look.snap?.(rect)) ?? rect;
+    } else { const a = await look.pixel(t.x, t.y), g = [a[0] - 14, a[1] - 14, 28, 28]; rect = (await look.refine?.(g)) ?? g; }
   } else throw new Error('Give a place: text shown on screen, an id from read_window, or x and y from a screenshot.');
   rect = rect.map((v) => Math.round(v));
   return { rect, r: shapeRadius(rect[2], rect[3], role, r), role, name, ...(live != null ? { live } : {}) };
@@ -146,20 +148,33 @@ export async function resolveTarget(t, look, r) {
 export async function resolveTargets(beats, look) {
   const out = [];
   for (const [i, b] of beats.entries()) {
-    const marks = [];
-    for (const [j, m] of b.marks.entries()) {
+    // A beat's marks are found together, so the helper fits their boxes in one go; their order stays.
+    const found = await Promise.all(b.marks.map(async (m, j) => {
       const where = `beat ${i + 1} mark ${j + 1} (${m.kind})`;
       try {
-        const o = { ...m };
+        // Every place some text appears (each letter s, each mention of a word): one mark per place, in reading order.
+        // within alone picks the one in that area (the text appears more than once).
+        if ((m.at?.every || m.at?.within) && m.at.text != null && look.textAll) {
+          let hits = await look.textAll(m.at.text);
+          // within: only the ones in that part of the screenshot (x, y its centre, w, h its size).
+          if (m.at.within) {
+            const { x, y, w, h } = m.at.within, a = await look.pixel(x - w / 2, y - h / 2), z2 = await look.pixel(x + w / 2, y + h / 2);
+            hits = hits.filter(({ bounds: [bx, by, bw, bh] }) => bx + bw / 2 >= a[0] && bx + bw / 2 <= z2[0] && by + bh / 2 >= a[1] && by + bh / 2 <= z2[1]);
+          }
+          if (!hits.length) throw new Error(`"${m.at.text}" isn't on screen${m.at.within ? ' in that area' : ''}.`);
+          return hits.slice(0, m.at.every ? LIMITS.marks : 1).map((h) => ({ ...m, from: j, at: { rect: h.bounds.map((v) => Math.round(v)), r: shapeRadius(h.bounds[2], h.bounds[3], 'text', m.r), role: 'text', name: String(m.at.text) } }));
+        }
+        // from: which of the beat's marks it was made from (every can turn one into several).
+        const o = { ...m, from: j };
         if (m.at && hasAt(m.at)) o.at = await resolveTarget(m.at, look, m.r);
         if (m.to && hasAt(m.to)) o.to = await resolveTarget(m.to, look);
         if (m.tie && hasAt(m.tie)) o.tie = await resolveTarget(m.tie, look);
         if (PATHS.has(m.kind) && m.points?.length >= 2) o.points = await Promise.all(m.points.map(([x, y]) => look.pixel(x, y)));
         if (m.kind === 'molecule') o.mol = parseSmiles(m.smiles);
-        marks.push(o);
+        return [o];
       } catch (e) { throw new Error(`${where}: ${e?.message ?? e}`); }
-    }
-    out.push({ say: b.say, wait: b.wait ?? null, marks });
+    }));
+    out.push({ say: b.say, wait: b.wait ?? null, marks: found.flat().slice(0, LIMITS.marks) });
   }
   return out;
 }

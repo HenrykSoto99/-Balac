@@ -205,7 +205,9 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   await tool('act_in_app').execute({ target: 'TextEdit', steps: [{ do: 'click_text', text: 'Next page' }] }, { toolCallId: 'a2' });
   assert.equal(made.ink.describe(), '', "the agent's own click changes the screen too");
   await graph();
-  await tool('open').execute({ target: 'https://example.com' });
+  // An app that doesn't exist, so the test never opens a real browser tab (it did, on every run): the drawing goes
+  // as soon as the open is attempted.
+  await tool('open').execute({ target: 'https://example.invalid-tld-roamies.test', app: 'NoSuchAppRoamiesTest' }).catch(() => {});
   assert.equal(made.ink.describe(), '', 'so does opening a page');
   // A walkthrough waiting for a click: that click is the step, not the screen going away.
   made.nextTurn(); hold = true;

@@ -19,6 +19,7 @@ import Foundation
 import ImageIO
 import Security
 import UniformTypeIdentifiers
+import Vision
 
 setvbuf(stdout, nil, _IOLBF, 0)
 func out(_ o: [String: Any]) -> Never {
@@ -700,6 +701,173 @@ func pageText(_ app: AXUIElement, _ w: Win, cap: Int = 1800, scan: TextScan? = n
 }
 
 /// After a click or key press the page may be loading: re-read until the controls stop changing (max ~1.2 s).
+// ---------- precise places: a guess fitted to the pixels, and text found by reading the screen ----------
+
+/// Grows `m` by `r` pixels (square), so nearby ink counts as one piece: a word's letters, an icon's strokes.
+func dilate(_ m: [Bool], _ w: Int, _ h: Int, _ r: Int) -> [Bool] {
+    guard r > 0 else { return m }
+    var a = [Bool](repeating: false, count: w * h)
+    for y in 0 ..< h {
+        var d = r + 1
+        for x in 0 ..< w { d = m[y * w + x] ? 0 : d + 1; if d <= r { a[y * w + x] = true } }
+        d = r + 1
+        for x in stride(from: w - 1, through: 0, by: -1) { d = m[y * w + x] ? 0 : d + 1; if d <= r { a[y * w + x] = true } }
+    }
+    var b = [Bool](repeating: false, count: w * h)
+    for x in 0 ..< w {
+        var d = r + 1
+        for y in 0 ..< h { d = a[y * w + x] ? 0 : d + 1; if d <= r { b[y * w + x] = true } }
+        d = r + 1
+        for y in stride(from: h - 1, through: 0, by: -1) { d = a[y * w + x] ? 0 : d + 1; if d <= r { b[y * w + x] = true } }
+    }
+    return b
+}
+
+/// The tight box of what's drawn in `px` (RGBA, w×h, top row first) that the guessed box `g` (pixels) was meant for.
+/// The background is read off the edges; whatever differs from it is ink; ink within `join` px counts as one piece;
+/// the pieces centred in the guess make the box. Else the nearest piece of about the right size, else nil (nothing
+/// stands out there, or the guess sits inside something big like a photo).
+func fitBox(_ px: [UInt8], _ w: Int, _ h: Int, _ g: CGRect, join: Int) -> CGRect? {
+    guard w >= 3, h >= 3, px.count >= w * h * 4, g.width > 0, g.height > 0 else { return nil }
+    var rs: [UInt8] = [], gs: [UInt8] = [], bs: [UInt8] = []
+    func edge(_ x: Int, _ y: Int) { let i = (y * w + x) * 4; rs.append(px[i]); gs.append(px[i + 1]); bs.append(px[i + 2]) }
+    for x in 0 ..< w { edge(x, 0); edge(x, h - 1) }
+    for y in 1 ..< h - 1 { edge(0, y); edge(w - 1, y) }
+    func median(_ a: [UInt8]) -> Int { Int(a.sorted()[a.count / 2]) }
+    let bg = (median(rs), median(gs), median(bs))
+    var ink = [Bool](repeating: false, count: w * h), count = 0
+    for i in 0 ..< w * h {
+        let d = max(abs(Int(px[i * 4]) - bg.0), abs(Int(px[i * 4 + 1]) - bg.1), abs(Int(px[i * 4 + 2]) - bg.2))
+        if d > 38 { ink[i] = true; count += 1 }
+    }
+    if count == 0 || Double(count) > 0.6 * Double(w * h) { return nil }
+    let joined = dilate(ink, w, h, join)
+    var label = [Int32](repeating: -1, count: w * h)
+    var pieces: [CGRect] = [], sizes: [Int] = [], stack: [Int] = []
+    for start in 0 ..< w * h where joined[start] && label[start] < 0 {
+        let id = Int32(pieces.count)
+        var x0 = Int.max, y0 = Int.max, x1 = -1, y1 = -1, n = 0
+        label[start] = id; stack.append(start)
+        while let i = stack.popLast() {
+            let x = i % w, y = i / w
+            if ink[i] { x0 = min(x0, x); y0 = min(y0, y); x1 = max(x1, x); y1 = max(y1, y); n += 1 }
+            for j in [x > 0 ? i - 1 : -1, x < w - 1 ? i + 1 : -1, y > 0 ? i - w : -1, y < h - 1 ? i + w : -1] where j >= 0 && joined[j] && label[j] < 0 {
+                label[j] = id; stack.append(j)
+            }
+        }
+        pieces.append(n > 0 ? CGRect(x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1) : .null); sizes.append(n)
+    }
+    let area = Double(g.width * g.height), roomy = g.insetBy(dx: -g.width * 0.15, dy: -g.height * 0.15)
+    var pick: CGRect?
+    // Specks (anti-aliasing) and panels far bigger than the guess don't count.
+    for (r, n) in zip(pieces, sizes) where n >= 3 && Double(r.width * r.height) <= 6 * area && roomy.contains(CGPoint(x: r.midX, y: r.midY)) {
+        pick = pick.map { $0.union(r) } ?? r
+    }
+    if pick == nil {
+        var best = CGFloat.greatestFiniteMagnitude
+        for (r, n) in zip(pieces, sizes) where n >= 3 {
+            let ratio = Double(r.width * r.height) / area, d = hypot(r.midX - g.midX, r.midY - g.midY)
+            if ratio > 0.08, ratio < 6, d <= max(g.width, g.height) * 0.75, d < best { best = d; pick = r }
+        }
+    }
+    guard let p = pick else { return nil }
+    let ratio = Double(p.width * p.height) / area
+    return ratio > 0.04 && ratio < 6 ? p : nil
+}
+
+/// `r` cut to the display it's on (a capture can't reach past it).
+func onDisplay(_ r: CGRect) -> CGRect {
+    var ids = [CGDirectDisplayID](repeating: 0, count: 16), n: UInt32 = 0
+    CGGetActiveDisplayList(16, &ids, &n)
+    let c = CGPoint(x: r.midX, y: r.midY)
+    let d = ids.prefix(Int(n)).map { CGDisplayBounds($0) }.first { $0.contains(c) } ?? CGDisplayBounds(CGMainDisplayID())
+    return r.intersection(d)
+}
+
+/// A guessed box (global points) fitted to what's drawn around it in `img`, a capture of `area` (global points).
+/// Letter-sized guesses join nothing, so neighbouring letters stay apart; bigger ones join ink up to 3 points apart.
+func fitRect(in img: CGImage, area: CGRect, guess g: CGRect) -> CGRect? {
+    let scale = CGFloat(img.width) / max(1, area.width)
+    let pad = max(12, 0.6 * max(g.width, g.height))
+    let want = g.insetBy(dx: -pad, dy: -pad).intersection(area)
+    guard !want.isEmpty else { return nil }
+    let cut = CGRect(x: ((want.minX - area.minX) * scale).rounded(.down), y: ((want.minY - area.minY) * scale).rounded(.down),
+                     width: (want.width * scale).rounded(.up), height: (want.height * scale).rounded(.up))
+        .intersection(CGRect(x: 0, y: 0, width: img.width, height: img.height))
+    guard let crop = img.cropping(to: cut) else { return nil }
+    let w = crop.width, h = crop.height
+    var buf = [UInt8](repeating: 0, count: w * h * 4)
+    let drawn: Bool = buf.withUnsafeMutableBytes { raw in
+        guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        ctx.draw(crop, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return true
+    }
+    guard drawn else { return nil }
+    let ox = area.minX + cut.minX / scale, oy = area.minY + cut.minY / scale
+    let gp = CGRect(x: (g.minX - ox) * scale, y: (g.minY - oy) * scale, width: g.width * scale, height: g.height * scale)
+    let side = min(g.width, g.height)
+    let join = side < 16 ? 0 : Int((min(3, side * 0.1) * scale).rounded())
+    guard let r = fitBox(buf, w, h, gp, join: join) else { return nil }
+    return CGRect(x: ox + r.minX / scale, y: oy + r.minY / scale, width: r.width / scale, height: r.height / scale)
+}
+
+/// A window's own pixels (what a screenshot of it shows, even under other windows), and the area they cover in global
+/// points; or the main display when `win` is nil.
+func pixelsOf(_ win: Win?) -> (CGImage, CGRect)? {
+    guard let w = win else {
+        let d = CGDisplayBounds(CGMainDisplayID())
+        return Shot.image(d).map { ($0, d) }
+    }
+    let file = NSTemporaryDirectory() + "roamies-look-\(getpid()).png"
+    defer { try? FileManager.default.removeItem(atPath: file) }
+    guard run("/usr/sbin/screencapture", ["-x", "-o", "-t", "png", "-l", String(w.id), file]) == 0,
+          let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: file) as CFURL, nil),
+          // Decoded now: the image would otherwise be read from the file lazily, after it's deleted.
+          let img = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else { return nil }
+    return (img, CGRect(x: w.x, y: w.y, width: w.w, height: w.h))
+}
+
+/// Text read off a window (or the main display), with the exact box of each match: words anywhere, inside
+/// paragraphs, images and canvases too, and single characters (case-sensitive). Top to bottom.
+func ocrFind(_ win: Win?, _ needle: String, all: Bool) -> [[String: Any]] {
+    guard let (img, area) = pixelsOf(win), !area.isEmpty else { return [] }
+    // .fast: about 0.05 s for a whole Retina window, with a box per character. (.accurate took ~30 s there and only
+    // gives word-sized boxes for part of a word.)
+    let req = VNRecognizeTextRequest()
+    req.recognitionLevel = .fast
+    req.usesLanguageCorrection = false
+    try? VNImageRequestHandler(cgImage: img).perform([req])
+    let q = needle.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !q.isEmpty else { return [] }
+    let single = q.count == 1
+    var found: [(CGRect, String)] = []
+    for obs in req.results ?? [] {
+        guard let cand = obs.topCandidates(1).first else { continue }
+        let s = cand.string
+        var from = s.startIndex
+        while from < s.endIndex, let r = s.range(of: q, options: single ? [] : [.caseInsensitive], range: from ..< s.endIndex) {
+            from = r.upperBound
+            // Words match whole words only ("harbor" isn't in "harbors"); a character can sit anywhere.
+            if !single {
+                let before: Character = r.lowerBound > s.startIndex ? s[s.index(before: r.lowerBound)] : " "
+                let after: Character = r.upperBound < s.endIndex ? s[r.upperBound] : " "
+                if before.isLetter || before.isNumber || after.isLetter || after.isNumber { continue }
+            }
+            guard let box = (try? cand.boundingBox(for: r))?.boundingBox else { continue }
+            var rect = CGRect(x: area.minX + box.minX * area.width, y: area.minY + (1 - box.maxY) * area.height,
+                              width: box.width * area.width, height: box.height * area.height)
+            // Vision's box for one character is loose: fit it to the glyph's own pixels.
+            if single, let tight = fitRect(in: img, area: area, guess: rect) { rect = tight }
+            found.append((rect, s))
+        }
+    }
+    found.sort { abs($0.0.minY - $1.0.minY) > 4 ? $0.0.minY < $1.0.minY : $0.0.minX < $1.0.minX }
+    return (all ? found : Array(found.prefix(1))).map { r, s in
+        ["text": s, "role": "text", "bounds": [r.minX, r.minY, r.width, r.height].map { ($0 * 10).rounded() / 10 }]
+    }
+}
+
 /// The waits (by index) that come right after a click or key, so they can end once the page has reacted.
 func reactWaits(_ dos: [String]) -> Set<Int> {
     let reacts: Set<String> = ["click", "click_text", "press_button", "key", "click_at", "choose"]
@@ -1263,6 +1431,21 @@ case "--self-test":
     check("wait at the end after a key can end early", reactWaits(["fill", "key", "wait"]) == [2])
     check("a wait first or after typing runs in full", reactWaits(["wait", "type", "wait", "read_window"]).isEmpty)
     check("each wait after a click counts", reactWaits(["click_at", "wait", "click_at", "wait", "take_screenshot"]) == [1, 3])
+    // A guess fitted to the pixels: a dark page with a light square at 30,10 (20×20) and a smaller one at 70,40 (6×6).
+    func canvas(_ w: Int, _ h: Int, _ rects: [CGRect]) -> [UInt8] {
+        var b = [UInt8](repeating: 0, count: w * h * 4)
+        for i in 0 ..< w * h { b[i * 4] = 22; b[i * 4 + 1] = 24; b[i * 4 + 2] = 29; b[i * 4 + 3] = 255 }
+        for r in rects { for y in Int(r.minY) ..< Int(r.maxY) { for x in Int(r.minX) ..< Int(r.maxX) { let i = (y * w + x) * 4; b[i] = 230; b[i + 1] = 230; b[i + 2] = 230 } } }
+        return b
+    }
+    let img = canvas(100, 60, [CGRect(x: 30, y: 10, width: 20, height: 20), CGRect(x: 70, y: 40, width: 6, height: 6)])
+    check("a guess a few pixels off fits the square", fitBox(img, 100, 60, CGRect(x: 25, y: 5, width: 20, height: 20), join: 0) == CGRect(x: 30, y: 10, width: 20, height: 20))
+    check("a loose guess round a small dot fits the dot", fitBox(img, 100, 60, CGRect(x: 63, y: 33, width: 20, height: 20), join: 0) == CGRect(x: 70, y: 40, width: 6, height: 6))
+    check("a guess on empty space fits nothing", fitBox(canvas(100, 60, [CGRect(x: 2, y: 2, width: 4, height: 4)]), 100, 60, CGRect(x: 60, y: 30, width: 20, height: 20), join: 0) == nil)
+    // Two strokes 2 px apart: joined into one icon when the guess is icon-sized, kept apart for a letter-sized guess.
+    let strokes = canvas(80, 40, [CGRect(x: 20, y: 10, width: 6, height: 20), CGRect(x: 28, y: 10, width: 6, height: 20)])
+    check("an icon's strokes join", fitBox(strokes, 80, 40, CGRect(x: 18, y: 8, width: 18, height: 24), join: 3) == CGRect(x: 20, y: 10, width: 14, height: 20))
+    check("a letter-sized guess keeps neighbours apart", fitBox(strokes, 80, 40, CGRect(x: 19, y: 9, width: 8, height: 22), join: 0) == CGRect(x: 20, y: 10, width: 6, height: 20))
     exit(bad == 0 ? 0 : 1)
 
 case "trusted":
@@ -1382,6 +1565,29 @@ case "locate-control":
     let items = walk(axApp(w), w)
     guard id >= 1, id <= items.count else { fail("No control \(id) in \(w.app). Read the window again.") }
     out(["ok": true, "window": winInfo(w), "control": items[id - 1].1])
+
+case "refine":
+    // refine '[[x,y,w,h],…]' [window:<id>]: boxes guessed from a screenshot (global points) fitted to what's really
+    // drawn there; null where nothing clear is there. With a window: its own pixels, as its screenshot showed them.
+    guard args.count >= 2, let data = args[1].data(using: .utf8), let list = (try? JSONSerialization.jsonObject(with: data)) as? [[Double]] else { fail("usage: refine '[[x,y,w,h],...]' [window:<id>]") }
+    let shown = args.count >= 3 ? resolve(args[2]).flatMap { pixelsOf($0) } : nil
+    let fitted: [Any] = list.map { b -> Any in
+        guard b.count == 4, b[2] > 0, b[3] > 0 else { return NSNull() }
+        let g = CGRect(x: b[0], y: b[1], width: b[2], height: b[3])
+        if let (img, area) = shown { return fitRect(in: img, area: area, guess: g).map { r in [r.minX, r.minY, r.width, r.height].map { ($0 * 10).rounded() / 10 } } ?? NSNull() }
+        let pad = max(12, 0.6 * max(g.width, g.height))
+        let region = onDisplay(g.insetBy(dx: -pad, dy: -pad))
+        guard !region.isEmpty, let img = Shot.image(region), let r = fitRect(in: img, area: region, guess: g) else { return NSNull() }
+        return [r.minX, r.minY, r.width, r.height].map { ($0 * 10).rounded() / 10 }
+    }
+    out(["ok": true, "boxes": fitted])
+
+case "ocr-find":
+    // ocr-find <target> <text> [all]: the text read off a window ('screen': the main display), with exact boxes.
+    guard args.count >= 3 else { fail("usage: ocr-find <target> <text> [all]") }
+    let ocrWin: Win? = args[1] == "screen" ? nil : resolve(args[1])
+    if args[1] != "screen" && ocrWin == nil { fail("No matching window is open.") }
+    out(["ok": true, "matches": ocrFind(ocrWin, args[2], all: args.count >= 4 && args[3] == "all")])
 
 case "find-text":
     // Looks through every window of the app ("app:X"), or every window on screen ("screen"), front to back,

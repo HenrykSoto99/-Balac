@@ -20,20 +20,34 @@ fn find_node() -> Option<PathBuf> {
     dirs.into_iter().map(|d| d.join(exe)).find(|p| p.is_file())
 }
 
-fn sidecar_script(app: &AppHandle) -> PathBuf {
+fn sidecar_script(app: &AppHandle) -> Option<PathBuf> {
     let bundled = app.path().resource_dir().map(|d| d.join("sidecar").join("sidekick.mjs"));
     match bundled {
-        Ok(p) if p.is_file() => p,
-        _ => PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../sidecar/sidekick.mjs")),
+        Ok(p) if p.is_file() => Some(p),
+        #[cfg(debug_assertions)]
+        _ => Some(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../sidecar/sidekick.mjs"))),
+        #[cfg(not(debug_assertions))]
+        _ => None,
     }
 }
+
+// Set once the app is quitting: the sidecar then exits on purpose and must not be restarted.
+pub(crate) static QUITTING: AtomicBool = AtomicBool::new(false);
+// Bumped per spawn, so a process replaced by a manual restart doesn't trigger an automatic one.
+static GENERATION: AtomicUsize = AtomicUsize::new(0);
+static CRASHES: Mutex<Vec<Instant>> = Mutex::new(Vec::new());
+const BACKOFF_SECS: [u64; 3] = [1, 3, 10];
 
 pub(crate) fn spawn_sidecar(app: &AppHandle) {
     let Some(node) = find_node() else {
         fallback_menu(app, "Roamies is missing a part; reinstall it");
         return;
     };
-    let script = sidecar_script(app);
+    let Some(script) = sidecar_script(app) else {
+        fallback_menu(app, "Roamies is missing a part; reinstall it");
+        return;
+    };
+    let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let stderr = log_stdio("sidekick.log");
     let mut cmd = Command::new(node);
     hide_console(&mut cmd);
@@ -64,7 +78,24 @@ pub(crate) fn spawn_sidecar(app: &AppHandle) {
         }
         let _ = child.wait();
         *app.state::<Sidecar>().0.lock().unwrap() = None;
+        if QUITTING.load(Ordering::SeqCst) || GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let attempt = {
+            let mut crashes = CRASHES.lock().unwrap();
+            crashes.retain(|t| t.elapsed() < Duration::from_secs(300));
+            crashes.push(Instant::now());
+            crashes.len()
+        };
         let app2 = app.clone();
-        let _ = app.run_on_main_thread(move || fallback_menu(&app2, "Roamies stopped"));
+        if attempt > BACKOFF_SECS.len() {
+            let _ = app.run_on_main_thread(move || fallback_menu(&app2, "Roamies stopped"));
+            return;
+        }
+        thread::sleep(Duration::from_secs(BACKOFF_SECS[attempt - 1]));
+        if QUITTING.load(Ordering::SeqCst) || GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+        let _ = app.run_on_main_thread(move || spawn_sidecar(&app2));
     });
 }

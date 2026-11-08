@@ -28,7 +28,7 @@
       "../sidecar/dist/": "sidecar/"
     },
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "13.5"
     },
     "createUpdaterArtifacts": true,
     "externalBin": [

@@ -15,13 +15,13 @@ import {
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import {
   addFact, applyFold, approxTokens, archiveFolded, clearFacts, clearFinished, compactTrigger, fitContext, flushWrites, forgetFact, isSummary, listItems, listFacts, nextDue, pickFacts, planFold,
-  touchFacts, forDisk, forProvider, loadLatestSession, newSession, openCommitments, pruneSessions, saveSession, takeDueReminders, updateCommitment, writeJson,
+  touchFacts, forDisk, forProvider, loadLatestSession, newSession, openCommitments, pruneSessions, readJson, saveSession, takeDueReminders, updateCommitment, writeJson,
 } from './store.mjs';
 import { foldInput, foldPrompt, memoryInput, memoryPrompt, oneShot, parseBrain, transcript } from './brain.mjs';
 import { EMOTES, EchoFilter, ReplyStream } from './reply.mjs';
@@ -107,8 +107,11 @@ const MODEL_DIR = modelDir();
 const voiceModel = { status: !NEEDS_MODEL || isReady(MODEL_DIR) ? 'ready' : 'missing', done: 0, total: totalBytes(), error: null };
 const voiceReady = () => voiceModel.status === 'ready';
 let config = { ...DEFAULTS };
-try { config = { ...DEFAULTS, ...JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) }; } catch {}
-const saveConfig = () => writeJson(CONFIG_PATH, config);
+{
+  const saved = readJson(CONFIG_PATH, { backup: true }); // an unreadable file is set aside, never overwritten
+  if (saved && typeof saved === 'object' && !Array.isArray(saved)) config = { ...DEFAULTS, ...saved };
+}
+const saveConfig = () => writeJson(CONFIG_PATH, config, { backup: true });
 
 // ---------- spoken replies (Fish Audio) ----------
 // The key is the user's own: in the Keychain (macOS) or DPAPI-encrypted (Windows), never in the config or logs.
@@ -646,6 +649,13 @@ async function pruneLogs() {
 }
 const consoleError = console.error.bind(console);
 console.error = (...a) => { consoleError(...a); if (!String(a[0]).startsWith('[')) logLine('error', a.map((x) => (x instanceof Error ? x.stack : String(x))).join(' ').slice(0, 2000)); };
+// Node exits on an unhandled rejection by default; one stray promise shouldn't take the agent down.
+process.on('unhandledRejection', (e) => console.error('unhandled rejection:', e));
+process.on('uncaughtException', (e, origin) => {
+  console.error(`uncaught exception (${origin}):`, e);
+  // A sync throw leaves state unknown; exit after the log line lands so the app restarts us cleanly.
+  setTimeout(() => process.exit(1), 200);
+});
 // One line per request in ~/.gg/sidekick/usage.jsonl: token counts and timings only, never what was said.
 const USAGE_FILE = path.join(process.env.ROAMIES_DATA_DIR ? path.join(process.env.ROAMIES_DATA_DIR, 'sidekick') : path.join(HOME, '.gg', 'sidekick'), 'usage.jsonl');
 const usageToday = { day: '', requests: 0, tokens: 0 };
@@ -655,6 +665,19 @@ function logUsage(rec) {
   usageToday.requests++; usageToday.tokens += rec.in + rec.cacheWrite + rec.out;
   fs.appendFile(USAGE_FILE, JSON.stringify(rec) + '\n', { mode: 0o600 }).catch(() => {});
   menu();
+}
+// usage.jsonl only grows: past ~512 KB keep the last 90 days, rewritten atomically.
+async function pruneUsage() {
+  try {
+    if ((await fs.stat(USAGE_FILE)).size < 512 * 1024) return;
+    const cutoff = Date.now() - 90 * 864e5;
+    const keep = (await fs.readFile(USAGE_FILE, 'utf8')).split('\n').filter((l) => {
+      try { return JSON.parse(l).t >= cutoff; } catch { return false; }
+    });
+    const tmp = `${USAGE_FILE}.${process.pid}.tmp`;
+    await fs.writeFile(tmp, keep.map((l) => l + '\n').join(''), { mode: 0o600 });
+    await fs.rename(tmp, USAGE_FILE);
+  } catch {}
 }
 let lastReply = '', lastFailed = false;
 // The agent for the next request, made or rebuilt if needed: null when ready, else what to tell the user.
@@ -1059,6 +1082,7 @@ async function toggleItem(id) {
 async function midnightClean() {
   const n = await clearFinished().catch(() => 0);
   if (n) { menu(); showList(); }
+  pruneLogs(); pruneUsage();
   const next = new Date(); next.setHours(24, 0, 5, 0);
   setTimeout(midnightClean, Math.min(next.getTime() - Date.now(), 6 * 3600_000));
 }
@@ -1552,7 +1576,7 @@ overlays();
 sendKeys();
 send({ type: 'login_item' });
 logLine('start', { version: VERSION, platform: process.platform, model: config.model });
-pruneLogs();
+pruneLogs(); pruneUsage();
 midnightClean();
 // Look for updates shortly after launch, then every 6 hours.
 setTimeout(() => checkUpdates(), 20_000);

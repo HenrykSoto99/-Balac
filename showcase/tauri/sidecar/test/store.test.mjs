@@ -305,3 +305,21 @@ console.log('store tests: all passed');
   assert.ok(!fs.existsSync(path.join(dir, 'escape.folded.jsonl')), 'only session ids name an archive');
   console.log('fold tests: passed');
 }
+
+// A memory.json written by a newer app (version 2) is never overwritten by this one.
+{
+  const data = fs.mkdtempSync(path.join(TMP, 'newer-'));
+  const prev = process.env.ROAMIES_DATA_DIR;
+  process.env.ROAMIES_DATA_DIR = data;
+  const N = await import(STORE + '?newer');
+  if (prev === undefined) delete process.env.ROAMIES_DATA_DIR; else process.env.ROAMIES_DATA_DIR = prev;
+  const mem = path.join(N.DIR, 'memory.json');
+  fs.mkdirSync(N.DIR, { recursive: true });
+  const newer = JSON.stringify({ version: 2, things: ['from the future'] });
+  fs.writeFileSync(mem, newer);
+  await N.addCommitment('call mum', null);
+  await N.addFact('likes tea');
+  await N.flushWrites();
+  assert.equal(fs.readFileSync(mem, 'utf8'), newer, 'newer memory.json left untouched');
+  console.log('downgrade guard: passed');
+}

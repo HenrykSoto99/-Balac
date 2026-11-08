@@ -3,15 +3,11 @@
 # Optional voice deps stay external (never loaded); zstd-wasm loads its .wasm from disk, so it's copied.
 set -euo pipefail
 cd "$(dirname "$0")"
-# esbuild: $ESBUILD, then PATH, then a local install, then a GG Coder checkout's copy.
-# (A glob, not ls: the newest-sorting match wins, and odd characters in paths can't split it.)
+# esbuild: $ESBUILD, then PATH, then the one `npm ci` installs here (a devDependency).
 ES="${ESBUILD:-}"
 if [ -z "$ES" ]; then
   ES="$(command -v esbuild || true)"
   [ -n "$ES" ] || { [ -x node_modules/.bin/esbuild ] && ES=node_modules/.bin/esbuild; } || true
-  if [ -z "$ES" ]; then
-    for f in "$HOME"/Documents/UnstableMind/gg-coder/node_modules/.pnpm/esbuild@*/node_modules/esbuild/bin/esbuild; do [ -x "$f" ] && ES="$f"; done
-  fi
 fi
 [ -x "$ES" ] || { echo "esbuild not found; set ESBUILD=/path/to/esbuild" >&2; exit 1; }
 rm -rf dist && mkdir -p dist/node_modules/@bokuweb

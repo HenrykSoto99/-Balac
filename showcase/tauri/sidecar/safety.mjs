@@ -1,5 +1,6 @@
 // What Sidekick may do on its own, what needs a yes from the user first, and what it never does.
 // Pure functions so every rule is tested (test/safety.test.mjs). When unsure, ask; never guess "safe".
+import fs from 'node:fs';
 import nodePath from 'node:path';
 // Rules work on forward-slash paths everywhere, so a Windows path (C:\Users\ken\.ssh) meets the same checks.
 const path = nodePath.posix;
@@ -40,6 +41,28 @@ const norm = (p, home) => {
   return path.normalize(abs).replace(/(.)\/$/, '$1');
 };
 const rel = (abs, home) => { const h = slash(home); return abs === h ? '' : abs.startsWith(h + '/') ? abs.slice(h.length + 1) : abs; };
+// Where a path really leads once symlinks are followed (also a dangling link, or a path not made yet): a link in a
+// harmless folder can point into ~/.ssh or a startup file.
+function realOf(abs, depth = 0) {
+  if (depth > 8) return abs;
+  try { return slash(fs.realpathSync.native(abs)); } catch {}
+  const rest = [];
+  let at = abs;
+  for (let i = 0; i < 64; i++) {
+    try {
+      const st = fs.lstatSync(at);
+      if (st.isSymbolicLink()) { const t = slash(fs.readlinkSync(at)); return realOf(path.join(isAbs(t) ? t : path.join(path.dirname(at), t), ...rest), depth + 1); }
+      return path.join(slash(fs.realpathSync.native(at)), ...rest);
+    } catch {
+      const up = path.dirname(at);
+      if (up === at) return abs;
+      rest.unshift(path.basename(at)); at = up;
+    }
+  }
+  return abs;
+}
+// The same path and where it really leads: every rule is checked against both.
+const bothOf = (abs) => { const r = realOf(abs); return r === abs ? [abs] : [abs, r]; };
 
 // Buttons that delete, pay, send or sign out: Sidekick needs the user's yes before clicking one,
 // even if it was asked to "show" it. Kept in sync with RISKY in hands/main.swift.
@@ -57,9 +80,9 @@ export function redactArgs(name, args = {}) {
 /** read_file / list_files / search_files. Returns { level, reason, path }. */
 export function checkRead(p, home, { recursive = false } = {}) {
   home = slash(home);
-  const abs = norm(p, home), r = rel(abs, home);
-  if (SECRET.some((re) => re.test(r) || re.test(abs))) return { ...verdict(BLOCK, `${p} holds passwords or keys, so I never read it.`), path: abs };
-  if (PRIVATE.some((re) => re.test(r) || re.test(abs))) return { ...verdict(BLOCK, `${p} is another app's private data. Reading it sets off macOS privacy prompts.`), path: abs };
+  const abs = norm(p, home), all = bothOf(abs), hit = (list) => all.some((a) => list.some((re) => re.test(rel(a, home)) || re.test(a)));
+  if (hit(SECRET)) return { ...verdict(BLOCK, `${p} holds passwords or keys, so I never read it.`), path: abs };
+  if (hit(PRIVATE)) return { ...verdict(BLOCK, `${p} is another app's private data. Reading it sets off macOS privacy prompts.`), path: abs };
   if (recursive && (abs === home || abs === '/' || /^[a-z]:$/i.test(abs) || abs === path.join(home, 'Library') || abs === path.join(home, 'AppData') || /^(\/Users|\/Volumes|[a-z]:\/Users)$/i.test(abs))) {
     return { ...verdict(BLOCK, `Searching all of ${p} reaches into other apps' data and sets off macOS privacy prompts. Pick a specific folder, or use Spotlight (mdfind) to find files by name.`), path: abs };
   }
@@ -69,11 +92,12 @@ export function checkRead(p, home, { recursive = false } = {}) {
 /** write_file. Existing files need a yes; secrets, startup files and system folders never. */
 export function checkWrite(p, home, { exists = false } = {}) {
   home = slash(home);
-  const abs = norm(p, home), r = rel(abs, home);
-  if (SECRET.some((re) => re.test(r) || re.test(abs)) || NO_WRITE.some((re) => re.test(r) || re.test(abs))) {
+  const abs = norm(p, home), r = rel(abs, home), all = bothOf(abs);
+  if (all.some((a) => [...SECRET, ...NO_WRITE].some((re) => re.test(rel(a, home)) || re.test(a)))) {
     return { ...verdict(BLOCK, `${p} is a protected file (keys, settings, startup scripts or an app), so I won't write to it.`), path: abs };
   }
-  if (!abs.startsWith(home + '/') && !abs.startsWith('/tmp/') && !abs.startsWith('/private/tmp/')) {
+  const realHome = realOf(home), inside = (a) => [home, realHome].some((h) => a.startsWith(h + '/')) || /^\/(private\/)?tmp\//.test(a);
+  if (!all.every(inside)) {
     return { ...verdict(BLOCK, `I only write files inside your home folder, not ${p}.`), path: abs };
   }
   if (exists) return { ...verdict(ASK, `Overwrite ${r || abs}?`), path: abs };
@@ -112,15 +136,33 @@ export function splitCommand(cmd) {
 }
 
 const words = (s) => (s.match(/"(?:\\.|[^"])*"|'[^']*'|\S+/g) ?? []).map((w) => w.replace(/^(['"])([\s\S]*)\1$/, '$2'));
-// Skip env assignments and wrappers to find the program that really runs.
+// Skip env assignments and wrappers to find the program that really runs. `assigns`: it sets environment variables
+// for it (PAGER=, MANPAGER=, GIT_EXTERNAL_DIFF= and the like can make a read-only program run another one).
 function program(ws) {
-  let i = 0;
-  while (i < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i])) i++;
+  let i = 0, assigns = false;
+  while (i < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i])) { i++; assigns = true; }
   while (i < ws.length && ['command', 'builtin', 'exec', 'nohup', 'time', 'nice', 'caffeinate', 'env', 'xargs', 'stdbuf'].includes(path.basename(ws[i]))) {
     i++; while (i < ws.length && ws[i].startsWith('-')) i++;
-    while (i < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i])) i++;
+    while (i < ws.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(ws[i])) { i++; assigns = true; }
   }
-  return { name: slash(ws[i] ?? '').split('/').pop().replace(/\.(exe|com|bat|cmd)$/i, ''), args: ws.slice(i + 1) };
+  return { name: slash(ws[i] ?? '').split('/').pop().replace(/\.(exe|com|bat|cmd)$/i, ''), args: ws.slice(i + 1), assigns };
+}
+// "Read-only" programs that still write a file named in their arguments, or run another program they're given.
+// Said why, or null when the arguments are harmless.
+function sideEffect(name, args) {
+  const plain = args.filter((a) => !a.startsWith('-')), flag = (re) => args.some((a) => re.test(a));
+  if (name === 'sort' && flag(/^(-o.*|--output(=.*)?)$/)) return '`sort -o` writes a file.';
+  if (name === 'uniq' && plain.length >= 2) return '`uniq` with two files writes the second one.';
+  if (name === 'xxd' && (flag(/^-r/) || plain.length >= 2)) return '`xxd` here writes a file.';
+  if (name === 'tree' && flag(/^-o/)) return '`tree -o` writes a file.';
+  if (name === 'file' && flag(/^-C$/)) return '`file -C` writes a file.';
+  if ((name === 'less' || name === 'more') && flag(/^(-[oO].*|--log-file(=.*)?|--LOG-FILE(=.*)?)$/)) return '`less` here writes a log file.';
+  if (name === 'man' && flag(/^(-[PHt].*|--pager(=.*)?|--html(=.*)?)$/)) return '`man` here runs another program.';
+  if ((name === 'rg' || name === 'ag') && flag(/^(--pre(-glob)?(=.*)?|--pager(=.*)?|--search-zip|-z)$/)) return `\`${name}\` here runs another program on each file.`;
+  if (name === 'fd' && flag(/^(-x|-X|--exec(-batch)?(=.*)?)$/)) return '`fd` here runs a command on each file.';
+  if (name === 'sysctl' && (flag(/^-w$/) || plain.some((a) => a.includes('=')))) return '`sysctl` here changes system settings.';
+  if (name === 'git' && flag(/^--(output|ext-diff|textconv)(=.*)?$/)) return '`git` here writes a file or runs a diff program.';
+  return null;
 }
 
 const BLOCKED_PROGRAMS = {
@@ -144,15 +186,17 @@ const READ_ONLY = new Set([
   'grep', 'egrep', 'fgrep', 'rg', 'ag', 'find', 'fd', 'mdfind', 'mdls', 'locate', 'sort', 'uniq', 'cut', 'tr', 'column', 'jq', 'diff', 'cmp',
   'ps', 'pgrep', 'top', 'vm_stat', 'sysctl', 'system_profiler', 'ioreg', 'pmset', 'defaults', 'networksetup', 'scutil', 'ifconfig',
   'sw_vers', 'arch', 'nproc', 'env', 'printenv', 'true', 'false', 'test', 'seq', 'expr', 'bc', 'md5', 'shasum', 'cksum', 'xxd', 'od',
-  'man', 'tldr', 'osascript', 'git', 'npm', 'node', 'python3', 'python', 'brew', 'cargo', 'rustc', 'go', 'java', 'ruby', 'pip', 'pip3',
+  'man', 'tldr', 'git', 'npm', 'node', 'python3', 'python', 'brew', 'cargo', 'rustc', 'go', 'java', 'ruby', 'pip', 'pip3',
 ]);
 // For tools that change things depending on the subcommand, these subcommands only look.
 const READ_ONLY_SUB = {
-  git: /^(status|log|diff|show|branch|remote|tag|rev-parse|ls-files|blame|shortlog|describe|config\s+--get|stash\s+list|--version|-v)\b/,
+  // Only the looking forms: `git branch -D`, `git tag -d`, `git remote add` change the repo. diff, show, blame and
+  // log -p can run a program a downloaded repo's own settings name (textconv), so they ask.
+  git: /^(status|rev-parse|ls-files|shortlog|describe|config\s+--get\b|stash\s+list|--version|-v)\b|^log\b(?!.*\s(-p|-u|--patch|-L|--ext-diff|--textconv)\b)|^branch(\s+(-a|-r|-v|-vv|--list|--all|--remotes|--show-current|--merged|--no-merged|--contains))*\s*$|^tag(\s+(-l|--list))?(\s+[^-\s]\S*)?\s*$|^remote(\s+-v)?\s*$|^remote\s+(show|get-url)\s+\S+\s*$/,
   npm: /^(ls|list|view|info|outdated|audit|--version|-v|-h|help|config\s+get|root|prefix|bin|search|explain|why)\b/,
   brew: /^(list|ls|info|search|outdated|deps|leaves|config|doctor|--version|--prefix|home)\b/,
   cargo: /^(--version|-V|tree|metadata|search)\b/, pip: /^(list|show|freeze|--version|search)\b/, pip3: /^(list|show|freeze|--version)\b/,
-  defaults: /^(read|domains|find|read-type)\b/, networksetup: /^-(list|get)/, pmset: /^-g\b/, osascript: /^-e\s+["']?(get|return)\b/,
+  defaults: /^(read|domains|find|read-type)\b/, networksetup: /^-(list|get)/, pmset: /^-g\b/,
   node: /^(-v|--version)$/, python3: /^(-V|--version)$/, python: /^(-V|--version)$/, ruby: /^(-v|--version)$/, go: /^(version|env)\b/,
   java: /^(-version|--version)$/, rustc: /^(-V|--version)$/, env: /^$/, printenv: /^$/,
 };
@@ -214,12 +258,19 @@ function checkSimple(text, pipeIn, home, cwd = home) {
     }
     if (name === 'find' && /\s-(delete|exec|execdir|ok|okdir|fprint\w*)\b/.test(' ' + joined)) return verdict(ASK, '`find` here also changes or runs things.');
   }
-  // Any path that looks like a secret, in any command, means no.
+  // Any path that looks like a secret, in any command, means no: also where a symlink leads, and every file a
+  // wildcard would match (~/.ss*/id_* matches no rule as written, but the shell turns it into ~/.ssh/id_rsa).
   for (const a of pathArgs) {
     if (!/[/~.]/.test(a) || a.startsWith('-') && !a.includes('=')) continue;
     const t = a.includes('=') ? a.split('=').slice(1).join('=') : a;
     if (/^[a-z]+:\/\//i.test(t)) continue;
-    if (SECRET.some((re) => re.test(rel(norm(t, home), home)) || re.test(t))) return verdict(BLOCK, `${t} holds passwords or keys, so I never touch it.`);
+    const isSecret = (x) => bothOf(norm(x, home)).some((n) => SECRET.some((re) => re.test(rel(n, home)) || re.test(n))) || SECRET.some((re) => re.test(x));
+    if (isSecret(t)) return verdict(BLOCK, `${t} holds passwords or keys, so I never touch it.`);
+    if (/[*?[]/.test(t)) {
+      const hits = globHits(t, home, cwd);
+      if (hits === null) return verdict(ASK, `I can't tell which files ${t} would match.`);
+      if (hits.some(isSecret)) return verdict(BLOCK, `${t} matches files with passwords or keys, so I never touch it.`);
+    }
   }
   // Making folders is like write_file making a new file: fine where writing is, a yes elsewhere, never where it's blocked.
   if (name === 'mkdir') {
@@ -238,9 +289,23 @@ function checkSimple(text, pipeIn, home, cwd = home) {
   if (READ_ONLY.has(name)) {
     const sub = READ_ONLY_SUB[name];
     if (sub && !sub.test(joined.trim())) return verdict(ASK);
+    const side = sideEffect(name, args);
+    if (side) return verdict(ASK, side);
+    if (prog.assigns) return verdict(ASK, 'Setting environment variables can change what that program runs.');
     return verdict(SAFE);
   }
   return verdict(ASK);
+}
+
+// The files a wildcard argument would match (at most a few thousand), or null when that can't be worked out
+// (** over whole trees, or no glob support): then it asks.
+function globHits(t, home, cwd) {
+  if (/\*\*/.test(t) || typeof fs.globSync !== 'function') return null;
+  const pattern = t.startsWith('~/') ? path.join(slash(home), t.slice(2)) : t;
+  try {
+    const hits = fs.globSync(pattern, { cwd: slash(cwd ?? home) }).slice(0, 5000).map((h) => (isAbs(slash(h)) ? slash(h) : path.join(slash(cwd ?? home), slash(h))));
+    return hits;
+  } catch { return null; }
 }
 
 // Files a command writes with > >> &>, quotes removed; /dev/null and 2>&1 style copies left out.
@@ -327,13 +392,31 @@ export function checkOpen(target, home, { executable = false } = {}) {
 
 const PRIVATE_HOST = /^(localhost|.*\.local|.*\.internal|0\.0\.0\.0|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|\[?::1\]?|\[?f[cd][0-9a-f:]*\]?|\[?fe80:[0-9a-f:]*\]?)$/i;
 
-/** fetch_url: public web pages only, so a web page can't steer Sidekick into the user's router or local apps. */
+/** An IP address that isn't on the public internet: this computer, the local network, link-local (cloud metadata),
+ *  carrier-grade NAT, multicast and reserved ranges, also written as IPv4 inside IPv6 (::ffff:127.0.0.1). */
+export function isPrivateAddress(ip) {
+  let a = String(ip ?? '').toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+  const mapped = a.match(/^(?:0*:)*:?ffff:(?:0+:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (mapped) { const hi = parseInt(mapped[1], 16), lo = parseInt(mapped[2], 16); a = `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`; }
+  const v4 = a.match(/^(?:.*:)?(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const [b0, b1] = [Number(v4[1]), Number(v4[2])];
+    return b0 === 0 || b0 === 10 || b0 === 127 || (b0 === 100 && b1 >= 64 && b1 <= 127) || (b0 === 169 && b1 === 254) || (b0 === 172 && b1 >= 16 && b1 <= 31)
+      || (b0 === 192 && (b1 === 168 || (b1 === 0 && Number(v4[3]) === 0))) || (b0 === 198 && (b1 === 18 || b1 === 19)) || b0 >= 224;
+  }
+  if (!a.includes(':')) return false;
+  return a === '::' || a === '::1' || /^f[cd]/.test(a) || /^fe[89ab]/.test(a) || /^ff/.test(a) || /^64:ff9b:/.test(a) || /^0*:/.test(a) && /^[0:]*(:1)?$/.test(a);
+}
+
+/** fetch_url: public web pages only, so a web page can't steer Sidekick into the user's router or local apps.
+ *  The address a name resolves to is checked too, just before each request (tools.mjs). */
 export function checkUrl(url) {
   let u;
   try { u = new URL(String(url)); } catch { return verdict(BLOCK, "That isn't a valid link."); }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return verdict(BLOCK, 'I only fetch http and https pages.');
   if (u.username || u.password) return verdict(BLOCK, 'Links with passwords in them are blocked.');
-  if (PRIVATE_HOST.test(u.hostname)) return verdict(BLOCK, `${u.hostname} is on your own computer or network, so I won't fetch it.`);
+  const host = u.hostname.replace(/^\[|\]$/g, '');
+  if (PRIVATE_HOST.test(u.hostname) || ((/^[\d.]+$/.test(host) || host.includes(':')) && isPrivateAddress(host))) return verdict(BLOCK, `${u.hostname} is on your own computer or network, so I won't fetch it.`);
   return verdict(SAFE);
 }
 

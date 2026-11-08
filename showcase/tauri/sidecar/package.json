@@ -1,7 +1,13 @@
 {
   "name": "roamies-sidekick",
+  "description": "The Roamies agent: a Node sidecar for the Roamies desktop app",
   "private": true,
   "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KenKaiii/Roamies.git",
+    "directory": "showcase/tauri/sidecar"
+  },
   "type": "module",
   "engines": {
     "node": ">=22"

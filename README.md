@@ -67,9 +67,9 @@ clear it all in one go.
 - **The Roamies panel:** click the menu bar or tray icon for what it's doing, what it remembers, and every setting.
 - **Safe by default:** file edits, commands and app control stay off until you turn them on, and risky steps always ask.
 - **Shows its work:** every tool plays its own animation, so you can see what it's doing.
-- **Private keys:** your Fish Audio key stays in the macOS Keychain or encrypted on Windows, never in a file.
+- **Where keys live:** your Fish Audio key stays in the macOS Keychain (encrypted with Windows DPAPI on Windows). AI sign-ins are stored in `~/.gg/auth.json`, shared with GG Coder.
 - **Out of the way:** no Dock icon, ⌃⌥S shows or hides it, Esc stops a reply.
-- **Updates itself:** signed updates, installed in one click.
+- **Updates itself:** updates are signature-checked before they install, then it restarts itself. The Windows installer isn't code-signed yet, so SmartScreen warns the first time.
 - **Quick setup:** permissions, sign-in and a short chat so it gets to know you.
 
 |                         | macOS                      | Windows                     |
@@ -82,6 +82,8 @@ clear it all in one go.
 | Click and type in apps  | Yes                        | Not yet                     |
 | Ask about an area (⌃⌥A) | Yes                        | Not yet                     |
 
+<sub>Before macOS 26, talking uses Apple's older speech recognizer, which needs Siri or Dictation turned on.</sub>
+
 <sub>Spoken replies are billed to your own Fish Audio account; the panel shows what each voice model costs. Voice on
 Windows uses [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
 ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), in the ONNX export by
@@ -92,9 +94,9 @@ Windows uses [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakee
 
 1. Install Roamies:
 
-   **macOS (Apple silicon or Intel):** [Download the latest release](https://github.com/KenKaiii/Roamies/releases/latest) and open the `.dmg` for your Mac (`aarch64` for Apple silicon, `x64` for Intel).
+   **macOS (Apple silicon or Intel):** [Download the latest release](https://github.com/KenKaiii/Roamies/releases/latest) and open the `.dmg` for your Mac (`aarch64` for Apple silicon, `x64` for Intel). Requires macOS 13.5 or later.
 
-   **Windows:** [Download the latest release](https://github.com/KenKaiii/Roamies/releases/latest) and run the `.exe` installer. It isn't code-signed yet, so Windows shows a SmartScreen warning the first time.
+   **Windows:** [Download the latest release](https://github.com/KenKaiii/Roamies/releases/latest) and run the `.exe` installer. Requires Windows 10 or later. It isn't code-signed yet, so Windows shows a SmartScreen warning the first time: click **More info**, then **Run anyway**.
 
    **Development:** With Rust, Node.js 22+, the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) and, on macOS, the Xcode Command Line Tools installed:
 
@@ -107,6 +109,28 @@ Windows uses [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakee
    ```
 
 2. Open the app, follow the setup guide, pick your Roamie, and hold ⌃⌥ to say hi.
+
+<sub>The first time you sign in with Claude, Roamies downloads Claude Code (about 140 MB). On Windows, the voice model (about 670 MB) downloads once at setup.</sub>
+
+## Privacy
+
+Roamies has no analytics, and nothing is collected by the developer. Your messages, and screenshots when you ask
+about the screen, go to the AI provider you pick. [PRIVACY.md](PRIVACY.md) lists what's sent where.
+
+## Uninstall
+
+**macOS:**
+
+1. Turn off **Open at login** (panel > Behavior), then quit Roamies from the menu bar.
+2. Drag Roamies from Applications to the Trash.
+3. Delete `~/.gg/sidekick` and `~/.gg/sidekick.json`. Keep `~/.gg/auth.json` if you use GG Coder.
+4. Open Keychain Access, search for "Roamies" and delete the Fish Audio key.
+
+**Windows:**
+
+1. Turn off **Open at login** (panel > Behavior), then uninstall Roamies from Settings > Apps.
+2. Delete `%USERPROFILE%\.gg\sidekick` and `%USERPROFILE%\.gg\sidekick.json`. Keep `auth.json` if you use GG Coder.
+3. Delete the voice model folder, `%LOCALAPPDATA%\Roamies\models`.
 
 ## Build with the framework
 
@@ -130,7 +154,7 @@ the same license.
 ## Contributing
 
 Bug reports, ideas and pull requests are welcome. [Open an issue](https://github.com/KenKaiii/Roamies/issues)
-to get started, and report security problems as described in [SECURITY.md](SECURITY.md).
+to get started, read [CONTRIBUTING.md](CONTRIBUTING.md) before a pull request, and report security problems as described in [SECURITY.md](SECURITY.md).
 
 ## Learn with me
 

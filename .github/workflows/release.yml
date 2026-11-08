@@ -134,6 +134,18 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: ./build.sh release --target ${{ matrix.target }}
 
+      # Tauri notarizes the app inside; the DMG around it is a download of its own that macOS checks too.
+      - name: Notarize the DMG
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG=$(ls src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg | head -1)
+          xcrun notarytool submit "$DMG" --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" --wait --timeout 30m
+          xcrun stapler staple "$DMG"
+
       - name: Check the signature and notarization
         if: runner.os == 'macOS'
         run: |
@@ -143,6 +155,8 @@ jobs:
           spctl --assess --type execute --verbose "$APP"
           # The installer window layout lives in .DS_Store; without it the DMG opens as a plain folder.
           DMG=$(ls src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg | head -1)
+          xcrun stapler validate "$DMG"
+          spctl -a -t open --context context:primary-signature -v "$DMG"
           MNT=$(mktemp -d)
           hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$MNT" "$DMG" >/dev/null
           ls -la "$MNT"

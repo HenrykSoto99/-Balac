@@ -227,14 +227,19 @@ function newId(prefix) {
 }
 
 let memory = null;
+let memoryReadOnly = false; // written by a newer app: leave the file alone rather than downgrade it
 const loadMemory = () => {
   if (memory) return memory;
   const m = readJson(MEMORY, { backup: true });
+  if (typeof m?.version === 'number' && m.version > 1) {
+    memoryReadOnly = true;
+    console.error(`[store] memory.json is version ${m.version}, newer than this app; not saving memory this run`);
+  }
   memory = m?.version === 1 && Array.isArray(m.commitments) ? m : { version: 1, commitments: [] };
   if (!Array.isArray(memory.facts)) memory.facts = []; // added later: older files have no facts yet
   return memory;
 };
-const saveMemory = () => writeJson(MEMORY, memory, { backup: true });
+const saveMemory = () => (memoryReadOnly ? Promise.resolve() : writeJson(MEMORY, memory, { backup: true }));
 
 /**
  * Due time → ms, or null for none, or undefined if unreadable. Accepts local times

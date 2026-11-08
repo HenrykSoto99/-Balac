@@ -1324,6 +1324,11 @@ fn main() {
             spawn_sidecar(app.handle());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("failed to run Roamies");
+        .build(tauri::generate_context!())
+        .expect("failed to run Roamies")
+        .run(|_, e| {
+            if matches!(e, tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit) {
+                sidecar::QUITTING.store(true, Ordering::SeqCst);
+            }
+        });
 }

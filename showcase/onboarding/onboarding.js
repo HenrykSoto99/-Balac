@@ -467,7 +467,8 @@
   // ---------------------------------------------------------------- step 3: how replies come
   // Text only, or Voice + text (spoken with Fish Audio). Voice needs the user's own Fish Audio key: picking it
   // opens the field, and the key is checked before voice turns on.
-  // Ken's Fish Audio referral link (sign-up lands on their site; keys are under Developers).
+  // Ken's Fish Audio affiliate link (sign-up lands on their site; keys are under Developers). It's disclosed in
+  // the UI: the #fish-link button in index.html reads "Get a free key (affiliate link)".
   const FISH_URL = 'https://fish.audio/?aff=XJ3PAOHK3INL4';
   const replies = {
     pick: null, saving: false, changing: false, // changing: replacing a key that's already saved

@@ -7,7 +7,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import { parseSipsSize, readProblem, rematch, sameBounds, shotFits, shotMap, shotProblem, snapRect, toScreen } from './pointing.mjs';
-import { ASK, BLOCK, checkDrawAction, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isRiskyClick, isYes } from './safety.mjs';
+import { ASK, BLOCK, checkDrawAction, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isPrivateAddress, isRiskyClick, isYes } from './safety.mjs';
+import dns from 'node:dns/promises';
 import { CARDS, DrawArgs, checkDraw, createParts, faviconFor, photoFor, pickTextMatch, resolveTargets } from './draw.mjs';
 import { plain } from './intro.mjs';
 import { addCommitment, forgetFact, parseDue, updateCommitment } from './store.mjs';
@@ -91,6 +92,16 @@ export function frontLine(f, who = 'The user') {
   const title = f.title ? ` — "${cut(String(f.title).replace(/\s+/g, ' ').trim(), 120)}"` : '';
   return `- Right now ${who} is in ${f.app}${title}${url ? ` (${url})` : ''}. This was just checked and overrides any app or page from earlier messages; they can still ask about something elsewhere.`;
 }
+
+// Git settings a downloaded repo's own config could use to run a program from a "read-only" git status or log:
+// switched off for every command the agent runs (git reads GIT_CONFIG_COUNT/KEY/VALUE over every config file).
+const GIT_SAFE = {
+  GIT_CONFIG_COUNT: '4',
+  GIT_CONFIG_KEY_0: 'core.fsmonitor', GIT_CONFIG_VALUE_0: 'false',
+  GIT_CONFIG_KEY_1: 'core.pager', GIT_CONFIG_VALUE_1: 'cat',
+  GIT_CONFIG_KEY_2: 'diff.external', GIT_CONFIG_VALUE_2: '',
+  GIT_CONFIG_KEY_3: 'core.hooksPath', GIT_CONFIG_VALUE_3: '/dev/null',
+};
 
 export function createTools({ allowActions, ui, ask, openUrl, onCommitments, showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {} }) {
   let axNudged = 0;
@@ -658,7 +669,7 @@ A drawing stays until the user clears it or the window changes; your next drawin
           throw new Error(`${userName} said no, so the command didn't run.`);
         }
         const shell = process.platform === 'win32' ? ['cmd', ['/c', command]] : [process.env.SHELL || '/bin/zsh', ['-lc', command]];
-        const r = await run(shell[0], shell[1], { cwd: HOME });
+        const r = await run(shell[0], shell[1], { cwd: HOME, env: { ...process.env, ...GIT_SAFE } });
         const out = clip((r.stdout + (r.stderr ? `\n[stderr]\n${r.stderr}` : '')).trim() || '(no output)', 12_000);
         if (r.err && r.err.code !== 0) throw new Error(`Exit ${r.err.code ?? r.err.signal}\n${out}`);
         return out;
@@ -668,10 +679,14 @@ A drawing stays until the user clears it or the window changes; your next drawin
       name: 'fetch_url', description: 'Fetch a web page and return its readable text.',
       parameters: z.object({ url: z.string() }), // no .url(): OpenAI strict schemas reject format "uri"; checkUrl validates
       execute: async ({ url }) => {
-        // Redirects are followed by hand so each hop is checked too (a public page can't bounce to localhost).
+        // Redirects are followed by hand so each hop is checked too (a public page can't bounce to localhost), and
+        // each host's addresses too (a public name can point at 127.0.0.1 or the local network).
         let res, at = url;
         for (let hop = 0; ; hop++) {
           allowed(checkUrl(at));
+          const host = new URL(at).hostname.replace(/^\[|\]$/g, '');
+          const addrs = await dns.lookup(host, { all: true }).catch(() => []);
+          if (addrs.some((x) => isPrivateAddress(x.address))) throw new Error(`${host} leads to your own computer or network, so I won't fetch it.`);
           res = await fetch(at, { headers: { 'user-agent': 'Roamies-Sidekick' }, redirect: 'manual', signal: AbortSignal.timeout(20_000) });
           const next = res.status >= 300 && res.status < 400 && res.headers.get('location');
           if (!next) break;

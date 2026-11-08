@@ -1,6 +1,9 @@
 // The safety rules: what runs on its own, what needs a yes, what never runs. Run: npm test
 import assert from 'node:assert/strict';
-import { ASK, BLOCK, SAFE, checkDrawAction, checkLink, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isYes, splitCommand } from '../safety.mjs';
+import { ASK, BLOCK, SAFE, checkDrawAction, checkLink, checkOpen, checkRead, checkUrl, checkWrite, classifyCommand, isPrivateAddress, isYes, splitCommand } from '../safety.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import nodePath from 'node:path';
 
 const HOME = '/Users/ken';
 const failures = [];
@@ -15,11 +18,11 @@ const cmd = (c) => classifyCommand(c, HOME);
 cases('command', cmd, [
   // Plain looking around: runs without asking.
   ['ls -la', SAFE], ['ls ~/Downloads', SAFE], ['pwd', SAFE], ['date', SAFE], ['git status', SAFE], ['git log --oneline -5', SAFE],
-  ['git diff HEAD~1', SAFE], ['du -sh ~/Downloads', SAFE], ['df -h', SAFE], ['ps aux | grep node', SAFE], ['mdfind -name report.pdf', SAFE],
+  ['git diff HEAD~1', ASK], ['du -sh ~/Downloads', SAFE], ['df -h', SAFE], ['ps aux | grep node', SAFE], ['mdfind -name report.pdf', SAFE],
   ['find ~/Documents -name "*.pdf"', SAFE], ['grep -rn TODO ~/projects/app', SAFE], ['cat ~/notes.txt | wc -l', SAFE], ['echo hi', SAFE],
   ['defaults read com.apple.dock', SAFE], ['node --version', SAFE], ['npm ls', SAFE], ['brew list', SAFE], ['sw_vers && uname -a', SAFE],
   ['ls /tmp | grep -i sidekick', SAFE], ['which python3 2>/dev/null', SAFE], ['git status > /dev/null', SAFE],
-  ["osascript -e 'get volume settings'", SAFE], ['echo "a; rm -rf ~"', SAFE],
+  ["osascript -e 'get volume settings'", ASK], ['echo "a; rm -rf ~"', SAFE],
   // Changes things: needs a yes.
   ['rm notes.txt', ASK], ['rm -r ~/projects/old-app', ASK], ['mv a.txt b.txt', ASK], ['mkdir ~/new', SAFE], ['touch x', ASK],
   ['git commit -m wip', ASK], ['git push', ASK], ['git push --force origin main', ASK], ['npm install', ASK], ['npm publish', ASK],
@@ -261,3 +264,45 @@ console.log('sed print tests: all passed');
   assert.equal(lv({ kind: 'delete' }), BLOCK, 'unknown action');
   console.log('draw action tests: all passed');
 }
+
+// Read-only programs that write files or run other programs, osascript, env-swapped pagers and git's changing forms
+// (they used to run without asking: a web page could get the agent to overwrite ~/.zshrc or run a script).
+cases('read-only loopholes', cmd, [
+  [`osascript -e 'return (do shell script "id")'`, ASK], [`osascript -e 'get (do shell script "id")'`, ASK], ['osascript script.scpt', ASK],
+  ['uniq a.txt ~/.zshrc', ASK], ['sort -o ~/.zshrc a.txt', ASK], ['sort --output=b.txt a.txt', ASK], ['xxd -r a.hex ~/.zshrc', ASK],
+  ['xxd a.bin b.txt', ASK], ['tree -o ~/.zshrc ~/projects', ASK], ['man -P /tmp/x ls', ASK], ['man --pager=/tmp/x ls', ASK],
+  ['MANPAGER=/tmp/x man ls', ASK], ['PAGER=/tmp/x git log', ASK], ['env GIT_EXTERNAL_DIFF=/tmp/x git status', ASK],
+  ['rg --pre /tmp/x foo ~/projects', ASK], ['rg -z foo ~/projects', ASK], ['fd -x rm ~/projects', ASK], ['sysctl -w kern.x=1', ASK], ['sysctl kern.x=1', ASK],
+  ['git branch -D main', ASK], ['git tag -d v1', ASK], ['git remote add evil https://x.example/r.git', ASK], ['git log -p', ASK],
+  ['git show HEAD', ASK], ['git blame a.txt', ASK], ['git diff --output=/Users/ken/.zshrc', ASK],
+  // Still fine: the looking forms.
+  ['sort a.txt', SAFE], ['uniq a.txt', SAFE], ['xxd a.bin', SAFE], ['man ls', SAFE], ['rg foo ~/projects', SAFE], ['sysctl hw.ncpu', SAFE],
+  ['git branch', SAFE], ['git branch -a', SAFE], ['git tag', SAFE], ['git tag --list', SAFE], ['git remote -v', SAFE], ['git log --oneline -5', SAFE],
+]);
+// Wildcards and symlinks into secrets, with real files: ~/.ss*/id_* reads ~/.ssh/id_rsa once the shell expands it.
+{
+  const home = fs.realpathSync(fs.mkdtempSync(nodePath.join(os.tmpdir(), 'roamies-safety-')));
+  fs.mkdirSync(nodePath.join(home, '.ssh')); fs.writeFileSync(nodePath.join(home, '.ssh', 'id_rsa'), 'key');
+  fs.writeFileSync(nodePath.join(home, 'notes.txt'), 'hi');
+  fs.symlinkSync(nodePath.join(home, '.ssh', 'id_rsa'), nodePath.join(home, 'harmless.txt'));
+  fs.symlinkSync(nodePath.join(home, '.zshrc'), nodePath.join(home, 'later.txt')); // dangling: .zshrc doesn't exist yet
+  fs.mkdirSync(nodePath.join(home, 'proj')); fs.symlinkSync(nodePath.join(home, '.ssh'), nodePath.join(home, 'proj', 'keys'));
+  const c = (x) => classifyCommand(x, home);
+  cases('wildcards and symlinks', c, [
+    ['cat ~/.ss*/id_*', BLOCK], ['cat ~/.ssh/id_*', BLOCK], ['cat ~/*.txt', BLOCK], ['cat ~/no*thing', SAFE], ['ls ~/*.md', SAFE],
+    ['cat ~/**/id_rsa', BLOCK], ['cat ~/**/notes.txt', ASK], ['cat ~/harmless.txt', BLOCK], ['cat ~/notes.txt', SAFE], ['cat ~/proj/keys/id_rsa', BLOCK],
+  ]);
+  cases('symlinked reads', (p) => checkRead(p, home), [['~/harmless.txt', BLOCK], ['~/proj/keys', BLOCK], ['~/notes.txt', SAFE]]);
+  cases('symlinked writes', (p) => checkWrite(p, home), [['~/later.txt', BLOCK], ['~/proj/keys/new', BLOCK], ['~/fresh.txt', SAFE]]);
+  fs.rmSync(home, { recursive: true, force: true });
+}
+// Addresses off the public internet, however they're written, and links that use them.
+{
+  for (const ip of ['127.0.0.1', '10.1.2.3', '169.254.169.254', '100.64.1.1', '192.168.0.9', '172.20.0.1', '0.0.0.0', '::1', '::', 'fd00::1', 'fe80::1', '::ffff:127.0.0.1', '::ffff:7f00:1', '[::ffff:a9fe:a9fe]', '224.0.0.1']) {
+    if (!isPrivateAddress(ip)) failures.push(`isPrivateAddress: ${ip} should be private`);
+  }
+  for (const ip of ['8.8.8.8', '1.1.1.1', '2606:4700::1111', '151.101.1.69']) if (isPrivateAddress(ip)) failures.push(`isPrivateAddress: ${ip} should be public`);
+  cases('urls by address', checkUrl, [['http://[::ffff:7f00:1]/', BLOCK], ['http://[::]/', BLOCK], ['http://100.64.0.1/', BLOCK], ['http://2130706433/', BLOCK], ['https://example.com/', SAFE]]);
+}
+if (failures.length) { console.error(failures.join('\n')); process.exit(1); }
+console.log('safety loophole tests: passed');

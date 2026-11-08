@@ -17,7 +17,7 @@ let o = { ok: true, window: win };
 if (a[0] === 'act') { const p = JSON.parse(a[1]); o = p.app === 'NoSuchAppRoamiesTest' ? { ok: false, error: 'No matching window is open.' } : { ok: true, done: p.steps.map((s) => s.do), window: win }; }
 if (a[0] === 'find-text') o = { ok: true, matches: [{ text: a[2], match: 'exact', role: 'button', bounds: [100, 100, 80, 24], window: win }] };
 if (a[0] === 'ui') o = { ok: true, window: win, controls: [], texts: [], note: 'Nothing to list.' };
-if (a[0] === 'front') o = { ok: true, app: 'TextEdit', title: 'notes.txt' };
+if (a[0] === 'front') o = { ok: true, app: win.app, title: win.title, ...(win.url ? { url: win.url } : {}) };
 if (a[0] === 'capture') { fs.writeFileSync(a[1], 'x'); o = { ok: true, file: a[1], window: win, pixels: [800, 600] }; }
 console.log(JSON.stringify(o));
 `, { mode: 0o755 });
@@ -170,6 +170,79 @@ assert.match(opened, /no app called "NoSuchAppRoamiesTest"/, 'treated as a link 
   assert.equal(seen.at(-1)?.on, false, 'click-through released after a failed act');
 }
 
+// A drawing goes with the screen it was about: a click in its window that changes what it shows (the user's, reported by
+// the voice helper, or the agent's own), or one of its app's menu items. Cards too. Clicks elsewhere don't count.
+{
+  fs.writeFileSync(log, ''); if (fs.existsSync(path.join(dir, 'front.json'))) fs.rmSync(path.join(dir, 'front.json'));
+  const events = [], watching = [];
+  let hold = false;
+  const made = createTools({
+    allowActions: () => true, ask: async () => false, openUrl: noop, onCommitments: noop, showList: noop, fmtWhen: String, commitmentsText: () => '', userName: 'Test', speak: () => true,
+    watchClicks: (on) => watching.push(on),
+    ui: (m) => {
+      if (m.e?.type?.startsWith('ink_')) events.push(m.e.type);
+      if (m.e?.type !== 'draw') return;
+      setImmediate(() => { made.ink.started(m.e.id, m.e.seg); const last = m.e.beats.at(-1); if (last?.wait && !hold) setTimeout(() => made.ink.waitDone(m.e.id, last.n, 'clicked'), 5); });
+    },
+  });
+  const tool = (n) => made.tools.find((t) => t.name === n);
+  const graph = async () => { made.nextTurn(); events.length = 0; await tool('draw').execute({ beats: [{ say: 'Sales.', marks: [{ kind: 'graph', title: 'Sales', plots: [{ label: 's', points: [[1, 1], [2, 3]] }] }, { kind: 'ring', at: { text: 'Buy' } }] }] }, { toolCallId: `g${Math.random()}` }); };
+  await graph();
+  assert.equal(watching.at(-1), true, 'clicks are watched while a drawing is on a window');
+  made.ink.userClick({ x: 900, y: 300, role: 'AXLink', app: 'Safari', acts: true });
+  assert.match(made.ink.describe(), /graph “Sales”/, 'a click outside its window leaves it');
+  made.ink.userClick({ x: 300, y: 200, role: 'AXLink', app: 'TextEdit', acts: true });
+  assert.equal(made.ink.describe(), '', 'a link clicked in its window: all of it goes, the graph card too');
+  assert.deepEqual([events.at(-1), watching.at(-1)], ['ink_stale', false]);
+  await graph();
+  made.ink.userClick({ x: 40, y: 10, role: 'AXMenuItem', app: 'TextEdit', acts: true });
+  assert.equal(made.ink.describe(), '', "one of its app's menu items counts too");
+  await graph();
+  await tool('act_in_app').execute({ target: 'TextEdit', steps: [{ do: 'type', text: 'hi' }] }, { toolCallId: 'a1' });
+  assert.match(made.ink.describe(), /graph/, 'typing alone leaves it');
+  await tool('act_in_app').execute({ target: 'TextEdit', steps: [{ do: 'click_text', text: 'Next page' }] }, { toolCallId: 'a2' });
+  assert.equal(made.ink.describe(), '', "the agent's own click changes the screen too");
+  await graph();
+  await tool('open').execute({ target: 'https://example.com' });
+  assert.equal(made.ink.describe(), '', 'so does opening a page');
+  // A walkthrough waiting for a click: that click is the step, not the screen going away.
+  made.nextTurn(); hold = true;
+  const walk = tool('draw').execute({ beats: [{ say: 'Click Format.', marks: [{ kind: 'target', at: { text: 'Format' } }], wait: 'click' }] }, { toolCallId: 'w1' });
+  for (let i = 0; i < 100 && !made.ink.describe(); i++) await new Promise((r) => setTimeout(r, 20));
+  made.ink.userClick({ x: 140, y: 112, role: 'AXButton', app: 'TextEdit', acts: true });
+  assert.match(made.ink.describe(), /target “Format”/, 'kept while it waits for the click');
+  made.ink.waitDone('w1', 1, 'clicked'); await walk;
+  // The page itself changing counts, however it happened: a click on something script-driven (no link or button) that
+  // then loads another page, keys or a swipe. Read as the browser's address, or the title in other apps.
+  const front = (w) => fs.writeFileSync(path.join(dir, 'front.json'), JSON.stringify({ id: 7, app: 'Brave Browser', bounds: [0, 0, 800, 600], ...w }));
+  const settle = (ms) => new Promise((r) => setTimeout(r, ms));
+  front({ title: 'Repo', url: 'https://github.com/a/b' });
+  await graph();
+  made.ink.userClick({ x: 300, y: 200, role: 'AXGroup', app: 'Brave Browser', acts: false });
+  await settle(900);
+  assert.match(made.ink.describe(), /graph/, 'a click that changed nothing leaves it');
+  made.ink.userClick({ x: 300, y: 200, role: 'AXGroup', app: 'Brave Browser', acts: false });
+  front({ title: 'Repo', url: 'https://github.com/a/b/issues' });
+  await settle(900);
+  assert.equal(made.ink.describe(), '', 'a script-driven click that loaded another page');
+  front({ title: 'Repo', url: 'https://github.com/a/b' });
+  await graph();
+  front({ title: 'Repo', url: 'https://github.com/a/b#readme' });
+  await settle(1800);
+  assert.match(made.ink.describe(), /graph/, 'a jump within the page is the same page');
+  front({ title: 'Other', url: 'https://example.com/' });
+  await settle(1800);
+  assert.equal(made.ink.describe(), '', 'another page with no click at all (keys, a swipe back)');
+  front({ app: 'Mail', title: '(3) Inbox' });
+  await graph();
+  front({ app: 'Mail', title: '(4) Inbox' });
+  await settle(1800);
+  assert.match(made.ink.describe(), /graph/, 'an unread count in the title is the same view');
+  front({ app: 'Mail', title: 'Sent' });
+  await settle(1800);
+  assert.equal(made.ink.describe(), '', 'another mailbox (a new title) is a new view');
+  fs.rmSync(path.join(dir, 'front.json'));
+}
 fs.rmSync(dir, { recursive: true, force: true });
 console.log('hands tests: passed');
 

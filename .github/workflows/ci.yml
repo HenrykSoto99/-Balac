@@ -68,6 +68,7 @@ jobs:
         run: |
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-gain
           src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-snap
+          src-tauri/binaries/roamies-voice-"$(rustc -vV | sed -n 's/^host: //p')" --test-clicks
 
       - name: Test the macOS hands helper
         if: runner.os == 'macOS'

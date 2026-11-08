@@ -211,6 +211,8 @@ const { tools, hands, whereNow, ink, nextTurn } = createTools({
   showList: () => showList({ seconds: 20 }),
   fmtWhen: (ms) => fmtWhen(ms),
   onPlan: (args) => trail.plan(args),
+  watchClicks: (on) => send({ type: 'watch_clicks', on: !!on }),
+  onInkGone: (why) => logLine('ink_gone', { why }),
 });
 
 // The step trail: plan_steps names the parts; a part marked "now" ticks off when the other tool calls of that
@@ -1488,6 +1490,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'ink_closed') ink.closed(m.part);
   else if (m.type === 'ink_action') onInkButton(String(m.part));
   else if (m.type === 'ink_cleared') { ink.cleared(); endShowcase('gone'); }
+  else if (m.type === 'user_click' && Number.isFinite(m.x) && Number.isFinite(m.y)) ink.userClick({ x: m.x, y: m.y, role: String(m.role ?? ''), app: String(m.app ?? ''), acts: m.acts === true });
   else if (m.type === 'update_status') onUpdateStatus(m);
   else if (m.type === 'login_item_status') onLoginStatus(m);
 }).on('close', () => {

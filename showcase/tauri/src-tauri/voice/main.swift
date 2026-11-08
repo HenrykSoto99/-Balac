@@ -20,6 +20,44 @@ func emit(_ obj: [String: Any]) {
     print(line)
 }
 
+/// Whether a click does something that changes what's on screen: a button, link, tab, menu item, pop-up or search
+/// field, or a double-click that opens a row or icon in a list. Roles run from the clicked element up to its window.
+enum ClickTarget {
+    static let acting: Set<String> = ["AXButton", "AXLink", "AXMenuItem", "AXMenuBarItem", "AXMenuButton", "AXPopUpButton", "AXComboBox",
+                                      "AXSearchField", "AXRadioButton", "AXTab", "AXDisclosureTriangle", "AXIncrementor", "AXColorWell",
+                                      "AXDockItem", "AXSegmentedControl"]
+    // Where climbing stops: a click on the empty part of one of these does nothing, but a double-click in a list opens.
+    static let containers: Set<String> = ["AXWebArea", "AXScrollArea", "AXSplitGroup", "AXApplication", "AXLayoutArea", "AXWindow",
+                                          "AXList", "AXTable", "AXOutline", "AXBrowser"]
+    static let opensOnDouble: Set<String> = ["AXList", "AXTable", "AXOutline", "AXBrowser"]
+    static func acts(roles: [String], count: Int) -> Bool {
+        for r in roles {
+            if acting.contains(r) { return true }
+            if containers.contains(r) { return count >= 2 && opensOnDouble.contains(r) }
+        }
+        return false
+    }
+    /// The roles under a point and its app (empty when it can't be read); nil for Roamies' own windows.
+    static func at(_ p: CGPoint) -> (roles: [String], app: String)? {
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.25)
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(system, Float(p.x), Float(p.y), &hit) == .success, var e = hit else { return ([], "") }
+        var pid: pid_t = 0
+        AXUIElementGetPid(e, &pid)
+        if pid == getpid() || pid == getppid() { return nil }
+        var roles: [String] = []
+        for _ in 0 ..< 10 {
+            var v: CFTypeRef?
+            if AXUIElementCopyAttributeValue(e, kAXRoleAttribute as CFString, &v) == .success, let r = v as? String { roles.append(r) }
+            var up: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(e, kAXParentAttribute as CFString, &up) == .success, let u = up, CFGetTypeID(u) == AXUIElementGetTypeID() else { break }
+            e = u as! AXUIElement
+        }
+        return (roles, NSRunningApplication(processIdentifier: pid)?.localizedName ?? "")
+    }
+}
+
 func log(_ s: String) {
     FileHandle.standardError.write(Data("[voice] \(s)\n".utf8))
 }
@@ -317,6 +355,28 @@ final class Voice {
     let ink = Ink()
     let wave = Wave()
     let buddy = Buddy()
+
+    // ---------- clicks under a drawing ----------
+    // Only while the sidekick has a drawing on a window (it says so): each click on another app is reported, with
+    // whether it's on something that does something, so the drawing goes with the screen it was about. A global
+    // monitor, not the button state, so a tap-to-click (shorter than a frame) isn't missed.
+    private var clickMonitor: Any?
+    private let clickQueue = DispatchQueue(label: "roamies.voice.clicks")
+    var watchClicks = false {
+        didSet {
+            guard watchClicks != oldValue else { return }
+            if watchClicks { clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] e in self?.clicked(count: e.clickCount) } }
+            else if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
+        }
+    }
+    private func clicked(count: Int) {
+        let m = NSEvent.mouseLocation, top = NSScreen.screens.first?.frame.maxY ?? 0, p = CGPoint(x: m.x, y: top - m.y)
+        clickQueue.async {
+            guard let hit = ClickTarget.at(p) else { return }
+            let acts = ClickTarget.acts(roles: hit.roles, count: count)
+            DispatchQueue.main.async { emit(["type": "click", "x": Int(p.x.rounded()), "y": Int(p.y.rounded()), "role": hit.roles.first ?? "", "app": hit.app, "acts": acts]) }
+        }
+    }
 
     func tick() {
         // Drawing follows the keys: only while ⌃⌥ is down for a talk.
@@ -667,6 +727,21 @@ if args.contains("--test-snap") {
     check("a rough box snaps", Loop.closing(box) != nil)
     exit(bad == 0 ? 0 : 1)
 }
+// --test-clicks: which clicks count as changing the screen, with made-up element roles; exits 1 on a failure.
+if args.contains("--test-clicks") {
+    var bad = 0
+    func check(_ name: String, _ ok: Bool) { print("\(ok ? "ok" : "FAIL") \(name)"); if !ok { bad += 1 } }
+    check("a link in a web page", ClickTarget.acts(roles: ["AXStaticText", "AXLink", "AXGroup", "AXWebArea"], count: 1))
+    check("a button", ClickTarget.acts(roles: ["AXButton", "AXToolbar", "AXWindow"], count: 1))
+    check("a menu item", ClickTarget.acts(roles: ["AXMenuItem", "AXMenu"], count: 1))
+    check("a tab", ClickTarget.acts(roles: ["AXRadioButton", "AXTabGroup", "AXWindow"], count: 1))
+    check("plain text in a page doesn't", !ClickTarget.acts(roles: ["AXStaticText", "AXGroup", "AXWebArea", "AXScrollArea"], count: 1))
+    check("one click on a list row doesn't", !ClickTarget.acts(roles: ["AXStaticText", "AXCell", "AXRow", "AXOutline"], count: 1))
+    check("a double-click on a list row opens it", ClickTarget.acts(roles: ["AXStaticText", "AXCell", "AXRow", "AXOutline"], count: 2))
+    check("a double-click on page text doesn't (it selects a word)", !ClickTarget.acts(roles: ["AXStaticText", "AXWebArea"], count: 2))
+    check("a link inside a list still counts", ClickTarget.acts(roles: ["AXLink", "AXCell", "AXRow", "AXTable"], count: 1))
+    exit(bad == 0 ? 0 : 1)
+}
 if args.contains("--perms") { emit(permStatus()); exit(0) }
 if let i = args.firstIndex(of: "--request"), i + 1 < args.count {
     let done = DispatchSemaphore(value: 0)
@@ -697,6 +772,7 @@ Thread.detachNewThread {
         case "buddy": DispatchQueue.main.async { if msg["on"] as? Bool == true { voice.buddy.show(msg) } else { voice.buddy.hide() } }
         case "buddy_alpha": if let a = msg["a"] as? Double { DispatchQueue.main.async { voice.buddy.setHidden(a < 0.5) } }
         case "chord": if let mods = msg["mods"] as? [String] { DispatchQueue.main.async { voice.setChord(mods) } }
+        case "watch_clicks": let on = msg["on"] as? Bool == true; DispatchQueue.main.async { voice.watchClicks = on }
         case "sound": if let on = msg["on"] as? Bool { DispatchQueue.main.async { SnapCue.soundOn = on } }
         case "mute": if let on = msg["on"] as? Bool { DispatchQueue.main.async { OutputMute.enabled = on; if !on { OutputMute.end() } } }
         default: break

@@ -73,6 +73,8 @@ fn hide_console(cmd: &mut Command) -> &mut Command {
 static BUDDY_ON: AtomicBool = AtomicBool::new(false);
 /// A drawing is waiting for the user to click a marked control: the cursor loop watches the left button meanwhile.
 static INK_WAIT: AtomicBool = AtomicBool::new(false);
+/// The cursor is over something clickable in an overlay (a card, its buttons): a click there is on Roamies, not the app below.
+pub(crate) static OVERLAY_HOT: AtomicBool = AtomicBool::new(false);
 
 fn is_overlay(label: &str) -> bool {
     label.starts_with("overlay-")
@@ -158,6 +160,7 @@ fn left_button_down() -> bool {
 /// Cursor entered or left something clickable: flip click-through.
 #[tauri::command]
 fn set_hot(window: WebviewWindow, hot: bool) {
+    OVERLAY_HOT.store(hot, Ordering::Relaxed);
     let _ = window.set_ignore_cursor_events(!hot);
 }
 
@@ -1192,6 +1195,8 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
             }
         }
         Some("panel_show") => show_panel(app, None, false),
+        // A drawing is on a window (or isn't any more): the voice helper reports clicks there that change the screen.
+        Some("watch_clicks") => to_voice(app, &json!({ "cmd": "watch_clicks", "on": msg.get("on").and_then(Value::as_bool) == Some(true) })),
         Some("quit") => app.exit(0),
         Some("onboard") => {
             if let Some(m) = msg.get("msg") {

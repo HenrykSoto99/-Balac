@@ -92,7 +92,7 @@ export function frontLine(f, who = 'The user') {
   return `- Right now ${who} is in ${f.app}${title}${url ? ` (${url})` : ''}. This was just checked and overrides any app or page from earlier messages; they can still ask about something elsewhere.`;
 }
 
-export function createTools({ allowActions, ui, ask, openUrl, onCommitments, showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {} }) {
+export function createTools({ allowActions, ui, ask, openUrl, onCommitments, showList, fmtWhen, commitmentsText, userName, onPlan = () => {}, speak = () => false, onHandoff = () => {}, watchClicks = () => {}, onInkGone = () => {} }) {
   let axNudged = 0;
   let lastShot = null; // how the latest screenshot's pixels map to screen points (see pointing.mjs)
   let lastRead = null; // { win, controls } from the latest read_window, to catch ids that went stale
@@ -218,14 +218,18 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
   // The overlay plays a drawing a beat at a time; each beat's places are looked up just before it's sent, so a
   // walkthrough's next step is found on the screen as it is after the click. A drawing stays until it's cleared or the
   // screen changes: a new drawing in a later request replaces it (unless it edits it), the front window switching,
-  // moving or closing clears it, and Esc or Clear all on screen does. Screen marks also go at the end of a request that
-  // drew nothing (they were about the screen as it was). Parts (p1 …) stay editable meanwhile.
+  // moving or closing clears it, so does a click there that changes what it shows (a link, button, tab, menu item, a
+  // double-click that opens something: the user's or the agent's own), the page or document in it changing (another
+  // address in a browser, another title elsewhere: keys, swipes and script-driven clicks too), and Esc or Clear all on
+  // screen. All of it goes, cards too: they were about that screen. Screen marks also go at the end of a request that
+  // drew nothing.
+  // Parts (p1 …) stay editable meanwhile.
   const parts = createParts();
   const buttons = new Map(); // part id → the button's action, for when it's clicked
   // Parts of drawings that go by themselves (the tour, the setup showcase): about no window, so switching windows keeps them.
   const loose = new Set();
   const windowBound = () => parts.ids.some((p) => !loose.has(p));
-  const ink = { waits: new Map(), turn: -1, active: 0, front: '', watch: null };
+  const ink = { waits: new Map(), turn: -1, active: 0, front: '', win: null, page: '', watch: null, checks: [] };
   const inkWait = (key, ms, signal) => new Promise((resolve) => {
     const done = (v) => { clearTimeout(t); signal?.removeEventListener('abort', stop); ink.waits.delete(key); resolve(v); };
     const t = setTimeout(() => done('timeout'), ms), stop = () => done('stopped');
@@ -238,23 +242,51 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
   const clearAllInk = () => { parts.clear(); buttons.clear(); loose.clear(); ui({ kind: 'agent', e: { type: 'ink_clear' } }); };
   // The window a drawing belongs to: the front window's id and place. Its title isn't part of it (a page updating
   // its title, a document being edited, isn't the screen changing).
-  const frontKey = async () => {
-    if (!HANDS) return '';
+  // Its rect and app too, so a click can be told to be in it.
+  const frontWin = async () => {
+    if (!HANDS) return null;
     const r = await run(HANDS, ['locate', 'front'], { timeout: 900 });
-    try { const w = JSON.parse(r.stdout.trim().split('\n').pop() || '{}').window; return w ? `${w.id}|${(w.bounds ?? []).map((v) => Math.round(v / 4)).join(',')}` : ''; } catch { return ''; }
+    try { const w = JSON.parse(r.stdout.trim().split('\n').pop() || '{}').window; return w ? { key: `${w.id}|${(w.bounds ?? []).map((v) => Math.round(v / 4)).join(',')}`, rect: w.bounds ?? null, app: w.app ?? '' } : null; } catch { return null; }
   };
-  // When another window comes to the front, or that window moves or closes, the drawing no longer sits on what it
-  // was about: all of it fades (cards too).
+  const frontKey = async () => (await frontWin())?.key ?? '';
+  // What the front window shows: a browser's address (without the #part), else its title, less what changes on its
+  // own ("(3) Inbox", "— Edited"). '' when it can't be read, which never counts as a change.
+  const pageOf = ({ url, title } = {}) => (url ? String(url).replace(/#.*$/, '') : String(title ?? '').replace(/^\(\d+\)\s*/, '').replace(/\s+[—–-]\s+Edited$/i, '').trim());
+  const frontPage = async () => {
+    if (!HANDS) return '';
+    const r = await run(HANDS, ['front'], { timeout: 900 });
+    try { return pageOf(JSON.parse(r.stdout.trim().split('\n').pop() || '{}')); } catch { return ''; }
+  };
+  // The screen under the drawing changed: all of it fades (cards too), and the model is told nothing is there.
+  function screenChanged(why) {
+    parts.clear(); buttons.clear(); loose.clear(); ink.front = ''; ink.win = null; ink.page = ''; watchClicks(false);
+    for (const t of ink.checks) clearTimeout(t);
+    ink.checks = [];
+    ui({ kind: 'agent', e: { type: 'ink_stale' } });
+    onInkGone(why);
+  }
+  // Has the page or document in its window changed since it was drawn?
+  async function pageCheck() {
+    if (!windowBound() || !ink.page || ink.active) return;
+    const now = await frontPage();
+    if (now && ink.page && now !== ink.page && windowBound()) screenChanged('page');
+  }
+  // When another window comes to the front, or that window moves or closes, the drawing no longer sits on what it was about.
   function watchStale() {
     if (!HANDS || ink.watch) return;
     ink.watch = setInterval(async () => {
       if (ink.active) return;
-      if (!windowBound()) { clearInterval(ink.watch); ink.watch = null; return; }
-      const k = await frontKey();
-      if (k && ink.front && k !== ink.front) { parts.clear(); buttons.clear(); loose.clear(); ui({ kind: 'agent', e: { type: 'ink_stale' } }); }
+      if (!windowBound()) { clearInterval(ink.watch); ink.watch = null; watchClicks(false); return; }
+      const [k, page] = await Promise.all([frontKey(), frontPage()]);
+      if (!windowBound()) return;
+      if (k && ink.front && k !== ink.front) screenChanged('window');
+      else if (page && ink.page && page !== ink.page) screenChanged('page');
     }, 1500);
     ink.watch.unref?.();
   }
+  // Steps that change what a window shows: the agent doing one is the screen changing under a drawing.
+  const CHANGING = new Set(['click', 'click_text', 'press_button', 'key', 'click_at', 'choose']);
+  const agentChangesScreen = () => { if (windowBound() && !ink.active) screenChanged('agent'); };
   // Copied text goes to the clipboard through stdin, so nothing in it is ever parsed as a command.
   const toClipboard = (text) => new Promise((res) => {
     const [cmd, args] = process.platform === 'darwin' ? ['pbcopy', []] : process.platform === 'win32' ? ['powershell', ['-NoProfile', '-NonInteractive', '-Command', '$input | Set-Clipboard']] : ['xclip', ['-selection', 'clipboard']];
@@ -416,7 +448,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
         await new Promise((res) => setTimeout(res, 350));
       }
     } finally { ink.active--; }
-    if (windowBound()) { ink.front = await frontKey(); watchStale(); }
+    if (windowBound()) { [ink.win, ink.page] = await Promise.all([frontWin(), frontPage()]); ink.front = ink.win?.key ?? ''; watchStale(); if (ink.win) watchClicks(true); }
     const list = parts.describe(drawn);
     return [drawn.length ? `Drew ${list}.` : edits.length ? 'Edited the drawing.' : 'Done.', ...notes, edits.length || drawn.length ? `On screen now: ${parts.describe() || 'nothing'}.` : ''].filter(Boolean).join(' ');
   }
@@ -439,6 +471,18 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
     // The app takes its own drawing away (the setup showcase, when its step is left): everything goes.
     clear: () => { for (const done of [...ink.waits.values()]) done('stopped'); clearAllInk(); },
     describe: () => parts.describe(),
+    // The user clicked ({ x, y, role, app, acts } from the voice helper). In the drawing's window, or one of its app's
+    // menu items: on something that does something, the drawing goes now; anywhere else in it, it goes if the page then
+    // changes (a script-driven link). Not while a walkthrough waits for exactly that click.
+    userClick: (c) => {
+      if (!windowBound() || !ink.win) return watchClicks(false);
+      if (ink.active || ink.waits.size) return;
+      const [x, y, w, h] = ink.win.rect ?? [], inside = w > 0 && c.x >= x && c.x <= x + w && c.y >= y && c.y <= y + h;
+      const menu = /^AXMenu(Bar)?Item$/.test(String(c.role)) && !!c.app && c.app === ink.win.app;
+      if (!inside && !menu) return;
+      if (c.acts) return screenChanged('click');
+      for (const ms of [700, 1600]) ink.checks.push(setTimeout(() => pageCheck().catch(() => {}), ms));
+    },
     copy: (text) => toClipboard(text),
     // A drawing the app makes itself (the welcome tour): the same checks and overlay as one from the model.
     show: (beats, id, opts) => draw({ beats }, { toolCallId: id }, opts),
@@ -486,6 +530,7 @@ export function createTools({ allowActions, ui, ask, openUrl, onCommitments, sho
           // Only reading steps (models sometimes send read_window here): read the window instead of failing the call.
           if (!steps.length) return readWindow(asked);
           if (!allowActions()) throw new Error(actionsOff);
+          if (steps.some((s) => CHANGING.has(s.do))) agentChangesScreen();
           // "Type a web address into the browser's bar and press Return" is just opening a link: do that directly
           // (instant, and nothing can land in the wrong field) instead of clicking the bar and typing.
           const url = typedAddress(asked, steps);
@@ -642,6 +687,7 @@ A drawing stays until the user clears it or the window changes; your next drawin
         if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#]\S*)?$/i.test(t) && !/\.app$/i.test(t)) t = `https://${t}`;
         const isFile = /^[~/.]/.test(t) && await fs.stat(expand(t)).then((s) => s.isFile() && (s.mode & 0o111) !== 0, () => false);
         allowed(checkOpen(t, HOME, { executable: isFile }));
+        agentChangesScreen();
         // mailto: has no //, but it's a link too (it used to be taken for an app name and fail).
         const isUrl = /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^mailto:/i.test(t), isPath = /^[~/.]/.test(t) || /^[a-z]:\\/i.test(t);
         let r;

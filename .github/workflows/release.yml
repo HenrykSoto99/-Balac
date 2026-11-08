@@ -91,6 +91,34 @@ jobs:
           [ -n "$ID" ] || { echo "No Developer ID Application identity in the certificate"; exit 1; }
           echo "APPLE_SIGNING_IDENTITY=$ID" >> "$GITHUB_ENV"
 
+      # The Windows installer needs NSIS, which the bundler downloads from GitHub release links; those can time out
+      # (504) for hours while the API still works. Fetch the same files through the API into the bundler's tools folder
+      # (it skips its own download when they're there, hash-checked). If this fails, the bundler still tries itself.
+      # Versions and hashes are tauri-bundler 2.10's (src/bundle/windows/nsis/mod.rs).
+      - name: Prefetch NSIS for the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dir = Join-Path $env:LOCALAPPDATA 'tauri'; $tmp = Join-Path $env:RUNNER_TEMP 'nsis'
+          New-Item -ItemType Directory -Force $dir, $tmp | Out-Null
+          try {
+            gh release download nsis-3.13 -R tauri-apps/binary-releases -p nsis-3.13.zip -D $tmp --clobber
+            if ($LASTEXITCODE) { throw 'NSIS download failed' }
+            gh release download nsis_tauri_utils-v0.5.3 -R tauri-apps/nsis-tauri-utils -p nsis_tauri_utils.dll -D $tmp --clobber
+            if ($LASTEXITCODE) { throw 'nsis_tauri_utils download failed' }
+            if ((Get-FileHash (Join-Path $tmp 'nsis-3.13.zip') -Algorithm SHA1).Hash -ne 'DB14F8AF2EA346B786C6AE19343F61AAF5E09B8E') { throw 'NSIS hash mismatch' }
+            if ((Get-FileHash (Join-Path $tmp 'nsis_tauri_utils.dll') -Algorithm SHA1).Hash -ne '75197FEE3C6A814FE035788D1C34EAD39349B860') { throw 'nsis_tauri_utils hash mismatch' }
+            Remove-Item -Recurse -Force (Join-Path $dir 'NSIS'), (Join-Path $dir 'nsis-3.13') -ErrorAction SilentlyContinue
+            Expand-Archive (Join-Path $tmp 'nsis-3.13.zip') -DestinationPath $dir
+            Rename-Item (Join-Path $dir 'nsis-3.13') 'NSIS'
+            $add = Join-Path $dir 'NSIS/Plugins/x86-unicode/additional'
+            New-Item -ItemType Directory -Force $add | Out-Null
+            Copy-Item (Join-Path $tmp 'nsis_tauri_utils.dll') $add
+            Write-Host "NSIS ready in $dir"
+          } catch { Write-Host "Couldn't prefetch NSIS ($_); the bundler will download it itself." }
+
       # build.sh copies the web files, bundles the sidecar, then runs `cargo tauri build`. On macOS, Tauri
       # signs with APPLE_SIGNING_IDENTITY and notarizes with APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID.
       - name: Build, sign and notarize

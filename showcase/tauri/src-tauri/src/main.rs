@@ -640,8 +640,10 @@ fn place_panel(app: &AppHandle, w: &WebviewWindow, rect: Option<tauri::Rect>) ->
         let z = r.size.to_physical::<f64>(1.0);
         (p.x, p.y, z.width, z.height)
     });
+    // The icon is in pixels of its own screen; the lookup takes pixels on Windows and points on macOS.
+    let k = tray_scale(app);
     let monitor = match icon {
-        Some((x, y, iw, ih)) => app.monitor_from_point(x + iw / 2.0, y + ih / 2.0).ok().flatten(),
+        Some((x, y, iw, ih)) => app.monitor_from_point((x + iw / 2.0) / k, (y + ih / 2.0) / k).ok().flatten(),
         None => None,
     }
     .or_else(|| app.primary_monitor().ok().flatten());
@@ -669,11 +671,37 @@ fn place_panel(app: &AppHandle, w: &WebviewWindow, rect: Option<tauri::Rect>) ->
 // so with mixed 1x/2x screens the panel came out half (or twice) its size. Its global space is in points.
 #[cfg(target_os = "macos")]
 fn set_panel_size(w: &WebviewWindow, pw: f64, h: f64, s: f64) {
-    let _ = w.set_size(tauri::LogicalSize::new(pw / s, h / s));
+    let _ = w.set_size(tauri::LogicalSize::new(pw.round() / s, h.round() / s));
 }
 #[cfg(target_os = "macos")]
 fn set_panel_position(w: &WebviewWindow, x: f64, y: f64, s: f64) {
-    let _ = w.set_position(tauri::LogicalPosition::new(x / s, y / s));
+    let _ = w.set_position(tauri::LogicalPosition::new(x.round() / s, y.round() / s));
+}
+// The scale of the screen the menu bar icon is on (1 when it can't be read). Looked up in pixels, an icon on a
+// Retina screen matched the screen to its right, or none at all.
+#[cfg(target_os = "macos")]
+fn tray_scale(app: &AppHandle) -> f64 {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::msg_send;
+    let read = |t: &tauri::tray::TrayIcon| {
+        t.with_inner_tray_icon(|t| unsafe {
+            let item = t.ns_status_item()?;
+            let button: *mut AnyObject = msg_send![Retained::as_ptr(&item) as *mut AnyObject, button];
+            if button.is_null() { return None; }
+            let win: *mut AnyObject = msg_send![button, window];
+            if win.is_null() { return None; }
+            let k: f64 = msg_send![win, backingScaleFactor];
+            Some(k)
+        })
+        .ok()
+        .flatten()
+    };
+    app.tray_by_id("roamies").and_then(|t| read(&t)).filter(|k| *k > 0.0).unwrap_or(1.0)
+}
+#[cfg(not(target_os = "macos"))]
+fn tray_scale(_app: &AppHandle) -> f64 {
+    1.0
 }
 #[cfg(not(target_os = "macos"))]
 fn set_panel_size(w: &WebviewWindow, pw: f64, h: f64, _s: f64) {
@@ -1258,6 +1286,8 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
         }
         // Listen right away, hands-free (after an area snap: snap, then just talk).
         Some("listen") => to_voice(app, &json!({ "cmd": "listen" })),
+        // Esc while it's listening: drop the take.
+        Some("listen_cancel") => to_voice(app, &json!({ "cmd": "cancel" })),
         Some("voice_config") => {
             if let Some(dir) = msg.get("model").and_then(Value::as_str) {
                 *app.state::<VoiceModel>().0.lock().unwrap() = Some(dir.to_owned());

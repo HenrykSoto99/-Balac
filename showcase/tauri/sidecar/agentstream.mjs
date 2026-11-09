@@ -5,3 +5,22 @@ export function agentEvents(stream) {
   stream.then(undefined, () => {});
   return events;
 }
+
+/** Calls onStall once nothing has arrived for `ms`. A tool running (it may be waiting on the user) pauses it. */
+export function stallWatch(ms, onStall) {
+  const tools = new Set();
+  let timer = null, done = false;
+  const arm = () => {
+    clearTimeout(timer); timer = null;
+    if (!done && !tools.size) timer = setTimeout(() => { done = true; onStall(); }, ms);
+  };
+  arm();
+  return {
+    event(e) {
+      if (e?.type === 'tool_call_start') tools.add(e.toolCallId);
+      else if (e?.type === 'tool_call_end') tools.delete(e.toolCallId);
+      arm();
+    },
+    stop() { done = true; clearTimeout(timer); },
+  };
+}

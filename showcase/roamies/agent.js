@@ -96,6 +96,13 @@
     }
     return lines;
   };
+  // The typing caret (an index into the text) as a wrapped line and column, so it's drawn where the next letter goes.
+  const caretAt = (lines, caret) => {
+    let li = 0;
+    while (li + 1 < lines.length && lines[li + 1].start <= caret) li++;
+    return { li, col: Math.max(0, Math.min(lines[li]?.s.length ?? 0, caret - (lines[li]?.start ?? 0))) };
+  };
+  R.caretAt = caretAt;
 
   const spring = (s, target, k, c, dt) => { s.v += ((target - s.x) * k - s.v * c) * dt; s.x += s.v * dt; return s.x; };
   const sp = (x = 0) => ({ x, v: 0 });
@@ -471,6 +478,8 @@
       const totalLines = bb.lines.filter((l) => l.start <= bb.shown).length;
       const maxScroll = Math.max(0, (bb.expanded ? bb.lines.length : totalLines) - inner.rows);
       if (bb.follow) bb.scrollTarget = maxScroll;
+      // Typing: keep the caret's line in view, wherever it's been moved to.
+      if (bb.input && !bb.input.listen && bb.text) { const { li } = caretAt(bb.lines, bb.input.caret ?? bb.text.length); bb.scrollTarget = clamp(bb.scrollTarget ?? 0, li - inner.rows + 1, li); }
       bb.scrollTarget = clamp(bb.scrollTarget ?? 0, 0, Math.max(0, bb.lines.length - inner.rows));
       spring(bb.scroll, bb.scrollTarget, bb.input ? 300 : 120, bb.input ? 34 : 18, dt);
       bb.overflow = bb.lines.length > inner.rows;
@@ -681,9 +690,9 @@
       }
       tctx.globalAlpha = 1;
       if (bb.input?.focused && !bb.input.listen && Math.floor((now - bb.input.caretAt) * 2.2) % 2 === 0) {
-        // caret after the last typed character (or at the start, over the placeholder)
+        // caret where the next letter goes (or at the start, over the placeholder)
         let li = 0, col = 0;
-        if (bb.text) { li = bb.lines.length - 1; col = Math.min(bb.lines[li].s.length, bb.text.length - bb.lines[li].start); }
+        if (bb.text) ({ li, col } = caretAt(bb.lines, bb.input.caret ?? bb.text.length));
         if (col >= bb.cols) col = bb.cols - 1;
         const cy = (li - s0) * lh;
         if (cy > -1 && cy < ih) { tctx.fillStyle = css(HOT); tctx.fillRect(col * cw + 0.5, cy + lh * 0.15, Math.max(1.5, t * 0.8), lh * 0.7); }
@@ -891,8 +900,10 @@
         bb.input = { placeholder: opts.placeholder ?? '', mask: !!opts.mask, focused: true, caretAt: now, onPress: opts.onPress };
         bb.wait = 0;
         return {
-          set(value) {
+          // caret: where the field's own caret is (it moves with the arrow keys and clicks); the end if not given.
+          set(value, caret = value.length) {
             const v = bb.input.mask ? '•'.repeat(value.length) : value;
+            bb.input.caret = clamp(caret, 0, v.length);
             const prev = bb.text.length;
             if (v.length > prev) { k.S('key', 0.9 + Math.random() * 0.25); k.sq.kick(1.2); typedAt = now; }
             else if (v.length < prev) k.S('tick');

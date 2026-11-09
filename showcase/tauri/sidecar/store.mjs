@@ -71,7 +71,8 @@ export async function loadLatestSession() {
   try { names = (await fs.readdir(SESSIONS)).filter((n) => SESSION_FILE.test(n)).sort().reverse(); } catch { return null; }
   for (const n of names.slice(0, 5)) {
     const s = readJson(path.join(SESSIONS, n));
-    if (s?.version === 1 && Array.isArray(s.messages)) return s;
+    // A Get to Know Me chat is its own conversation: the one from before it carries on.
+    if (s?.version === 1 && Array.isArray(s.messages) && s.kind !== 'intro') return s;
   }
   return null;
 }

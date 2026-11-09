@@ -125,11 +125,20 @@
     const now = $('now');
     now.replaceChildren(el('b', { textContent: s.text }), state.model ? ` · ${state.model.name}` : s.state === 'off' ? ' · Sign in on the Model page' : '');
     now.title = now.textContent;
+    // Updated in place (not rebuilt), so it keeps focus while the state changes under it.
+    const u = state.update, up = $('head-update');
+    up.hidden = !u.available;
+    if (u.available) {
+      up.textContent = u.installing ? 'Installing…' : `Update to ${u.available}`;
+      up.disabled = u.installing;
+      up.setAttribute('aria-label', u.installing ? `Installing Roamies ${u.available}` : `Install Roamies ${u.available} and restart`);
+    }
     // The sidebar marks a page that needs you: an update to install, or no account to answer with.
-    mark('about', state.update.available ? 'update ready' : null);
+    mark('about', u.available ? 'update ready' : null);
     react();
     mark('model', s.state === 'off' ? 'not signed in' : null);
   }
+  $('head-update').addEventListener('click', () => act('install_update'));
   function mark(page, why) {
     const b = $(`nav-${page}`);
     b.classList.toggle('flag', !!why);
@@ -232,9 +241,6 @@
     const u = state.update;
     const mac = state.os === 'mac';
     return [
-      u.available ? el('div', { className: 'px update', role: 'group', 'aria-label': 'Update' },
-        el('p', { textContent: `Roamies ${u.available} is ready` }),
-        btn(u.installing ? 'Installing…' : 'Install', () => act('install_update'), { kind: 'primary', k: 'install', disabled: u.installing, aria: `Install Roamies ${u.available} and restart` })) : null,
       el('div', { className: 'group' },
         el('h2', { className: 'sr-only', textContent: 'Actions' }),
         el('div', { className: 'actions' },
@@ -446,7 +452,7 @@
           el('span', {}, `Roamies ${state.version}`, el('small', { className: u.result && !u.result.ok && !u.available ? 'late' : '', role: 'status',
             textContent: u.available ? `${u.available} is ready to install` : u.checking ? 'Checking for updates…' : u.result?.ok ? "You're up to date" : u.result ? "Couldn't check just now. Try again in a bit." : 'Updates install by themselves' })),
           u.available ? null : link('Check now', () => act('update'), { k: 'update', disabled: u.checking, aria: 'Check for updates' })),
-        u.available ? btn(u.installing ? 'Installing…' : `Install ${u.available} and restart`, () => act('install_update'), { kind: 'primary', k: 'install-s', disabled: u.installing }) : null),
+        u.available ? btn(u.installing ? 'Installing…' : `Install ${u.available} and restart`, () => act('install_update'), { k: 'install-s', disabled: u.installing }) : null),
       group('Help', null, null,
         el('div', { className: 'links' },
           link('Setup guide', () => act('setup', true), { k: 'setup' }),

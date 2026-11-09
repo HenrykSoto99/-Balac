@@ -1,6 +1,6 @@
 /* The panel that opens from the menu bar or tray icon. Built on the setup guide's stylesheet (fonts, colours,
    pixel frames, buttons, switches, fields), so it's the same LED-panel world; this file only lays it out.
-   One accent fill per view: the update's Install button when there is one, otherwise Ask. */
+   One accent fill per view: the header's update button when there is one, otherwise Ask. */
 :root {
   --gut: 16px;      /* the one inline gutter: header, pages and note */
   --step: 10px;     /* gap inside a group */
@@ -90,6 +90,9 @@ html, body { height: 100%; background: transparent; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .now b { font-weight: 700; color: var(--ink); }
+/* An update to install, at the end of the header on every page: the one accent fill while it's there. */
+.head-update { flex: none; }
+.head-update[hidden] { display: none; }
 
 /* ---------- look tiles: each look, live ---------- */
 .looks { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; }
@@ -147,14 +150,11 @@ html, body { height: 100%; background: transparent; }
 .sub { margin: 0; font: 700 var(--t-small)/1.3 var(--mono); font-stretch: 87.5%; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
 
 /* Buttons here are a size down from the guide's. */
-.body .btn { padding: 8px 12px; font-size: var(--t-small); line-height: 1.25; white-space: nowrap; }
+.body .btn, .head .btn { padding: 8px 12px; font-size: var(--t-small); line-height: 1.25; white-space: nowrap; }
 .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .actions .btn { width: 100%; }
 .actions .btn.wide { grid-column: 1 / -1; }
 
-/* The update notice: the one accent fill on Home while it's there. */
-.update { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 10px 10px 10px 14px; --bc: var(--accent); --fill: #0a2a28; color: var(--ink); }
-.update p { margin: 0; font-size: var(--t-body); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ---------- lists: recent, memory, commitments ---------- */
 .list { margin: 0; padding: 0; list-style: none; display: grid; }

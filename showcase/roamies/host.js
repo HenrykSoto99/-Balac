@@ -71,9 +71,14 @@
     ask = { id: m.id, h };
     focusField();
   };
-  field.addEventListener('input', () => ask?.h.set(field.value));
+  // The bubble draws the caret where the field has it, so moving back to fix a word shows where typing goes.
+  const syncField = () => ask?.h.set(field.value, field.selectionDirection === 'backward' ? field.selectionStart : field.selectionEnd);
+  field.addEventListener('input', syncField);
+  field.addEventListener('select', syncField);
+  field.addEventListener('keyup', syncField);
   field.addEventListener('keydown', (e) => {
     if (!ask) return;
+    setTimeout(syncField, 0); // arrows, Home and End move the caret without an input event
     if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); finishAsk(field.value); }
     else if (e.key === 'Escape') { e.preventDefault(); finishAsk(null); }
   });

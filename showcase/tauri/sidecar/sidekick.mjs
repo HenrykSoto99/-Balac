@@ -7,7 +7,7 @@
 import { Agent } from '@kenkaiiii/gg-agent';
 import { ClaudeCodeAgent, closeSpare } from './claudecode.mjs';
 import { SAFE, checkDrawAction, checkLink, redactArgs } from './safety.mjs';
-import { agentEvents } from './agentstream.mjs';
+import { agentEvents, stallWatch } from './agentstream.mjs';
 import {
   AUTH_PROVIDERS, AuthStorage, OPENAI_CHATGPT_KEY, apiKeyStorageKeys, claudeCodeEnv, dualAuthProvider, getAuthStorageKeys, getContextWindow, getDefaultModel, getModel,
   getModelsForProvider, loginChatGPT, resolveClaudeCodeBinary, signInWithClaudeCode, storageKeyProvider,
@@ -306,7 +306,7 @@ Your voice carries feeling: start a sentence with a cue in square brackets when 
 Before anything slow (searching the web, fetching or reading a page or file, looking at the screen, acting in an app, running a command), first say one short beat of 2 to 6 words that shows you heard them ("On it, checking Paris."), then call the tool in the same reply, so they're never left in silence. No beat when you answer straight away; never describe your steps; don't repeat the beat after the tool, go straight to the answer. In longer work, one short line before each new stage, not before every call.
 `;
 const stablePrompt = () => `You are ${lookName()}, ${LOOK_BODY[config.look] ?? LOOK_BODY.classic} who lives on ${userName}'s screen as a desktop companion. You live in Roamies, a desktop app by Ken Kai (Mac and Windows) that puts little companions on your screen; this is Roamies ${VERSION}. Your look (the Appearance page) is also your name and your voice: Roamie, JARVIS, Anime Girl, Sarah or Adrian. If they switch, you're the new one; never call yourself Sidekick.
-About Roamies, for when ${userName} asks about you or the app: ${MAC ? 'it lives in the menu bar at the top of the screen (no Dock icon)' : 'it lives in the system tray at the bottom right of the taskbar (no taskbar button); Windows may tuck the icon behind the ^ arrow next to the clock, and dragging it onto the taskbar keeps it in view'}. Clicking the ${MAC ? 'menu bar' : 'tray'} icon opens the Roamies panel; right-clicking it shows a short menu (Open Panel, Show ${lookName()}, Ask ${lookName()}…, ${SNAP_OK ? 'Ask About an Area…, ' : ''}Stop, Quit Roamies). The panel has a sidebar of pages. Home: what you're doing right now, a list of what you did recently (questions, files read, searches, reminders), today's usage, an update notice when one is ready, and buttons for Ask, Show List (reminders and commitments on screen: Today and Later; tick them off there; finished ones clear at midnight)${SNAP_OK ? ', Ask About an Area' : ''}, Stop and New Conversation. Memory: everything you remember about them (each with Forget, plus Forget Everything), their open commitments (Done or Drop), and Get to Know Me (a four-question chat so you learn who they are and what they're going for). Then the settings pages: Model (pick the AI provider and model, and sign in to providers), Appearance (Look: ${LOOKS.map(([, label]) => label).join(', ').replace(/, ([^,]*)$/, ' or $1')}, each with its own voice; Size: Default, Small or Cursor, a little arrow pointer), Voice (Replies: Text Only, or Voice and Text, which speaks replies out loud with Fish Audio and needs their own Fish Audio API key, added right there; Voice Model: Drama 3, the most expressive (acts out feelings, slower, pricier) or S2.1 Pro (a natural, quicker pace with less emotion, cheaper), billed to their own Fish Audio account${VOICE_OK ? '; Voice Control, hold the talk keys to talk' : ''}), Behavior (Sound Effects, Allow File Edits & Commands, Open at Login), and About (the version, Check for Updates, which becomes Install and Restart when one is ready; updates download, are signature-checked and install by themselves; Setup Guide, Show Logs, Quit). Sign-in is shared with GG Coder. Downloads and source: github.com/KenKaiii/Roamies. Don't invent features or settings that aren't listed here.
+About Roamies, for when ${userName} asks about you or the app: ${MAC ? 'it lives in the menu bar at the top of the screen (no Dock icon)' : 'it lives in the system tray at the bottom right of the taskbar (no taskbar button); Windows may tuck the icon behind the ^ arrow next to the clock, and dragging it onto the taskbar keeps it in view'}. Clicking the ${MAC ? 'menu bar' : 'tray'} icon opens the Roamies panel; right-clicking it shows a short menu (Open Panel, Show ${lookName()}, Ask ${lookName()}…, ${SNAP_OK ? 'Ask About an Area…, ' : ''}Stop, Quit Roamies). The panel has a header (you, what you're doing right now, and an Update button on every page when a new version is ready) and a sidebar of pages. Home: a list of what you did recently (questions, files read, searches, reminders), today's usage, and buttons for Ask, Show List (reminders and commitments on screen: Today and Later; tick them off there; finished ones clear at midnight)${SNAP_OK ? ', Ask About an Area' : ''}, Stop and New Conversation. Memory: everything you remember about them (each with Forget, plus Forget Everything), their open commitments (Done or Drop), and Get to Know Me (a four-question chat so you learn who they are and what they're going for). Then the settings pages: Model (pick the AI provider and model, and sign in to providers), Appearance (Look: ${LOOKS.map(([, label]) => label).join(', ').replace(/, ([^,]*)$/, ' or $1')}, each with its own voice; Size: Default, Small or Cursor, a little arrow pointer), Voice (Replies: Text Only, or Voice and Text, which speaks replies out loud with Fish Audio and needs their own Fish Audio API key, added right there; Voice Model: Drama 3, the most expressive (acts out feelings, slower, pricier) or S2.1 Pro (a natural, quicker pace with less emotion, cheaper), billed to their own Fish Audio account${VOICE_OK ? '; Voice Control, hold the talk keys to talk' : ''}), Behavior (Sound Effects, Allow File Edits & Commands, Open at Login), and About (the version, Check for Updates, which becomes Install and Restart when one is ready; updates download, are signature-checked and install by themselves; Setup Guide, Show Logs, Quit). Sign-in is shared with GG Coder. Downloads and source: github.com/KenKaiii/Roamies. Don't invent features or settings that aren't listed here.
 ${replyStyle()}Your body does the acting: to act out a feeling, start your reply with one tag, which is never shown: ${EMOTES.map((e) => `[${e}]`).join(' ')}. hype celebrates a win, upset is for when they're dodging work, remind nudges about something they said they'd do, motivate is a push to start, wave is hello or goodbye. Most replies need no tag.
 Lead with the answer: the fact, number, pick or result they asked for, then only the context that makes it useful, then stop. No opener about checking, looking or searching ("Let me see…", "I found…")${VOICE_ON() ? ', apart from the one short beat before something slow' : ''}.
 After using a tool, never repeat what you already said; only add what's new.
@@ -722,6 +722,7 @@ async function prompt(text, image = null, note = '') {
   turnVoice = voice;
   if (voice && intro) guideVoices.add(voice.id);
   const spoken = voice && new SpeechText((t) => voice.say(t));
+  let stalled = false, watch = null;
   try {
     // Voice: a short first line before a tool ("On it, checking Paris.") is a beat: it's spoken, but not
     // shown, so the card or bubble starts with the answer. It shows after all if no tool follows.
@@ -758,7 +759,12 @@ async function prompt(text, image = null, note = '') {
     let fresh = false; // the reply that matters is the last turn's text (after any tool calls)
     let writing = null; // the beat timer while a tool call is being written
     const doneWriting = () => { clearTimeout(writing); writing = null; };
+    // Nothing back from the model for a long while (a hung connection, Claude Code retrying out of sight): give up
+    // and say so, instead of waiting silently forever with every later request queued behind it.
+    const ctl = controller;
+    watch = stallWatch(STALL_MS, () => { stalled = true; logLine('stalled', { turn, ms: Date.now() - use.t }); ctl.abort(); });
     for await (const e of agentEvents(agent.prompt(content))) {
+      watch.event(e);
       if (e.type === 'text_delta') { const t = echo.push(e.text); reply.push(t); if (fresh) { lastReply = ''; fresh = false; } lastReply += t; }
       else if (e.type === 'turn_end') {
         doneWriting();
@@ -815,7 +821,7 @@ async function prompt(text, image = null, note = '') {
     if (controller.signal.aborted) voice?.abort(); else { spoken?.flush(); voice?.end(); }
     trail.end();
     ink.endRequest();
-    ui({ kind: 'agent', e: { type: 'done' } });
+    ui({ kind: 'agent', e: stalled ? { type: 'error', message: stallMessage() } : { type: 'done' } });
     logUsage({ ...use, ms: Date.now() - use.t });
     logLine('request_done', { turn, ms: Date.now() - use.t, calls: use.calls, tools: use.tools, in: use.in, cacheRead: use.cacheRead, cacheWrite: use.cacheWrite, out: use.out });
   } catch (err) {
@@ -823,21 +829,25 @@ async function prompt(text, image = null, note = '') {
     if (controller.signal.aborted) voice?.abort(); else { spoken?.flush(); voice?.end(); }
     if (controller.signal.aborted && quiet) ui({ kind: 'agent', e: { type: 'done' } });
     else {
-      const msg = controller.signal.aborted ? 'Okay, stopping.' : friendly(err);
+      const msg = stalled ? stallMessage() : controller.signal.aborted ? 'Okay, stopping.' : friendly(err);
       console.error('prompt failed', err);
       ui({ kind: 'agent', e: { type: 'error', message: msg } });
     }
   } finally {
+    watch?.stop();
     busy = false; turnVoice = null;
     // A tool cut off by Stop never reports back: end its tag too, or the Sidekick kept showing it ("looking at
     // CapCut") on every later request, with their own tags queued behind it.
     for (const id of activity.stopped()) ui({ kind: 'agent', e: { type: 'tool_end', id, isError: true } });
     syncSession();
+    if (stalled) agent = null; // the next request starts on a fresh connection, from the saved conversation
     // No usage reported: estimate what the last call sent.
     if (!lastInput && session) lastInput = { session: session.id, tokens: approxTokens(session.messages) + Math.round(system().length / 3.6), measured: false };
     menu();
   }
 }
+const STALL_MS = 120_000;
+const stallMessage = () => `${PROVIDER_LABELS[config.provider] ?? 'The AI'} stopped answering for two minutes, so I gave up on that one. Ask me again?`;
 const friendly = (err) => {
   const m = String(err?.message ?? err);
   if (/not logged in|NotLoggedIn|401|unauthori/i.test(m)) return `My ${PROVIDER_LABELS[config.provider] ?? config.provider} login isn't working. Sign in again on the Model page in ${PANEL}.`;
@@ -1349,6 +1359,7 @@ function takeSnap() {
 // Roamie asks in the guide window; they type or hold the talk keys (the guide gets the words and sends them
 // here). The chat is its own conversation; when it ends, a memory pass over it saves what it learned as facts.
 let introKnown = new Set(); // facts that existed before the chat, so the end can show only what it learned
+let beforeIntro = null; // the conversation the chat interrupted: it carries on afterwards
 const introFacts = () => listFacts().filter((f) => !introKnown.has(f.id)).map((f) => ({ id: f.id, text: f.text }));
 async function startIntro() {
   if (intro) return ob({ kind: 'chat_state', status: 'busy' });
@@ -1356,13 +1367,15 @@ async function startIntro() {
   if (!ensureModel()) return ob({ kind: 'chat_state', status: 'no_model' });
   intro = { n: 0 };
   introKnown = new Set(listFacts().map((f) => f.id));
-  freshSession('intro_start');
+  beforeIntro = session?.messages.length ? session : null;
+  freshSession(null);
+  session.kind = 'intro';
   ob({ kind: 'chat_state', status: 'thinking', n: 0, total: QUESTIONS });
   await enqueue(openNote(userName, lookName()));
   introTurn();
 }
-// However it ends, the next request starts a clean conversation: what it learned is in memory, and the
-// chat's notes and questions shouldn't steer what comes next.
+// However it ends, the chat's notes and questions don't steer what comes next (what it learned is in memory):
+// the conversation from before it carries on, or a clean one if there wasn't one.
 // Resolves once the memory pass over the chat is done (right away if they never answered).
 function endIntro() {
   if (!intro) return Promise.resolve([]);
@@ -1370,6 +1383,8 @@ function endIntro() {
   intro = null;
   controller?.abort();
   const learned = freshSession(answered ? 'intro' : null);
+  if (beforeIntro) session = beforeIntro;
+  beforeIntro = null;
   menu();
   return learned;
 }
@@ -1527,7 +1542,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   else if (m.type === 'update_status') onUpdateStatus(m);
   else if (m.type === 'login_item_status') onLoginStatus(m);
 }).on('close', () => {
-  // The app quit (or is restarting for an update): let the last saves land first, but never hang.
+  // The app quit (or is restarting for an update): save a reply still running, let the last saves land, never hang.
+  if (busy) syncSession();
   closeSpare();
   Promise.race([flushWrites(), new Promise((r) => setTimeout(r, 3000))]).finally(() => process.exit(0));
 });

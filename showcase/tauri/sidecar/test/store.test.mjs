@@ -40,6 +40,19 @@ if (process.platform !== 'win32') assert.equal((fs.statSync(f).mode & 0o777).toS
 assert.equal(fs.readdirSync(path.join(dir, 'sessions')).some((n) => n.endsWith('.tmp')), false, 'no temp leftovers');
 assert.equal((await S.loadLatestSession()).id, s.id, 'a conversation quiet for days still resumes');
 
+// Regression: a Get to Know Me chat (newer) replaced the conversation it interrupted after a restart.
+{
+  const chat = { ...S.newSession('p', 'm'), id: '29991230-000000-intro1', kind: 'intro', messages: [{ role: 'user', content: 'hi' }] };
+  await S.saveSession(chat);
+  assert.equal((await S.loadLatestSession()).id, s.id, 'the conversation before the chat resumes, not the chat');
+  fs.unlinkSync(path.join(dir, 'sessions', `${chat.id}.json`));
+}
+// Regression: a reply still running when the app restarted (an update) wasn't saved.
+{
+  const side = fs.readFileSync(new URL('../sidekick.mjs', import.meta.url), 'utf8'), close = side.slice(side.indexOf(".on('close', () => {"));
+  assert.ok(/if \(busy\) syncSession\(\);[\s\S]*flushWrites\(\)/.test(close.slice(0, 400)), 'closing saves a running reply before flushing');
+}
+
 // corrupt newest session → skipped, kept aside, older one still loads
 const bad = path.join(dir, 'sessions', '29991231-235959-zzzzzz.json');
 fs.writeFileSync(bad, '{"version":1,"messa');

@@ -15,9 +15,8 @@
 
   let state = null, tab = 'home', deferred = false;
   // What's open in the panel itself: a key field (provider id or 'fish'), the row action waiting for its
-  // Confirm, and how far down the long lists it shows (a page at a time) and what the memory search holds.
-  const PAGE = 10, MORE = 20;
-  const ui = { key: null, kind: {}, arm: null, facts: PAGE, commits: PAGE, q: '', bindShown: new Set() };
+  // Confirm, each long list's page (pg) and how many rows fit on one (per, measured), Memory's tab and its search.
+  const ui = { key: null, kind: {}, arm: null, pg: {}, per: {}, mtab: 'facts', q: '', bindShown: new Set() };
   let armTimer = 0;
   const disarm = () => { clearTimeout(armTimer); if (ui.arm) { ui.arm = null; return true; } return false; };
 
@@ -125,20 +124,44 @@
     const now = $('now');
     now.replaceChildren(el('b', { textContent: s.text }), state.model ? ` · ${state.model.name}` : s.state === 'off' ? ' · Sign in on the Model page' : '');
     now.title = now.textContent;
-    // Updated in place (not rebuilt), so it keeps focus while the state changes under it.
-    const u = state.update, up = $('head-update');
-    up.hidden = !u.available;
-    if (u.available) {
-      up.textContent = u.installing ? 'Installing…' : u.page ? `Get ${u.available}` : `Update to ${u.available}`;
-      up.disabled = u.installing;
-      up.setAttribute('aria-label', u.installing ? `Installing Roamies ${u.available}` : u.page ? `Open the download page for Roamies ${u.available}` : `Install Roamies ${u.available} and restart`);
-    }
-    // The sidebar marks a page that needs you: an update to install, or no account to answer with.
-    mark('about', u.available ? 'update ready' : null);
+    $('ver').textContent = `v${state.version}`;
+    updateButton();
     react();
+    // The sidebar marks a page that needs you: no account to answer with.
     mark('model', s.state === 'off' ? 'not signed in' : null);
   }
-  $('head-update').addEventListener('click', () => act('install_update'));
+  // One button for updates, updated in place (not rebuilt) so it keeps focus: Check for updates, then Update to x
+  // (it downloads, installs and restarts), then Done. "Up to date" shows for a few seconds after a check.
+  const FRESH = 6000;
+  let freshTimer = 0;
+  function updateButton() {
+    const u = state.update, b = $('head-update'), v = u.available;
+    const fresh = u.result?.ok && Date.now() - (u.result.at ?? 0) < FRESH;
+    const [label, aria, kind, off] =
+      u.done ? ['Done', `Roamies ${u.done} is installed. Restarting`, 'ghost', true]
+      : u.installing ? ['Updating…', `Installing Roamies ${v}`, 'ghost', true]
+      : v ? (u.page ? [`Get ${v}`, `Open the download page for Roamies ${v}`, 'primary', false] : [`Update to ${v}`, `Install Roamies ${v} and restart`, 'primary', false])
+      : u.checking ? ['Checking…', 'Checking for updates', 'ghost', true]
+      : fresh ? ['Up to date', `Roamies ${state.version} is up to date`, 'ghost', true]
+      : u.result ? ['Check again', "Couldn't check for updates. Check again", 'ghost', false]
+      : ['Check for updates', 'Check for updates', 'ghost', false];
+    b.hidden = false; b.textContent = label; b.disabled = off;
+    b.className = `px btn mini ${kind}`;
+    b.setAttribute('aria-label', aria);
+    b.title = u.result && !u.result.ok && !v && !u.checking ? `Couldn't check: ${u.result.error ?? 'unknown error'}` : '';
+    clearTimeout(freshTimer);
+    if (fresh) freshTimer = setTimeout(() => state && updateButton(), FRESH - (Date.now() - u.result.at) + 50);
+  }
+  $('head-update').addEventListener('click', () => act(state?.update?.available ? 'install_update' : 'update'));
+  // Quit asks first: the first press turns it into Confirm for 4 s, the second quits.
+  const quitB = $('head-quit');
+  let quitTimer = 0;
+  const unarmQuit = () => { clearTimeout(quitTimer); quitB.setAttribute('aria-pressed', 'false'); quitB.setAttribute('aria-label', 'Quit Roamies'); };
+  quitB.addEventListener('click', () => {
+    if (quitB.getAttribute('aria-pressed') === 'true') { unarmQuit(); act('quit'); return; }
+    quitB.setAttribute('aria-pressed', 'true'); quitB.setAttribute('aria-label', 'Confirm: quit Roamies');
+    quitTimer = setTimeout(unarmQuit, 4000);
+  });
   function mark(page, why) {
     const b = $(`nav-${page}`);
     b.classList.toggle('flag', !!why);
@@ -221,7 +244,7 @@
   const QUIPS = { classic: 'Classic me!', jarvis: 'At your service.', anime: 'Yay, hi hi!', sarah: 'Hey, nice to meet you!', adrian: "Alright, let's do this." };
   let quipTimer = 0, seen = { look: null, update: null, opened: 0 };
   function quip(text, secs = 2.6) {
-    const q = $('saying'), n = $('now');
+    const q = $('saying'), n = $('by');
     clearTimeout(quipTimer);
     q.textContent = text; q.classList.add('on'); n.classList.add('quiet');
     quipTimer = setTimeout(() => { q.classList.remove('on'); n.classList.remove('quiet'); }, secs * 1000);
@@ -249,63 +272,115 @@
           state.snap ?? mac ? btn('Ask about an area', () => act('snap', true), { k: 'snap' }) : null,
           state.busy ? btn('Stop', () => act('stop'), { k: 'stop' }) : btn('New chat', () => act('new'), { k: 'new', disabled: !state.canNew, aria: 'Start a new conversation' }),
           mac ? null : btn(`Show ${state.name}`, () => act('show', true), { k: 'show' }))),
-      group('Recent', 'Newest first.', null,
-        state.recent.length
-          ? el('ul', { className: 'list' }, state.recent.map((r) => el('li', { className: `item ${r.kind}` },
-            el('span', { className: 'mark', 'aria-hidden': 'true' }),
-            el('span', { className: 'text', textContent: r.kind === 'ask' ? `“${r.text}”` : r.text, title: r.text }),
-            el('span', { className: 'meta', textContent: ago(r.at) }))))
-          : el('p', { className: 'empty', textContent: 'Nothing yet. Ask me something.' }),
-        state.usage ? el('p', { className: 'usage', textContent: `Today: ${state.usage.requests} request${state.usage.requests === 1 ? '' : 's'} · ${tokens(state.usage.tokens)} new tokens` }) : null),
+      recentList(),
+    ].flat();
+  }
+  function recentList() {
+    const { box, nav } = paged('recent', state.recent, (r) => el('li', { className: `item ${r.kind}` },
+      el('span', { className: 'mark', 'aria-hidden': 'true' }),
+      el('span', { className: 'text', textContent: r.kind === 'ask' ? `“${r.text}”` : r.text, title: r.text }),
+      el('span', { className: 'meta', textContent: ago(r.at) })), { label: 'Recent' });
+    return [
+      el('div', { className: 'group paged' }, el('div', { className: 'ghead' }, el('h2', { textContent: 'Recent' })), box),
+      foot(state.usage ? el('p', { className: 'usage', textContent: `Today: ${state.usage.requests} request${state.usage.requests === 1 ? '' : 's'} · ${tokens(state.usage.tokens)} tokens` }) : null, nav),
     ];
   }
 
+  // ---------------------------------------------------------------- pages of a long list
+  // As many rows as fit (measured after drawing, see fit()), the rest a page away with the arrows in the footer.
+  const EMPTY = 'Nothing yet…';
+  // pin: the index of a row that must stay in view (an open key field), whatever page that puts it on.
+  function paged(key, items, row, { label, empty = EMPTY, id, pin = -1 } = {}) {
+    const per = ui.per[key] ?? 8, pages = Math.max(1, Math.ceil(items.length / per));
+    if (pin >= 0) ui.pg[key] = Math.floor(pin / per);
+    const pg = ui.pg[key] = Math.min(Math.max(0, ui.pg[key] ?? 0), pages - 1);
+    const shown = items.slice(pg * per, pg * per + per);
+    const box = el('div', { className: 'pagebox', 'data-pager': key, id },
+      shown.length ? el('ul', { className: 'list', 'aria-label': label }, shown.map(row)) : el('p', { className: 'empty', textContent: empty }));
+    return { box, nav: pages > 1 ? pager(key, pg, pages, label) : null };
+  }
+  function pager(key, pg, pages, label) {
+    const go = (d) => {
+      ui.pg[key] = pg + d; disarm();
+      // Keep focus on an arrow that still works at the end of the list.
+      const edge = pg + d === 0 || pg + d === pages - 1;
+      refresh(`${key}:${edge ? (d < 0 ? 'next' : 'prev') : d < 0 ? 'prev' : 'next'}`);
+    };
+    return el('div', { className: 'pager', role: 'group', 'aria-label': `${label}: page ${pg + 1} of ${pages}` },
+      btn('‹', () => go(-1), { kind: 'ghost mini', k: `${key}:prev`, disabled: pg === 0, aria: 'Previous page' }),
+      el('span', { className: 'pnum', textContent: `${pg + 1} / ${pages}`, 'aria-hidden': 'true' }),
+      btn('›', () => go(1), { kind: 'ghost mini', k: `${key}:next`, disabled: pg === pages - 1, aria: 'Next page' }));
+  }
+  // The page's footer: something about the whole list on the left, the arrows on the right; none when both are empty.
+  const foot = (left, nav, id) => (left || nav ? el('div', { className: 'pfoot', id }, el('div', { className: 'pfoot-l' }, left), nav) : null);
+  // How many rows fit in each list's box now; true when that changed (so it's drawn again). An open row (a key
+  // field) takes its extra room off the page instead of setting the size of every row.
+  function fit() {
+    let changed = false;
+    for (const box of document.querySelectorAll(`#pane-${tab} .pagebox`)) {
+      const rows = [...box.querySelectorAll('.list > li')];
+      if (!rows.length || !box.clientHeight) continue;
+      const shut = rows.filter((r) => !r.classList.contains('open'));
+      const unit = Math.max(...(shut.length ? shut : rows).map((r) => r.offsetHeight));
+      const extra = rows.filter((r) => r.classList.contains('open')).reduce((n, r) => n + Math.max(0, r.offsetHeight - unit), 0);
+      const per = Math.max(3, Math.floor((box.clientHeight - extra) / unit));
+      if (per !== ui.per[box.dataset.pager]) { ui.per[box.dataset.pager] = per; changed = true; }
+    }
+    return changed;
+  }
+
   // ---------------------------------------------------------------- Memory
+  // Two tabs, What I remember and Commitments, each a page at a time; Get to know me at the end of the tab row.
   function memory() {
-    const f = state.facts, c = state.commitments;
+    const on = ui.mtab;
+    const tabBtn = (id, label) => el('button', {
+      className: 'tab', type: 'button', role: 'tab', id: `tab-${id}`, 'aria-selected': String(on === id), 'aria-controls': 'mem-panel', tabIndex: on === id ? 0 : -1, 'data-k': `tab-${id}`,
+      on: { click: () => { if (ui.mtab !== id) { ui.mtab = id; disarm(); render(`tab-${id}`); } } },
+    }, label);
     return [
-      group('What I remember', null, f.length,
-        f.length > PAGE ? el('div', { className: 'find' }, el('span', { className: 'px field' },
-          el('input', { type: 'search', id: 'find-facts', value: ui.q, placeholder: `Search ${f.length} memories`, 'aria-label': 'Search what I remember', autocomplete: 'off', spellcheck: false,
-            on: { input: (e) => { ui.q = e.target.value; ui.facts = PAGE; factList(); }, keydown: (e) => { if (e.key === 'Escape' && ui.q) { e.preventDefault(); e.stopPropagation(); e.target.value = ui.q = ''; factList(); } } } }))) : null,
-        el('div', { className: 'group', id: 'facts-box' }, factRows()),
-        el('div', { className: 'spread' },
-          btn('Get to know me', () => act('intro', true), { k: 'intro', disabled: state.intro }),
-          f.length ? armed('Forget everything', `Forget all ${f.length}`, 'forget-all', 'forgetall:yes', `Forget all ${f.length} things I remember`) : null)),
-      group('Commitments', null, c.length,
-        c.length
-          ? el('ul', { className: 'list' }, c.slice(0, ui.commits).map((x) => el('li', { className: 'item' },
-            el('span', { className: 'mark', 'aria-hidden': 'true' }),
-            el('span', { className: 'text', title: x.text }, x.text, x.when ? el('small', { className: x.overdue ? 'late' : '', textContent: x.overdue ? `Overdue · ${x.when}` : x.when }) : null),
-            el('span', { className: 'row-btns' },
-              link('Done', (e) => leave(e.currentTarget, `done:${x.id}`), { k: `done:${x.id}`, aria: `Done: ${x.text}` }),
-              armed('Drop', 'Confirm', `drop:${x.id}`, `drop:${x.id}`, `Drop: ${x.text}`)))))
-          : el('p', { className: 'empty', textContent: 'Nothing yet. Tell me your plans.' }),
-        c.length > ui.commits ? link(`Show ${Math.min(MORE, c.length - ui.commits)} more`, () => { ui.commits += MORE; render('more-commits'); }, { k: 'more-commits' }) : null),
+      el('div', { className: 'mhead' },
+        el('div', { className: 'tabs', role: 'tablist', 'aria-label': 'Memory' }, tabBtn('facts', 'What I remember'), tabBtn('commits', 'Commitments')),
+        link('Get to know me', () => act('intro', true), { k: 'intro', disabled: state.intro })),
+      ...(on === 'commits' ? commitList() : factList()),
     ];
   }
-  // The memory list, a page at a time; searching looks through all of it.
-  function factRows() {
+  function factList() {
     const f = state.facts, q = ui.q.trim().toLowerCase();
     const hits = q ? f.filter((x) => x.text.toLowerCase().includes(q)) : f;
-    const shown = hits.slice(0, ui.facts);
+    const { box, nav } = paged('facts', hits, (x) => el('li', { className: 'item' },
+      el('span', { className: 'mark', 'aria-hidden': 'true' }),
+      el('span', { className: 'text', textContent: x.text, title: x.text }),
+      armed('Forget', 'Confirm', `forget:${x.id}`, `forget:${x.id}`, `Forget: ${x.text}`)), { label: 'What I remember', empty: q ? `No match for "${ui.q.trim()}".` : EMPTY, id: 'facts-box' });
+    // Search once there's more than a page: it looks through all of them, and the pages follow the matches.
+    const search = f.length > (ui.per.facts ?? 8) || q ? el('div', { className: 'find' }, el('span', { className: 'px field' },
+      el('input', { type: 'search', id: 'find-facts', value: ui.q, placeholder: `Search ${f.length} memories`, 'aria-label': 'Search what I remember', autocomplete: 'off', spellcheck: false,
+        on: { input: (e) => { ui.q = e.target.value; ui.pg.facts = 0; refreshFacts(); }, keydown: (e) => { if (e.key === 'Escape' && ui.q) { e.preventDefault(); e.stopPropagation(); e.target.value = ui.q = ''; refreshFacts(); } } } }))) : null;
     return [
-      shown.length
-        ? el('ul', { className: 'list' }, shown.map((x) => el('li', { className: 'item' },
-          el('span', { className: 'mark', 'aria-hidden': 'true' }),
-          el('span', { className: 'text', textContent: x.text, title: x.text }),
-          armed('Forget', 'Confirm', `forget:${x.id}`, `forget:${x.id}`, `Forget: ${x.text}`))))
-        : el('p', { className: 'empty', textContent: q ? `Nothing matches "${ui.q.trim()}".` : 'Nothing yet. Tell me about yourself.' }),
-      hits.length > shown.length ? link(`Show ${Math.min(MORE, hits.length - shown.length)} more`, () => { ui.facts += MORE; factList('more-facts'); }, { k: 'more-facts', aria: `Show ${Math.min(MORE, hits.length - shown.length)} more of ${hits.length}` }) : null,
-    ].filter(Boolean);
+      el('div', { className: 'group paged', role: 'tabpanel', id: 'mem-panel', 'aria-labelledby': 'tab-facts' }, search, box),
+      foot(f.length ? armed('Forget everything', `Forget all ${f.length}`, 'forget-all', 'forgetall:yes', `Forget all ${f.length} things I remember`) : null, nav, 'facts-foot'),
+    ];
   }
-  // Searching or paging redraws just the list, so the search field keeps its focus and caret.
-  function factList(focusKey) {
-    const box = $('facts-box');
-    if (!box) return render(focusKey);
-    box.replaceChildren(...factRows());
-    if (focusKey) (box.querySelector(`[data-k="${focusKey}"]`) ?? $('find-facts'))?.focus();
+  // Searching redraws just the list and its footer, so the search field keeps its focus and caret.
+  function refreshFacts() {
+    const [panel, ft] = factList(), box = $('facts-box');
+    if (!box) return render();
+    box.replaceWith(panel.querySelector('#facts-box'));
+    const old = $('facts-foot');
+    if (old && ft) old.replaceWith(ft); else if (old) old.remove(); else if (ft) $('mem-panel').after(ft);
+    if (fit()) refreshFacts();
   }
+  function commitList() {
+    const { box, nav } = paged('commits', state.commitments, (x) => el('li', { className: 'item' },
+      el('span', { className: 'mark', 'aria-hidden': 'true' }),
+      el('span', { className: 'text', title: x.text }, x.text, x.when ? el('small', { className: x.overdue ? 'late' : '', textContent: x.overdue ? `Overdue · ${x.when}` : x.when }) : null),
+      el('span', { className: 'row-btns' },
+        link('Done', (e) => leave(e.currentTarget, `done:${x.id}`), { k: `done:${x.id}`, aria: `Done: ${x.text}` }),
+        armed('Drop', 'Confirm', `drop:${x.id}`, `drop:${x.id}`, `Drop: ${x.text}`))), { label: 'Commitments' });
+    const n = state.commitments.length;
+    return [el('div', { className: 'group paged', role: 'tabpanel', id: 'mem-panel', 'aria-labelledby': 'tab-commits' }, box), foot(n ? el('p', { className: 'usage', textContent: `${n} open` }) : null, nav)];
+  }
+  // A page arrow: the search field (if it has focus) is kept by redrawing only the list.
+  const refresh = (focusKey) => (tab === 'memory' && ui.mtab === 'facts' && document.activeElement?.id === 'find-facts' ? refreshFacts() : render(focusKey));
 
   // ---------------------------------------------------------------- Settings
   // A masked key field that opens in place. id: a provider, or 'fish'. kinds: the kinds of key it takes
@@ -336,19 +411,21 @@
       el('select', { 'aria-label': 'Model', 'data-k': 'model', on: { change: (e) => act(`model:${e.target.value}`) } },
         model ? null : el('option', { value: '', textContent: 'Pick a model', disabled: true, selected: true }),
         on.map((p) => el('optgroup', { label: p.label }, p.models.map((m) => el('option', { value: `${p.id}:${m.id}`, textContent: m.name, selected: `${p.id}:${m.id}` === model })))))) : null;
+    const accounts = state.providers.filter((p) => p.on || p.method);
+    const { box, nav } = paged('accounts', accounts, (p) => el('li', { className: `acct${ui.key === p.id ? ' open' : ''}` },
+      el('div', { className: 'setting' },
+        el('span', {}, p.label),
+        p.on ? el('span', { className: 'ok' }, el('span', { className: 'led on', 'aria-hidden': 'true' }), 'Signed in')
+          : state.loggingIn === p.id ? el('span', { className: 'waiting', textContent: 'Signing in…' })
+          : p.method === 'oauth' ? (p.key ? el('span', { className: 'links' }, signIn(p), addKey(p)) : signIn(p))
+          : addKey(p)),
+      p.on || !(p.method === 'key' || p.key) ? null : keyForm(p.id, p.label, (key, kind) => send({ type: 'panel_key', provider: p.id, kind, key }), p.kinds)),
+    { label: 'Accounts', pin: accounts.findIndex((p) => p.id === ui.key) });
     return [
       group('Model', 'Which AI answers you.', null,
         select ?? el('p', { className: 'empty', textContent: 'Sign in to an account below first.' })),
-      group('Accounts', 'Sign in to use their models.', null,
-        el('div', { className: 'group' }, state.providers.filter((p) => p.on || p.method).map((p) => [
-          el('div', { className: 'setting' },
-            el('span', {}, p.label),
-            p.on ? el('span', { className: 'ok' }, el('span', { className: 'led on', 'aria-hidden': 'true' }), 'Signed in')
-              : state.loggingIn === p.id ? el('span', { className: 'waiting', textContent: 'Signing in…' })
-              : p.method === 'oauth' ? (p.key ? el('span', { className: 'links' }, signIn(p), addKey(p)) : signIn(p))
-              : addKey(p)),
-          p.on || !(p.method === 'key' || p.key) ? null : keyForm(p.id, p.label, (key, kind) => send({ type: 'panel_key', provider: p.id, kind, key }), p.kinds),
-        ]).flat())),
+      el('div', { className: 'group paged' }, el('div', { className: 'ghead' }, el('h2', { textContent: 'Accounts' }), el('p', { textContent: 'Sign in to use their models.' })), box),
+      foot(null, nav),
     ];
   }
   function appearancePage() {
@@ -403,8 +480,7 @@
           el('span', { className: 'row-btns' },
             link(ui.key === 'fish' ? 'Cancel' : state.fishKey ? 'Change' : 'Add', () => { ui.key = ui.key === 'fish' ? null : 'fish'; render(ui.key ? 'key-fish' : 'addkey:fish'); }, { k: 'addkey:fish', aria: state.fishKey ? 'Change the Fish Audio key' : 'Add a Fish Audio key' }),
             state.fishKey && ui.key !== 'fish' ? armed('Remove', 'Confirm', 'fishkey-remove', 'fishkey_remove', 'Remove the Fish Audio key') : null)),
-        keyForm('fish', 'Fish Audio', (key) => send({ type: 'panel_fishkey', key })),
-        v ? toggle('Auto-listen', v.on ? 'Open the mic when I end on a question' : 'Needs Voice control on', v.autoListen, () => act('autolisten'), 'autolisten') : null),
+        keyForm('fish', 'Fish Audio', (key) => send({ type: 'panel_fishkey', key }))),
       v ? group('Talking to me', 'Speak instead of typing.', null,
         toggle('Voice control', v.download
           ? (v.download.status === 'downloading' ? `Downloading the voice model… ${v.download.pct}%` : v.download.status === 'error' ? 'The download failed' : `Needs a ${v.download.size} download`)
@@ -422,6 +498,7 @@
       group('Behavior', 'What I may do, and when I start.', null,
         toggle('Sound effects', null, state.sound, () => act('sound'), 'sound'),
         toggle('Allow file edits and commands', 'Change files and run commands', state.actions, () => act('actions'), 'actions'),
+        state.voice ? toggle('Auto-listen', state.voice.on ? 'Open the mic when I end on a question' : 'Needs Voice control on', state.voice.autoListen, () => act('autolisten'), 'autolisten') : null,
         state.login ? toggle('Open at login', null, state.login.on, () => act('login'), 'login') : null),
       b ? group('Shortcuts', 'Add these as custom shortcuts in your keyboard settings, with any keys you like.', null,
         BIND_ROWS.filter(([k]) => b[k]).map(([k, label]) => el('div', { className: 'setting' },
@@ -450,23 +527,16 @@
     return ken;
   }
   function aboutPage() {
-    const u = state.update;
     return [
       group('Made by', null, null, maker(),
         KEN.map(([label, hint, url, aria]) => el('div', { className: 'setting' },
           el('span', {}, label, el('small', { textContent: hint })),
           link('Open', () => send({ type: 'open_link', url }), { k: `ken-${label.toLowerCase()}`, aria })))),
-      group('Updates', null, null,
-        el('div', { className: 'setting' },
-          el('span', {}, `Roamies ${state.version}`, el('small', { className: u.result && !u.result.ok && !u.available ? 'late' : '', role: 'status',
-            textContent: u.available ? (u.page ? `${u.available} is out` : `${u.available} is ready to install`) : u.checking ? 'Checking for updates…' : u.result?.ok ? "You're up to date" : u.result ? "Couldn't check just now. Try again in a bit." : 'Updates install by themselves' })),
-          u.available ? null : link('Check now', () => act('update'), { k: 'update', disabled: u.checking, aria: 'Check for updates' })),
-        u.available ? btn(u.installing ? 'Installing…' : u.page ? `Get ${u.available}` : `Install ${u.available} and restart`, () => act('install_update'), { k: 'install-s', disabled: u.installing }) : null),
       group('Help', null, null,
         el('div', { className: 'links' },
           link('Setup guide', () => act('setup', true), { k: 'setup' }),
           link('Show logs', () => act('logs'), { k: 'logs' }),
-          link('Quit Roamies', () => act('quit'), { k: 'quit' }))),
+          link('Save diagnostics', () => act('diagnostics'), { k: 'diagnostics', aria: 'Save a diagnostics file to send when something goes wrong' }))),
     ];
   }
 
@@ -484,7 +554,10 @@
     const scroll = $('pane-' + tab).closest('.body').scrollTop;
     head();
     const pane = $(`pane-${tab}`);
-    pane.replaceChildren(...PANES[tab]().flat().filter(Boolean));
+    const draw = () => { pane.replaceChildren(...PANES[tab]().flat().filter(Boolean)); pane.classList.toggle('paged', !!pane.querySelector('.pagebox')); };
+    draw();
+    // Lists show as many rows as fit: drawn once to measure, again if a different number fits.
+    if (fit()) draw();
     pane.closest('.body').scrollTop = scroll;
     // Rows fill in one after another (a page's worth; the rest come with the last), only when it opens or
     // the tab changes, never on the updates that arrive while it's open.
@@ -497,6 +570,9 @@
     if (keep) (document.querySelector(`.pane [data-k="${CSS.escape(keep)}"]`) ?? document.getElementById(keep))?.focus();
   }
   document.addEventListener('focusout', (e) => { if (deferred && e.target.tagName === 'INPUT') setTimeout(() => deferred && render(), 0); });
+  // The window changes size with the screen it opens on: as many rows as fit there.
+  let resizeTimer = 0;
+  addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => state && render(), 120); });
 
   let noteTimer = 0;
   function note(text, bad = false) {
@@ -538,6 +614,13 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !e.defaultPrevented && tipFor) { e.preventDefault(); hideTip(); return; }
     if (e.key === 'Escape' && !e.defaultPrevented) { const was = ui.arm; if (ui.key || disarm()) { ui.key = null; render(was ?? undefined); } else hide(); return; }
+    const tl = e.target.closest?.('[role="tablist"]');
+    if (tl && (e.key === 'ArrowRight' || e.key === 'ArrowLeft')) {
+      e.preventDefault();
+      const all = [...tl.querySelectorAll('[role="tab"]')], i = all.indexOf(e.target);
+      all[(i + (e.key === 'ArrowRight' ? 1 : all.length - 1)) % all.length]?.click();
+      return;
+    }
     const g = e.target.closest?.('[role="radiogroup"]');
     if (!g || !['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp'].includes(e.key)) return;
     e.preventDefault();
@@ -571,19 +654,20 @@
     render(null, true);
   };
   window.__panelShut = () => {
-    disarm(); ui.key = null;
+    disarm(); ui.key = null; unarmQuit();
     body.classList.remove('opening');
     if (REDUCED.matches) { body.classList.add('shut'); return; }
     body.classList.add('shutting');
   };
   // A click anywhere else puts an armed Confirm back.
-  document.addEventListener('pointerdown', (e) => { if (ui.arm && !e.target.closest?.('.arm[aria-pressed="true"]')) { disarm(); render(); } }, true);
+  document.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest?.('#head-quit')) unarmQuit();
+    if (ui.arm && !e.target.closest?.('.arm[aria-pressed="true"]')) { disarm(); render(); }
+  }, true);
 
   window.__panel = (m) => {
     if (m.kind === 'state') {
       const first = !state; state = m.state;
-      // Forgetting shrinks the list: keep the page in range.
-      ui.facts = Math.max(PAGE, Math.min(ui.facts, state.facts.length)); ui.commits = Math.max(PAGE, Math.min(ui.commits, state.commitments.length));
       if (ui.arm && !document.querySelector(`[data-k="${CSS.escape(ui.arm)}"]`)) ui.arm = null;
       render(null, first);
     }
@@ -613,7 +697,7 @@
         { id: 'moonshot', label: 'Kimi (Moonshot)', on: false, method: 'key', models: [], kinds: [
           { id: 'kimi-code', label: 'Kimi Code', billing: 'Uses your Kimi Code plan. Create the key in the Kimi Code Console.' },
           { id: 'moonshot', label: 'Moonshot', billing: 'Pay-per-token from platform.moonshot.ai.' }] },
-        { id: 'openrouter', label: 'OpenRouter', on: false, method: 'key', models: [] },
+        ...['xAI', 'GLM (Z.ai)', 'MiniMax', 'Xiaomi', 'DeepSeek', 'Sakana', 'OpenRouter', 'Hugging Face'].map((label) => ({ id: label.toLowerCase().replace(/\W/g, ''), label, on: false, method: 'key', models: [] })),
       ],
       loggingIn: null,
       recent: [
@@ -643,8 +727,11 @@
       const things = ['Prefers short answers', 'Drinks oat flat whites', 'Works late on Thursdays', 'Has a cat called Miso', 'Training for a 10k in March', 'Learning Japanese', 'Uses Figma for design', 'Ships on Fridays', 'Allergic to peanuts', 'Sister is called Ana'];
       s.facts = Array.from({ length: 100 }, (_, i) => ({ id: `f${i}`, text: `${things[i % things.length]}${i >= things.length ? ` (${Math.floor(i / things.length) + 1})` : ''}` }));
       s.commitments = Array.from({ length: 14 }, (_, i) => ({ id: `c${i}`, text: `Follow up on item ${i + 1}`, when: 'Fri 7 Nov, 10:00', overdue: i < 2 }));
+      s.recent = Array.from({ length: 30 }, (_, i) => ({ ...s.recent[i % s.recent.length], at: at - i * 70e3 }));
     }
-    if (q.get('tab')) setTimeout(() => show(q.get('tab')), 0);
+    if (q.has('checking')) s.update.checking = true;
+    if (q.has('uptodate')) s.update.result = { ok: true, at: Date.now() + 60e3 };
+    if (q.get('tab')) setTimeout(() => { if (q.get('mtab')) ui.mtab = q.get('mtab'); show(q.get('tab')); }, 0);
     setTimeout(() => window.__panel({ kind: 'state', state: s }), 0);
     return async (cmd, args) => {
       if (cmd !== 'sidecar_send') return null;

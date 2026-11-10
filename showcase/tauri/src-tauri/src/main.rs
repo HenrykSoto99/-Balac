@@ -293,6 +293,50 @@ fn helper_perms(args: &[&str]) -> Value {
         .unwrap_or_else(|| json!({ "type": "perms", "error": true }))
 }
 
+/// What the shell knows for a diagnostics report (the sidecar writes it): screens, the tray icon, the panel, the
+/// webview, the helpers, and the voice helper's view of permissions and microphones.
+fn diagnostics(app: &AppHandle) -> Value {
+    let screens: Vec<Value> = app
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(|m| {
+            let (p, z, wa) = (m.position(), m.size(), m.work_area());
+            json!({ "name": m.name(), "at": [p.x, p.y], "size": [z.width, z.height], "scale": m.scale_factor(),
+                    "usable": [wa.position.x, wa.position.y, wa.size.width, wa.size.height] })
+        })
+        .collect();
+    let rect = |r: tauri::Rect| {
+        let (p, z) = (r.position.to_physical::<f64>(1.0), r.size.to_physical::<f64>(1.0));
+        json!([p.x, p.y, z.width, z.height])
+    };
+    let panel = app.get_webview_window(PANEL_LABEL).map(|w| {
+        json!({ "visible": w.is_visible().ok(), "at": w.outer_position().ok().map(|p| [p.x, p.y]),
+                "size": w.outer_size().ok().map(|s| [s.width, s.height]), "opens_upward": PANEL_FROM_BOTTOM.load(Ordering::SeqCst) })
+    });
+    let mut perms = helper_perms(&["--perms"]);
+    if cfg!(target_os = "macos") {
+        perms["accessibility"] = json!(accessibility(false));
+    }
+    // Windows and Linux: every microphone, the default one and the format it records in (voice-win --devices).
+    let mics = if cfg!(any(windows, target_os = "linux")) { helper_perms(&["--devices"]) } else { Value::Null };
+    json!({
+        "type": "diagnostics",
+        "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
+        "webview": tauri::webview_version().ok(),
+        "screens": screens,
+        "primary": app.primary_monitor().ok().flatten().and_then(|m| m.name().cloned()),
+        "tray_icon": app.tray_by_id("roamies").and_then(|t| t.rect().ok().flatten()).map(rect),
+        "panel": panel,
+        "windows": app.webview_windows().keys().cloned().collect::<Vec<_>>(),
+        "voice_helper": voice_binary().map(|p| p.exists()),
+        "hands_helper": helper_binary("roamies-hands").map(|p| p.exists()),
+        "voice_running": app.state::<Voice>().0.lock().map(|v| v.is_some()).unwrap_or(false),
+        "permissions": perms,
+        "microphones": mics,
+    })
+}
+
 /// Accessibility (reading and controlling other apps) is checked by the hands helper.
 fn accessibility(prompt: bool) -> &'static str {
     let Some(bin) = helper_binary("roamies-hands") else { return "unknown" };
@@ -1305,6 +1349,10 @@ fn handle_sidecar(app: &AppHandle, msg: Value) {
             }
         }
         Some("panel_show") => show_panel(app, None, false),
+        Some("diagnostics") => {
+            let app = app.clone();
+            thread::spawn(move || to_sidecar(&app, &diagnostics(&app)));
+        }
         // A drawing is on a window (or isn't any more): the voice helper reports clicks there that change the screen.
         Some("watch_clicks") => to_voice(app, &json!({ "cmd": "watch_clicks", "on": msg.get("on").and_then(Value::as_bool) == Some(true) })),
         Some("quit") => app.exit(0),

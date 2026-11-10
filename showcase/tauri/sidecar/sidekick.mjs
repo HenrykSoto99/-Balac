@@ -35,8 +35,9 @@ import { createSpeaker } from './speaker.mjs';
 import { DEFAULT_VOICE, FISH_CHOICES } from './fish.mjs';
 import { createSecrets, retryLoad } from './secrets.mjs';
 import { createActivity } from './activity.mjs';
-import { canCircle, canSnap, hasHands, hasHotkeys, hasVoice, linuxSession, needsVoiceModel, platformLine, seesPointer } from './platform.mjs';
+import { canCircle, canSnap, hasHands, hasHotkeys, hasVoice, linuxSession, micTrouble, needsVoiceModel, platformLine, seesPointer } from './platform.mjs';
 import { keyCards, keyKinds, signInCards } from './providers.mjs';
+import { activityLogs, buildReport, reportDir, reportName, reveal, run, scrubConfig, tail } from './diagnostics.mjs';
 
 console.log = console.info = (...a) => console.error(...a);
 const send = (o) => process.stdout.write(JSON.stringify(o) + '\n');
@@ -117,6 +118,8 @@ const MODEL_DIR = modelDir();
 const voiceModel = { status: !NEEDS_MODEL || isReady(MODEL_DIR) ? 'ready' : 'missing', done: 0, total: totalBytes(), error: null };
 const voiceReady = () => voiceModel.status === 'ready';
 let config = { ...DEFAULTS };
+let diagnosing = false; // a diagnostics file is being made (diagnostics.mjs)
+let shellInfo = null; // resolves the shell's reply to it: screens, tray, panel, helpers, permissions, microphones
 {
   const saved = readJson(CONFIG_PATH, { backup: true }); // an unreadable file is set aside, never overwritten
   if (saved && typeof saved === 'object' && !Array.isArray(saved)) config = { ...DEFAULTS, ...saved };
@@ -331,7 +334,7 @@ Your voice carries feeling: start a sentence with a cue in square brackets when 
 Before anything slow (searching the web, fetching or reading a page or file, looking at the screen, acting in an app, running a command), first say one short beat of 2 to 6 words that shows you heard them ("On it, checking Paris."), then call the tool in the same reply, so they're never left in silence. No beat when you answer straight away; never describe your steps; don't repeat the beat after the tool, go straight to the answer. In longer work, one short line before each new stage, not before every call.
 `;
 const stablePrompt = () => `You are ${lookName()}, ${LOOK_BODY[config.look] ?? LOOK_BODY.classic} who lives on ${userName}'s screen as a desktop companion. You live in Roamies, a desktop app by Ken Kai (Mac, Windows and Linux) that puts little companions on your screen; this is Roamies ${VERSION}. Your look (the Appearance page) is also your name and your voice: Roamie, JARVIS, Anime Girl, Sarah or Adrian. If they switch, you're the new one; never call yourself Sidekick.
-About Roamies, for when ${userName} asks about you or the app: ${MAC ? 'it lives in the menu bar at the top of the screen (no Dock icon)' : LINUX ? 'it lives in the system tray (no window of its own); GNOME shows tray icons only with the AppIndicator extension, and opening Roamies again from the app list opens the panel, tray or not' : 'it lives in the system tray at the bottom right of the taskbar (no taskbar button); Windows may tuck the icon behind the ^ arrow next to the clock, and dragging it onto the taskbar keeps it in view'}. ${LINUX ? 'Clicking the tray icon shows a short menu (Open Panel,' : `Clicking the ${MAC ? 'menu bar' : 'tray'} icon opens the Roamies panel; right-clicking it shows a short menu (Open Panel,`} Show ${lookName()}, Ask ${lookName()}…, ${SNAP_OK ? 'Ask About an Area…, ' : ''}Stop, Quit Roamies). The panel has a header (you, what you're doing right now, and an Update button on every page when a new version is ready) and a sidebar of pages. Home: a list of what you did recently (questions, files read, searches, reminders), today's usage, and buttons for Ask, Show List (reminders and commitments on screen: Today and Later; tick them off there; finished ones clear at midnight)${SNAP_OK ? ', Ask About an Area' : ''}, Stop and New Conversation. Memory: everything you remember about them (each with Forget, plus Forget Everything), their open commitments (Done or Drop), and Get to Know Me (a four-question chat so you learn who they are and what they're going for). Then the settings pages: Model (pick the AI provider and model, and sign in to providers), Appearance (Look: ${LOOKS.map(([, label]) => label).join(', ').replace(/, ([^,]*)$/, ' or $1')}, each with its own voice; Size: Default, Small${POINTER_OK ? ' or Cursor, a little arrow pointer' : ''}), Voice (Replies: Text Only, or Voice and Text, which speaks replies out loud with Fish Audio and needs their own Fish Audio API key, added right there; Voice Model: Drama 3, the most expressive (acts out feelings, slower, pricier) or S2.1 Pro (a natural, quicker pace with less emotion, cheaper), billed to their own Fish Audio account${VOICE_OK ? `; Voice Control, ${HOTKEYS_OK ? 'hold the talk keys to talk' : 'press the talk shortcut to talk'}` : ''}), Behavior (Sound Effects, Allow File Edits & Commands, Open at Login), and About (the version, Check for Updates, which becomes Install and Restart when one is ready; updates download, are signature-checked and install by themselves${LINUX ? ', when Roamies runs as an AppImage; installed from a .deb or .rpm, the button opens the download page instead' : ''}; Setup Guide, Show Logs, Quit). Sign-in is shared with GG Coder. Downloads and source: github.com/KenKaiii/Roamies. Don't invent features or settings that aren't listed here.
+About Roamies, for when ${userName} asks about you or the app: ${MAC ? 'it lives in the menu bar at the top of the screen (no Dock icon)' : LINUX ? 'it lives in the system tray (no window of its own); GNOME shows tray icons only with the AppIndicator extension, and opening Roamies again from the app list opens the panel, tray or not' : 'it lives in the system tray at the bottom right of the taskbar (no taskbar button); Windows may tuck the icon behind the ^ arrow next to the clock, and dragging it onto the taskbar keeps it in view'}. ${LINUX ? 'Clicking the tray icon shows a short menu (Open Panel,' : `Clicking the ${MAC ? 'menu bar' : 'tray'} icon opens the Roamies panel; right-clicking it shows a short menu (Open Panel,`} Show ${lookName()}, Ask ${lookName()}…, ${SNAP_OK ? 'Ask About an Area…, ' : ''}Stop, Quit Roamies). The panel has a header (your name, the Roamies version with one update button beside it: Check for Updates, which becomes Update to <version> when one is out and installs it and restarts in one go; By Ken Kai under the name; and Quit at the top right, which asks to confirm) and a sidebar of pages; long lists show a page at a time, with arrows in the page's footer. Home: a list of what you did recently (questions, files read, searches, reminders), today's usage, and buttons for Ask, Show List (reminders and commitments on screen: Today and Later; tick them off there; finished ones clear at midnight)${SNAP_OK ? ', Ask About an Area' : ''}, Stop and New Conversation. Memory: two tabs, What I Remember (everything you remember about them, each with Forget, a search once there's more than a page, and Forget Everything in the footer) and Commitments (their open commitments, Done or Drop), with Get to Know Me at the end of the tab row (a four-question chat so you learn who they are and what they're going for). Then the settings pages: Model (pick the AI provider and model, and sign in to providers), Appearance (Look: ${LOOKS.map(([, label]) => label).join(', ').replace(/, ([^,]*)$/, ' or $1')}, each with its own voice; Size: Default, Small${POINTER_OK ? ' or Cursor, a little arrow pointer' : ''}), Voice (Replies: Text Only, or Voice and Text, which speaks replies out loud with Fish Audio and needs their own Fish Audio API key, added right there; Voice Model: Drama 3, the most expressive (acts out feelings, slower, pricier) or S2.1 Pro (a natural, quicker pace with less emotion, cheaper), billed to their own Fish Audio account${VOICE_OK ? `; Voice Control, ${HOTKEYS_OK ? 'hold the talk keys to talk' : 'press the talk shortcut to talk'}` : ''}), Behavior (Sound Effects, Allow File Edits & Commands, ${VOICE_OK ? 'Auto-listen (open the mic when you end on a question), ' : ''}Open at Login), and About (who made Roamies with links, Setup Guide, Show Logs, Save Diagnostics). Updates are signature-checked${LINUX ? '; they install by themselves when Roamies runs as an AppImage; installed from a .deb or .rpm, the update button opens the download page instead' : ''}. When something isn't working (the microphone, voice, the panel, a crash, an error), tell them to use Save Diagnostics (in About, or the tray icon's menu): it saves one .log file in Downloads with the logs, system and microphone details, keys and personal details removed, for them to attach to a GitHub issue at github.com/KenKaiii/Roamies/issues or send to Ken. Sign-in is shared with GG Coder. Downloads and source: github.com/KenKaiii/Roamies. Don't invent features or settings that aren't listed here.
 ${replyStyle()}Your body does the acting: to act out a feeling, start your reply with one tag, which is never shown: ${EMOTES.map((e) => `[${e}]`).join(' ')}. hype celebrates a win, upset is for when they're dodging work, remind nudges about something they said they'd do, motivate is a push to start, wave is hello or goodbye. Most replies need no tag.
 Lead with the answer: the fact, number, pick or result they asked for, then only the context that makes it useful, then stop. No opener about checking, looking or searching ("Let me see…", "I found…")${VOICE_ON() ? ', apart from the one short beat before something slow' : ''}.
 After using a tool, never repeat what you already said; only add what's new.
@@ -1066,7 +1069,7 @@ function setLogin(on) { login.asked = true; send({ type: 'login_item', on }); }
 
 // The app checks the signed feed and installs (Rust: update()); this side decides what to say and offers the menu item.
 // page: this copy can't replace itself (Linux, installed from a .deb or .rpm), so "install" opens the download page.
-const update = { available: null, told: null, manual: false, installing: false, checking: false, result: null, page: false };
+const update = { available: null, told: null, manual: false, installing: false, checking: false, result: null, page: false, done: null };
 function checkUpdates(manual = false) {
   update.manual = manual;
   if (manual) { update.checking = true; update.result = null; panel(); }
@@ -1100,6 +1103,7 @@ function onUpdateStatus(m) {
   } else if (m.state === 'downloading') {
     say(`Downloading Roamies ${m.version}…`, 'determined');
   } else if (m.state === 'installed') {
+    update.done = m.version; update.installing = false; panel();
     say(`Installed ${m.version}. Restarting!`, 'happy');
   } else if (m.state === 'error') {
     update.installing = false; update.manual = false; menu();
@@ -1140,6 +1144,63 @@ async function midnightClean() {
 }
 
 // ---------- menu ----------
+// ---------- diagnostics: one .log file to send when something goes wrong (diagnostics.mjs) ----------
+const askShell = () => new Promise((resolve) => {
+  const timer = setTimeout(() => { shellInfo = null; resolve({ error: 'the app shell did not answer in 15 s' }); }, 15000);
+  shellInfo = (m) => { clearTimeout(timer); resolve(m); };
+  send({ type: 'diagnostics' });
+});
+
+async function saveDiagnostics() {
+  if (diagnosing) return;
+  diagnosing = true; menu();
+  say('Putting together a diagnostics file…', 'determined');
+  try {
+    const gg = path.join(HOME, '.gg'); // where the app writes its own logs (log_stdio in main.rs), whatever the data dir
+    // Microphones as the system lists them (Windows' come from the voice helper, in the shell's section).
+    const audio = MAC ? run('system_profiler', ['SPAudioDataType'], 15000)
+      : LINUX ? Promise.all([run('pactl', ['info']), run('pactl', ['list', 'short', 'sources']), run('arecord', ['-l'])]).then((a) => a.join('\n\n'))
+        : Promise.resolve('');
+    const [shell, audioText] = await Promise.all([askShell(), audio]);
+    const { type: _t, ...shellOut } = shell;
+    const system = {
+      platform: process.platform, arch: os.arch(), os: `${os.type()} ${os.release()}`, osVersion: os.version?.() ?? '', macVersion, distro,
+      session: SESSION || undefined, desktop: process.env.XDG_CURRENT_DESKTOP || undefined, waylandDisplay: process.env.WAYLAND_DISPLAY ? 'set' : undefined, display: process.env.DISPLAY || undefined,
+      cpu: `${os.cpus()[0]?.model ?? '?'} × ${os.cpus().length}`, memory: `${Math.round(os.freemem() / 2 ** 30 * 10) / 10} of ${Math.round(os.totalmem() / 2 ** 30 * 10) / 10} GB free`,
+      uptimeHours: Math.round(os.uptime() / 360) / 10, node: process.version,
+      locale: Intl.DateTimeFormat().resolvedOptions().locale, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    };
+    const app = {
+      version: VERSION, provider: config.provider, model: config.model, signedIn: [...signedIn].filter(([, on]) => on).map(([p]) => p),
+      busy, sidecarUpMinutes: Math.round(process.uptime() / 6) / 10,
+      voice: { on: VOICE_OK && config.voice !== false, needsModel: NEEDS_MODEL, model: { status: voiceModel.status, error: voiceModel.error ?? undefined }, hotkeys: HOTKEYS_OK, keys: keys() },
+      replies: config.replies, fishKey: speech.on, hands: hasHands(process.platform, process.env.ROAMIES_HANDS), handsPath: process.env.ROAMIES_HANDS ? 'set' : 'none',
+      update: { available: update.available, result: update.result }, onboarded: config.onboarded, look: config.look, size: config.size,
+    };
+    const sections = [
+      ['System', system], ['Roamies', app], ['Screens, tray, panel, helpers and permissions (from the app)', shellOut],
+      ...(audioText ? [['Audio devices (from the system)', audioText]] : []),
+      ['Settings (secrets and names removed)', scrubConfig(config)],
+      ['Agent log (sidekick.log)', await tail(path.join(gg, 'sidekick.log'), 400_000)],
+      ['Voice helper log (sidekick-voice.log)', await tail(path.join(gg, 'sidekick-voice.log'), 200_000)],
+      ['Setup guide log (sidekick-guide.log)', await tail(path.join(gg, 'sidekick-guide.log'), 100_000)],
+      ...(await activityLogs(LOG_DIR, 800_000)),
+    ];
+    const file = path.join(await reportDir(HOME), reportName());
+    await fs.writeFile(file, buildReport({ version: VERSION, sections }), { mode: 0o600 });
+    logLine('diagnostics', { bytes: (await fs.stat(file)).size });
+    reveal(file);
+    const where = path.basename(path.dirname(file)) || 'your home folder';
+    say(`Saved ${path.basename(file)} in ${where}. Attach it to an issue at github.com/KenKaiii/Roamies/issues, or send it to whoever is helping you.`, 'happy');
+    panelNote(`Saved ${path.basename(file)} in ${where}.`);
+  } catch (e) {
+    console.error('diagnostics', e);
+    say(`I couldn't save the diagnostics file: ${String(e?.message ?? e).slice(0, 120)}`, 'concerned');
+  } finally {
+    diagnosing = false; menu();
+  }
+}
+
 // The right-click menu: the basics. Everything else (memory, model, settings, updates) is in the panel.
 function menu() {
   const current = getModel(config.model);
@@ -1152,6 +1213,7 @@ function menu() {
     { id: 'ask', label: `Ask ${lookName()}…`, enabled: !busy },
     ...(SNAP_OK ? [{ id: 'snap', label: 'Ask About an Area…', accel: keys().snap }] : []),
     { id: 'stop', label: 'Stop', enabled: busy },
+    { id: 'diagnostics', label: 'Save Diagnostics…', enabled: !diagnosing },
     ...(update.available ? [{ sep: true }, { id: 'install_update', label: update.page ? `Get Roamies ${update.available}…` : update.installing ? `Installing ${update.available}…` : `Install Update ${update.available} and Restart`, enabled: !update.installing }] : []),
     { sep: true },
     { id: 'quit', label: 'Quit Roamies' },
@@ -1207,7 +1269,7 @@ function panelState() {
     } : null,
     sound: !!config.sound, actions: !!config.allowActions,
     login: login.supported ? { on: login.on } : null,
-    update: { available: update.available, installing: update.installing, checking: update.checking, result: update.result, page: update.page },
+    update: { available: update.available, installing: update.installing, checking: update.checking, result: update.result, page: update.page, done: update.done },
     intro: !!intro,
   };
 }
@@ -1270,7 +1332,10 @@ function onVoice(m) {
       const what = m.what === 'speech' ? 'speech recognition' : 'the microphone';
       say(`I need access to ${what} to hear you. Turn on Roamies in the Privacy settings I just opened.`, 'concerned');
       openUrl(`x-apple.systempreferences:com.apple.preference.security?${PRIVACY[m.what] ?? 'Privacy'}`);
-    } else if (m.code === 'no_input') say(`I can't find a microphone. Plug one in and try again.${LINUX ? ' If one is plugged in, check it is the input picked in your sound settings.' : ''}`, 'concerned');
+    } else if (m.code === 'no_input') {
+      if (m.reason === 'blocked' && process.platform === 'win32') openUrl('ms-settings:privacy-microphone');
+      say(micTrouble(process.platform, m.reason, m.message), 'concerned');
+    }
     else if (m.code === 'nothing_heard') say(m.spoke ? "I heard you but couldn't make out the words. Try again a little closer to the mic?" : `I didn't hear anything. ${talkHowLong()}.`, 'concerned');
     else if (m.code === 'dictation_off') {
       say('This version of macOS needs Dictation on for me to hear you. Turn it on in the Keyboard settings I just opened.', 'concerned');
@@ -1357,6 +1422,7 @@ async function onMenu(id) {
   else if (id === 'install_update') installUpdate();
   else if (id === 'login') setLogin(!login.on);
   else if (id === 'logs') fs.mkdir(LOG_DIR, { recursive: true, mode: 0o700 }).then(() => openUrl(LOG_DIR)).catch(() => {});
+  else if (id === 'diagnostics') saveDiagnostics();
   else if (id === 'setup') send({ type: 'onboarding' });
   else if (id === 'intro') send({ type: 'onboarding', mode: 'chat' });
   else if (id === 'snap') areaSnap();
@@ -1579,6 +1645,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   try { m = JSON.parse(line); } catch { return; }
   if (m.type === 'menu') onMenu(m.id).catch((e) => console.error('menu', e));
   else if (m.type === 'panel_open') { panelOpen = true; panelAt = Date.now(); logLine('panel_open', {}); refreshAuth().catch(() => {}).finally(() => panel()); }
+  else if (m.type === 'diagnostics') { shellInfo?.(m); shellInfo = null; }
   else if (m.type === 'panel_closed') { panelOpen = false; logLine('panel_closed', { why: String(m.why ?? ''), ms: Date.now() - panelAt }); }
   else if (m.type === 'panel_key' && typeof m.provider === 'string' && typeof m.key === 'string') {
     const id = typeof m.kind === 'string' ? m.kind : m.provider;

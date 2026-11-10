@@ -57,6 +57,12 @@ Everything lives in `~/.gg` (on Windows, `%USERPROFILE%\.gg`) and stays on your 
 | `sidekick/usage.jsonl`   | token counts and timings only, never content                                       |
 | `auth.json`              | your AI sign-ins, shared with GG Coder                                              |
 
+**Save Diagnostics** (the panel's About page, or the tray icon's menu) writes one `roamies-diagnostics-….log` file to
+your Downloads folder, only when you ask. It holds the logs above, your system and screen details, your microphones and
+permission states, and your settings. Keys, tokens, email addresses, names, your home folder and user name are removed
+first. Nothing is uploaded: it stays on your computer unless you choose to send it (for example by attaching it to a
+GitHub issue).
+
 Your Fish Audio key is kept in the macOS Keychain, encrypted with DPAPI on Windows, or in your desktop's keyring
 (through the Secret Service) on Linux.
 

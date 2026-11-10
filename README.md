@@ -29,11 +29,11 @@ voice, keeps track of what you said you'd do and nudges you when it's due.
 
 ## Why Roamies
 
-- **Talk, don't type.** Hold ⌃⌥ (Ctrl+Alt on Windows and Linux), say it, let go. Circle something with the cursor while you talk and it sees what you mean.
+- **Talk, don't type.** Hold ⌃⌥ (Ctrl+Alt on Windows and Linux), say it, let go. On macOS and Windows, circle something with the cursor while you talk and it sees what you mean.
 - **It talks back.** Spoken replies in its own voice, with real feeling, through [Fish Audio](https://fish.audio).
 - **It remembers.** What you said you'd do, reminders down to the second, and what matters to you.
 - **It draws on your screen.** Rings the exact button to click, walks you through each step, and sketches answers beside what you're reading.
-- **It does the clicking.** Opens apps, sites and files, and clicks or types in other apps for you.
+- **It does the clicking.** Opens apps, sites and files, and on macOS and Windows clicks or types in other apps for you.
 - **Your subscriptions.** Sign in with Claude or ChatGPT, or use an API key (Gemini, Grok, Kimi Code and more).
 
 | Pick your Roamie | What you get                                            |
@@ -67,24 +67,30 @@ clear it all in one go.
 
 ## Also included
 
-- **The Roamies panel:** click the menu bar or tray icon for what it's doing, what it remembers, and every setting.
+- **The Roamies panel:** click the menu bar or tray icon (on Linux, **Open Panel** in its menu) for what it's doing, what it remembers, and every setting.
 - **Safe by default:** file edits, commands and app control stay off until you turn them on, and risky steps always ask.
 - **Shows its work:** every tool plays its own animation, so you can see what it's doing.
 - **Where keys live:** your Fish Audio key stays in the macOS Keychain (encrypted with Windows DPAPI on Windows, in your desktop's keyring on Linux). AI sign-ins are stored in `~/.gg/auth.json`, shared with GG Coder.
-- **Out of the way:** no Dock or taskbar button, ⌃⌥S (Ctrl+Shift+S on Windows) shows or hides it, Esc stops a reply.
-- **Updates itself:** updates are signature-checked before they install, then it restarts itself. The Windows installer isn't code-signed yet, so SmartScreen warns the first time.
+- **Out of the way:** no Dock or taskbar button, a shortcut shows or hides it (see the table), Esc stops a reply.
+- **Updates itself:** updates are signature-checked before they install, then it restarts itself. The Windows installer isn't code-signed yet, so SmartScreen warns the first time. On Linux only the AppImage updates itself.
 - **Quick setup:** permissions, sign-in and a short chat so it gets to know you.
 
-|                        | macOS                      | Windows                     | Linux (beta)                     |
-| ---------------------- | -------------------------- | --------------------------- | -------------------------------- |
-| Talk to it             | Yes, best on macOS 26+     | Yes, speech runs on your PC | Yes, speech runs on your PC      |
-| Circle while talking   | Yes                        | Yes                         | No                               |
-| Spoken replies         | Yes, with a Fish Audio key | Yes, with a Fish Audio key  | Yes, with a Fish Audio key       |
-| Memory and reminders   | Yes                        | Yes                         | Yes                              |
-| Read windows and point | Yes                        | Yes                         | Points from screenshots only     |
-| Cards and diagrams     | Yes                        | Yes                         | Yes                              |
-| Click and type in apps | Yes                        | Yes                         | No                               |
-| Ask about an area      | Yes (⌃⌥A)                  | Yes (Ctrl+Shift+A)          | No                               |
+|                        | macOS                      | Windows                     | Linux (beta)                       |
+| ---------------------- | -------------------------- | --------------------------- | ---------------------------------- |
+| Talk to it             | Yes, best on macOS 26+     | Yes, speech runs on your PC | Yes, speech runs on your PC        |
+| Circle while talking   | Yes                        | Yes                         | No                                 |
+| Spoken replies         | Yes, with a Fish Audio key | Yes, with a Fish Audio key  | Yes, with a Fish Audio key         |
+| Memory and reminders   | Yes                        | Yes                         | Yes                                |
+| Read windows and point | Yes                        | Yes                         | Points from screenshots only       |
+| Cards and diagrams     | Yes                        | Yes                         | Yes                                |
+| Click and type in apps | Yes                        | Yes                         | No                                 |
+| Ask about an area      | Yes (⌃⌥A)                  | Yes (Ctrl+Shift+A)          | No                                 |
+| Show or hide           | ⌃⌥S                        | Ctrl+Shift+S                | Ctrl+Alt+S, or a key you bind\*    |
+| Talk shortcut          | Hold ⌃⌥                    | Hold Ctrl+Alt               | Hold Ctrl+Alt, or a key you bind\* |
+| Updates itself         | Yes                        | Yes                         | AppImage only                      |
+
+<sub>\* On Wayland (the default on Ubuntu, Fedora and KDE), apps can't grab keys, so you bind Roamies' commands to keys
+in your desktop's keyboard settings. [Linux (beta)](#linux-beta) shows how.</sub>
 
 <sub>Before macOS 26, talking uses Apple's older speech recognizer, which needs Siri or Dictation turned on.</sub>
 
@@ -123,7 +129,7 @@ Windows and Linux uses [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvid
    ./build.sh            # release bundle for this OS
    ```
 
-2. Open the app, follow the setup guide, pick your Roamie, and hold ⌃⌥ to say hi.
+2. Open the app, follow the setup guide, pick your Roamie, and hold ⌃⌥ (Ctrl+Alt on Windows and Linux) to say hi.
 
 <sub>The first time you sign in with Claude, Roamies downloads Claude Code (about 140 MB). On Windows and Linux, the voice model (about 670 MB) downloads once at setup.</sub>
 

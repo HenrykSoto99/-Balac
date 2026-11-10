@@ -46,6 +46,7 @@ jobs:
 
       - name: Check the workflows' inline node scripts
         if: runner.os == 'Linux'
+        working-directory: ${{ github.workspace }}
         run: node .github/scripts/check-inline-node.mjs
 
       # Tauri's Linux build dependencies (v2.tauri.app/start/prerequisites, Debian list).

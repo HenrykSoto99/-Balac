@@ -243,7 +243,7 @@ jobs:
               "darwin-x86_64": `Roamies_${VER}_x64.app.tar.gz`,
               "windows-x86_64": `Roamies_${VER}_x64-setup.exe`,
             };
-            // The Linux beta's leg may have failed: its AppImage is listed only when it and its signature are there.
+            // The Linux beta leg may have failed: its AppImage is listed only when it and its signature are there.
             const linux = `Roamies_${VER}_amd64.AppImage`;
             if (api[linux] && fs.existsSync("sigs/" + linux + ".sig")) platforms["linux-x86_64"] = linux;
             else console.log("No Linux AppImage on this release: latest.json leaves Linux out.");

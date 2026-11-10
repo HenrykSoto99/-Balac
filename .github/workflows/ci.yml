@@ -128,9 +128,11 @@ jobs:
           done
           shaped=false
           if $started; then
-            for _ in 1 2; do
+            # A cold runner can take a while to draw the first frame: wait up to 30 s, asking again halfway.
+            for i in $(seq 30); do
               grep -q 'hit rects: \[(' "$RUNNER_TEMP/app.log" && break
-              src-tauri/target/debug/roamies --summon; sleep 3
+              if [ "$i" = 1 ] || [ "$i" = 16 ]; then src-tauri/target/debug/roamies --summon; fi
+              sleep 1
             done
             grep -q 'hit rects: \[(' "$RUNNER_TEMP/app.log" && shaped=true
           fi

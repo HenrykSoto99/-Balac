@@ -6,6 +6,8 @@
   <img src="docs/art/hero.gif" alt="Roamies: JARVIS, a glowing globe of LED dots, ripples as it says &quot;At your service.&quot; beside a mouse cursor, while Roamie, Anime Girl, Sarah and Adrian wave and hop on either side">
 </p>
 
+> **Balac:** esta copia adapta la experiencia de escritorio y la variante JARVIS del proyecto original con el nombre Balac. Consulta [BALAC.md](BALAC.md) y [INSTALL-BALAC.md](INSTALL-BALAC.md) para compilarla.
+
 <p align="center">
   <strong>A little buddy that lives on your screen and keeps you on track.</strong>
 </p>

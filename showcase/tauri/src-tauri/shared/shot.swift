@@ -13,7 +13,7 @@ enum Shot {
     /// A Roamies process: run from the same folder as this helper, or the app itself.
     static func isOurs(_ pid: pid_t) -> Bool {
         if pid == getpid() || pid == getppid() { return true }
-        if NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.kenkai.roamies" { return true }
+        if NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == "com.balac.desktop" { return true }
         var buf = [CChar](repeating: 0, count: 4096)
         guard proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else { return false }
         return URL(fileURLWithPath: String(cString: buf)).resolvingSymlinksInPath().deletingLastPathComponent().path == ourDir

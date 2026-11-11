@@ -30,7 +30,7 @@
     "macOS": {
       "minimumSystemVersion": "13.5"
     },
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "externalBin": [
       "binaries/node"
     ]

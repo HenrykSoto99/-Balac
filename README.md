@@ -63,7 +63,9 @@ says the step out loud and waits for your click before showing the next one.
 
 Ask about whatever you're looking at. JARVIS sketches the answer right beside it while it talks: cards, graphs,
 timelines, photos, molecules and turning 3D models, all in its own glowing ink. Ask it to change any part, or
-clear it all in one go.
+clear it all in one go. It also picks the picture that fits the question by itself: flow diagrams, tables, bar
+charts, maps, worked maths, geometry figures, photos with their parts named, 3D models whose parts move, and
+quizzes you answer with a click.
 
 ## Also included
 

@@ -51,6 +51,6 @@ for (const k of ['bars (bars [{label, value, tone}], unit)', 'table (columns [he
 assert.match(drawText, /only after see_photo has shown you that same picture/, 'labels come after a look');
 // A quiz answered on screen reaches the model with the next message, once, and never from an older conversation.
 assert.match(side, /m\.type === 'quiz_done'\) onQuizDone\(/, 'the overlay reports a finished quiz');
-assert.match(side, /const quiz = takeQuizNote\(\);\n\s*const stamped = `\[\$\{stampNow\(\)\}\] \$\{text\}\$\{quiz \? `\\n\(\$\{quiz\}\)` : ''\}`;/, 'the score rides along with their next message');
+assert.match(side, /const quiz = takeQuizNote\(\);\s*const stamped = `\[\$\{stampNow\(\)\}\] \$\{text\}\$\{quiz \? `\\n\(\$\{quiz\}\)` : ''\}`;/, 'the score rides along with their next message');
 assert.match(side, /newSession\(config\.provider, config\.model\); liveBlocks\.clear\(\); agent = null; pendingFold = null; lastInput = null; quizDone = null;/, 'a new conversation drops it');
 console.log('prompt tests: passed');

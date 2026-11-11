@@ -16,10 +16,10 @@ jobs:
         working-directory: showcase/tauri
     steps:
       - name: Checkout Balac
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -47,7 +47,7 @@ jobs:
         run: ./build.sh release --target x86_64-pc-windows-msvc
 
       - name: Upload Balac installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Balac-Windows-x64-installer
           path: showcase/tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
